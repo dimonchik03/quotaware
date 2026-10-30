@@ -34,3 +34,32 @@ Detailed rules live in `.claude/rules`. The short version:
 - No code comments. If something needs explaining, rename it, extract it or write an ADR.
 - Fail loudly: no swallowed errors, no silent fallbacks.
 - Dependencies point inward: the domain never imports infrastructure.
+
+## Commands
+
+- Build: `go build ./...`
+- Unit tests, narrow first: `go test ./internal/headroom/`, then `go test -p 2 ./...`
+- Race check before a pull request: `go test -race -p 2 ./...`
+- Lint: `golangci-lint run`
+- Format: `gofmt -l -w .` (the Claude Code hook applies it on every edited Go file)
+- Demo and benchmark: `make demo`, `make bench` (available from milestones 3 and 4)
+
+Never run two heavy commands (tests, lint, kind) at the same time on this machine.
+
+## Layout
+
+    cmd/quotaware/      entry point and subcommands: proxy, scaler, all, simulate
+    internal/headroom/  domain: the ceiling algorithm, pure functions
+    internal/aimd/      domain: congestion-control fallback, pure functions
+    internal/state/     application: per-bucket state, EWMA, staleness
+    internal/headers/   adapter: provider header parsers with fixtures
+    internal/proxy/     adapter: transparent reverse proxy and usage extraction
+    internal/scaler/    adapter: KEDA ExternalScaler over gRPC
+    internal/metrics/   adapter: Prometheus registry
+    deploy/             Helm chart, ScaledObject examples, Grafana dashboard
+    bench/              fake provider, producer, worker, kind and Prometheus configs, plots, results
+    docs/               SPEC.md, design.md, adr/, benchmark.md
+
+Dependencies point inward: domain imports nothing from the repository, application
+imports the domain, adapters import application and domain and never each other.
+Full description and milestones: `docs/SPEC.md`.
