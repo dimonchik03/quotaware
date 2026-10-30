@@ -9,3 +9,7 @@ Thumbs.db
 *.swp
 CLAUDE.local.md
 .claude/settings.local.json
+*.local.md
+/bin/
+/dist/
+coverage.out
