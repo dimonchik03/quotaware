@@ -8,9 +8,9 @@ import (
 
 func TestRun(t *testing.T) {
 	t.Run("prints usage and exits with 2 when no command is given", func(t *testing.T) {
-		var stderr bytes.Buffer
+		var stdout, stderr bytes.Buffer
 
-		code := run(nil, &stderr)
+		code := run(nil, strings.NewReader(""), &stdout, &stderr)
 
 		if code != 2 {
 			t.Fatalf("exit code = %d, want 2", code)
@@ -21,9 +21,9 @@ func TestRun(t *testing.T) {
 	})
 
 	t.Run("names the unknown command and exits with 2", func(t *testing.T) {
-		var stderr bytes.Buffer
+		var stdout, stderr bytes.Buffer
 
-		code := run([]string{"launch"}, &stderr)
+		code := run([]string{"launch"}, strings.NewReader(""), &stdout, &stderr)
 
 		if code != 2 {
 			t.Fatalf("exit code = %d, want 2", code)

@@ -22,6 +22,28 @@ every response; nothing wires them to the autoscaler.
 3. `quotaware scaler` serves that ceiling to KEDA over gRPC; a `scalingModifiers`
    formula takes the minimum of your queue trigger and the ceiling.
 
+## Try it without a cluster
+
+`quotaware simulate` replays a JSONL file of observations through the headroom
+algorithm and prints the replica ceiling it would report for each one:
+
+    go run ./cmd/quotaware simulate -concurrency 4 -max 40 -input cmd/quotaware/testdata/observations.jsonl
+
+    at                    ceiling  reason    allowed_rate  pod_rate
+    2026-11-01T18:00:00Z  4        headroom  8.36          2.00
+    2026-11-01T18:00:20Z  3        headroom  7.44          2.00
+    2026-11-01T18:00:55Z  3        headroom  6.80          2.00
+    2026-11-01T18:00:59Z  3        drain     0.00          2.00
+    2026-11-01T18:01:05Z  4        headroom  8.50          2.00
+    2026-11-01T18:04:00Z  4        frozen    0.00          0.00
+
+Each input line is one observation of a bucket: limits, remaining and reset for
+requests and tokens, tokens per call, latency and calls in flight. The reason column
+says which rule produced the number: the headroom formula, a `max-step-up` cap on
+raises, the drain guard that keeps pods alive for calls in flight, a frozen ceiling
+for stale observations, or the default when nothing usable was observed. Run with
+`-h` for every knob.
+
 ## Planned usage
 
     make demo        # kind cluster, KEDA, fake provider, workers, quotaware
@@ -36,7 +58,9 @@ Not a gateway, not a rate limiter, not a cost dashboard. See `docs/SPEC.md`.
 
 ## Status
 
-v0.1 in progress. Specification in `docs/SPEC.md`, decisions in `docs/adr`.
+v0.1 in progress. Milestone 1 (header parsers, headroom algorithm, `simulate`) is
+done; the proxy, the scaler and the benchmark follow. Specification in `docs/SPEC.md`,
+decisions in `docs/adr`.
 
 ## License
 
