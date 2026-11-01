@@ -4,7 +4,7 @@ services:
       context: .
       args:
         CMD: ./bench/cmd/fakeprovider
-    command: ["-listen", ":8081", "-rpm", "30", "-tpm", "50000", "-latency", "100ms", "-jitter", "20ms", "-seed", "1"]
+    command: ["-listen", ":8081", "-rpm", "3", "-tpm", "50000", "-latency", "100ms", "-jitter", "20ms", "-seed", "1"]
 
   proxy:
     build:

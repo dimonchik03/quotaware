@@ -29,8 +29,8 @@ func waitUntilReady(t *testing.T, proxyURL, adminURL string) {
 		health, err := client.Get(adminURL + "/healthz")
 		if err == nil {
 			_ = health.Body.Close()
-			response, body := post(t, proxyURL+"/v1/chat/completions", "sk-ready", `{"model":"readiness-probe","messages":[]}`)
-			if response.StatusCode == http.StatusOK && strings.Contains(body, "usage") {
+			response, body, err := post(proxyURL+"/v1/chat/completions", "sk-ready", `{"model":"readiness-probe","messages":[]}`)
+			if err == nil && response.StatusCode == http.StatusOK && strings.Contains(body, "usage") {
 				return
 			}
 		}
@@ -39,25 +39,33 @@ func waitUntilReady(t *testing.T, proxyURL, adminURL string) {
 	t.Fatal("proxy and fake provider did not become ready in time")
 }
 
-func post(t *testing.T, target, credential, body string) (*http.Response, string) {
-	t.Helper()
+func post(target, credential, body string) (*http.Response, string, error) {
 	request, err := http.NewRequest(http.MethodPost, target, strings.NewReader(body))
 	if err != nil {
-		t.Fatal(err)
+		return nil, "", err
 	}
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Authorization", "Bearer "+credential)
 	request.Header.Set("x-api-key", credential)
 	response, err := client.Do(request)
 	if err != nil {
-		return &http.Response{StatusCode: 0}, ""
+		return nil, "", err
 	}
 	defer func() { _ = response.Body.Close() }()
 	raw, err := io.ReadAll(response.Body)
 	if err != nil {
+		return nil, "", err
+	}
+	return response, string(raw), nil
+}
+
+func mustPost(t *testing.T, target, credential, body string) (*http.Response, string) {
+	t.Helper()
+	response, raw, err := post(target, credential, body)
+	if err != nil {
 		t.Fatal(err)
 	}
-	return response, string(raw)
+	return response, raw
 }
 
 func metrics(t *testing.T, adminURL string) string {
@@ -107,16 +115,16 @@ func TestProxyAgainstTheFakeProvider(t *testing.T) {
 	waitUntilReady(t, proxyURL, adminURL)
 
 	t.Run("a chat completion is answered with provider headers and observed in the metrics", func(t *testing.T) {
-		response, body := post(t, proxyURL+"/v1/chat/completions", "sk-e2e", `{"model":"gpt-4.1-mini","messages":[{"role":"user","content":"hello"}]}`)
+		response, body := mustPost(t, proxyURL+"/v1/chat/completions", "sk-e2e", `{"model":"gpt-4.1-mini","messages":[{"role":"user","content":"hello"}]}`)
 
 		if response.StatusCode != http.StatusOK || !strings.Contains(body, `"usage"`) {
 			t.Fatalf("status = %d, body = %s", response.StatusCode, body)
 		}
-		if response.Header.Get("x-ratelimit-limit-requests") != "30" {
+		if response.Header.Get("x-ratelimit-limit-requests") != "3" {
 			t.Fatalf("headers = %v, want the fake provider limits passed through", response.Header)
 		}
 		exposition := metrics(t, adminURL)
-		if remaining := metricValue(t, exposition, "quotaware_remaining_requests", `provider="openai"`, `model="gpt-4.1-mini"`); remaining >= 30 {
+		if remaining := metricValue(t, exposition, "quotaware_remaining_requests", `provider="openai"`, `model="gpt-4.1-mini"`); remaining >= 3 {
 			t.Fatalf("remaining requests = %v, want it below the limit after a call", remaining)
 		}
 		if tokens := metricValue(t, exposition, "quotaware_tokens_per_call", `provider="openai"`, `model="gpt-4.1-mini"`); tokens <= 0 {
@@ -128,7 +136,7 @@ func TestProxyAgainstTheFakeProvider(t *testing.T) {
 	})
 
 	t.Run("an Anthropic stream passes through and its usage is captured", func(t *testing.T) {
-		response, body := post(t, proxyURL+"/v1/messages", "sk-ant-e2e", `{"model":"claude-sonnet-4-5","max_tokens":64,"stream":true,"messages":[{"role":"user","content":"hello"}]}`)
+		response, body := mustPost(t, proxyURL+"/v1/messages", "sk-ant-e2e", `{"model":"claude-sonnet-4-5","max_tokens":64,"stream":true,"messages":[{"role":"user","content":"hello"}]}`)
 
 		if response.StatusCode != http.StatusOK || !strings.Contains(body, "event: message_stop") {
 			t.Fatalf("status = %d, body = %s", response.StatusCode, body)
@@ -144,14 +152,14 @@ func TestProxyAgainstTheFakeProvider(t *testing.T) {
 
 	t.Run("429s are counted once the request limit is exhausted and no call stays in flight", func(t *testing.T) {
 		limited := 0
-		for range 35 {
-			response, _ := post(t, proxyURL+"/v1/chat/completions", "sk-burst", `{"model":"gpt-4.1","messages":[{"role":"user","content":"burst"}]}`)
+		for range 20 {
+			response, _ := mustPost(t, proxyURL+"/v1/chat/completions", "sk-burst", `{"model":"gpt-4.1","messages":[{"role":"user","content":"burst"}]}`)
 			if response.StatusCode == http.StatusTooManyRequests {
 				limited++
 			}
 		}
-		if limited == 0 {
-			t.Fatal("expected at least one 429 from 35 calls against a limit of 30 per minute")
+		if limited < 10 {
+			t.Fatalf("limited = %d, want at least 10 of 20 calls rejected by a limit of 3 per minute, whatever the window boundary", limited)
 		}
 
 		exposition := metrics(t, adminURL)
