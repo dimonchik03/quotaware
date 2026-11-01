@@ -1,0 +1,22 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: llm-workers
+  namespace: quotaware-demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: llm-workers
+  template:
+    metadata:
+      labels:
+        app: llm-workers
+    spec:
+      containers:
+        - name: worker
+          image: registry.k8s.io/pause:3.10
+          resources:
+            requests:
+              cpu: 1m
+              memory: 8Mi

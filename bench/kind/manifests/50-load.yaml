@@ -1,0 +1,48 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: seed-queue
+  namespace: quotaware-demo
+spec:
+  backoffLimit: 2
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: seed
+          image: redis:7-alpine
+          command: ["sh", "-c", "for i in $(seq 1 200); do redis-cli -h redis lpush jobs job-$i > /dev/null; done; redis-cli -h redis llen jobs"]
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: load
+  namespace: quotaware-demo
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: load
+          image: curlimages/curl:8.11.1
+          command:
+            - sh
+            - -c
+            - |
+              end=$(( $(date +%s) + ${DURATION_SECONDS} ))
+              loop() {
+                while [ "$(date +%s)" -lt "$end" ]; do
+                  curl -s -o /dev/null -w '%{http_code}\n' http://quotaware:8080/v1/chat/completions \
+                    -H 'Authorization: Bearer sk-demo' -H 'Content-Type: application/json' \
+                    -d '{"model":"gpt-4.1-mini","messages":[{"role":"user","content":"demo"}]}'
+                  sleep 1
+                done
+              }
+              for i in $(seq 1 ${CONCURRENCY}); do loop & done
+              wait
+          env:
+            - name: DURATION_SECONDS
+              value: "240"
+            - name: CONCURRENCY
+              value: "40"
