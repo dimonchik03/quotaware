@@ -3,7 +3,9 @@ package proxy
 import (
 	"bufio"
 	"bytes"
+	"compress/gzip"
 	"encoding/json"
+	"io"
 	"strings"
 
 	"github.com/dimonchik03/quotaware/internal/headers"
@@ -86,4 +88,23 @@ func mergeAnthropicEvent(merged *usagePayload, payload []byte) bool {
 		return true
 	}
 	return false
+}
+
+func decompress(encoding string, body []byte, limit int64) ([]byte, bool) {
+	switch strings.ToLower(strings.TrimSpace(encoding)) {
+	case "":
+		return body, true
+	case "gzip":
+		reader, err := gzip.NewReader(bytes.NewReader(body))
+		if err != nil {
+			return nil, false
+		}
+		decoded, err := io.ReadAll(io.LimitReader(reader, limit+1))
+		if err != nil || int64(len(decoded)) > limit {
+			return nil, false
+		}
+		return decoded, true
+	default:
+		return nil, false
+	}
 }

@@ -1,12 +1,18 @@
 package proxy_test
 
 import (
+	"bufio"
+	"compress/gzip"
+	"context"
 	"encoding/json"
+	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -18,14 +24,19 @@ import (
 var start = time.Date(2026, 11, 1, 18, 0, 0, 0, time.UTC)
 
 type clock struct {
+	mu  sync.Mutex
 	now time.Time
 }
 
 func (c *clock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	return c.now
 }
 
 func (c *clock) Advance(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.now = c.now.Add(d)
 }
 
@@ -33,6 +44,7 @@ type harness struct {
 	front *httptest.Server
 	store *state.Store
 	clock *clock
+	logs  *strings.Builder
 }
 
 func newHarness(t *testing.T) *harness {
@@ -44,12 +56,17 @@ func newHarness(t *testing.T) *harness {
 	cfg.Latency = 1500 * time.Millisecond
 	cfg.Jitter = 0
 	cfg.OutputTokens = 5
-	upstream := httptest.NewServer(fakeprovider.New(cfg, c.Now, c.Advance))
-	t.Cleanup(upstream.Close)
-	return newHarnessWithUpstream(t, c, upstream.URL)
+	return newHarnessWithHandler(t, c, fakeprovider.New(cfg, c.Now, c.Advance), 0)
 }
 
-func newHarnessWithUpstream(t *testing.T, c *clock, upstream string) *harness {
+func newHarnessWithHandler(t *testing.T, c *clock, upstream http.Handler, captureLimit int64) *harness {
+	t.Helper()
+	server := httptest.NewServer(upstream)
+	t.Cleanup(server.Close)
+	return newHarnessWithUpstream(t, c, server.URL, captureLimit)
+}
+
+func newHarnessWithUpstream(t *testing.T, c *clock, upstream string, captureLimit int64) *harness {
 	t.Helper()
 	target, err := url.Parse(upstream)
 	if err != nil {
@@ -59,34 +76,47 @@ func newHarnessWithUpstream(t *testing.T, c *clock, upstream string) *harness {
 	if err != nil {
 		t.Fatal(err)
 	}
+	logs := &strings.Builder{}
 	cfg := proxy.DefaultConfig()
 	cfg.OpenAI, cfg.Anthropic = target, target
 	cfg.MaxRequestBytes = 1024
+	cfg.Logger = slog.New(slog.NewTextHandler(logs, nil))
+	if captureLimit > 0 {
+		cfg.MaxCaptureBytes = captureLimit
+	}
 	p, err := proxy.New(cfg, store, c.Now)
 	if err != nil {
 		t.Fatal(err)
 	}
 	front := httptest.NewServer(p)
 	t.Cleanup(front.Close)
-	return &harness{front: front, store: store, clock: c}
+	return &harness{front: front, store: store, clock: c, logs: logs}
 }
 
-func (h *harness) post(t *testing.T, path, credential, body string) (*http.Response, string) {
+func (h *harness) request(t *testing.T, ctx context.Context, path, credential, body string) *http.Response {
 	t.Helper()
-	request, err := http.NewRequest(http.MethodPost, h.front.URL+path, strings.NewReader(body))
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, h.front.URL+path, strings.NewReader(body))
 	if err != nil {
 		t.Fatal(err)
 	}
 	request.Header.Set("Content-Type", "application/json")
-	if strings.HasPrefix(path, "/v1/messages") {
+	switch {
+	case credential == "":
+	case strings.HasPrefix(path, "/v1/messages"):
 		request.Header.Set("x-api-key", credential)
-	} else {
+	default:
 		request.Header.Set("Authorization", "Bearer "+credential)
 	}
 	response, err := http.DefaultClient.Do(request)
 	if err != nil {
 		t.Fatal(err)
 	}
+	return response
+}
+
+func (h *harness) post(t *testing.T, path, credential, body string) (*http.Response, string) {
+	t.Helper()
+	response := h.request(t, context.Background(), path, credential, body)
 	defer func() { _ = response.Body.Close() }()
 	raw, err := io.ReadAll(response.Body)
 	if err != nil {
@@ -104,6 +134,25 @@ func (h *harness) bucket(t *testing.T, provider, model string) state.Bucket {
 	}
 	t.Fatalf("no bucket for %s/%s in %+v", provider, model, h.store.Buckets())
 	return state.Bucket{}
+}
+
+func (h *harness) waitForIdle(t *testing.T, provider, model string) state.Bucket {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if b := h.bucket(t, provider, model); b.InFlight == 0 {
+			return b
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("bucket %s/%s never went idle: %+v", provider, model, h.bucket(t, provider, model))
+	return state.Bucket{}
+}
+
+func rateLimitHeaders(h http.Header) {
+	h.Set("x-ratelimit-limit-requests", "60")
+	h.Set("x-ratelimit-remaining-requests", "59")
+	h.Set("x-ratelimit-reset-requests", "1s")
 }
 
 const (
@@ -128,8 +177,8 @@ func TestProxy(t *testing.T) {
 			t.Fatalf("body = %s, want the provider JSON with usage", body)
 		}
 		b := h.bucket(t, "openai", "gpt-4.1-mini")
-		if b.Requests.Limit != 3 || b.Requests.Remaining != 2 || b.Tokens.Limit != 10000 {
-			t.Fatalf("quotas = %+v / %+v, want the fake provider limits", b.Requests, b.Tokens)
+		if b.Quotas.Requests.Limit != 3 || b.Quotas.Requests.Remaining != 2 || b.Quotas.Tokens.Limit != 10000 {
+			t.Fatalf("quotas = %+v, want the fake provider limits", b.Quotas)
 		}
 		if b.TokensPerCall <= 5 || b.Latency != 1500*time.Millisecond {
 			t.Fatalf("tokens per call = %v, latency = %v, want usage above the output size and 1.5s", b.TokensPerCall, b.Latency)
@@ -151,11 +200,8 @@ func TestProxy(t *testing.T) {
 			t.Fatalf("status = %d, want 429", response.StatusCode)
 		}
 		b := h.bucket(t, "openai", "gpt-4.1-mini")
-		if b.RateLimited != 1 || b.RetryAfter <= 0 || b.Requests.Remaining != 0 {
+		if b.RateLimited != 1 || b.RetryAfter <= 0 || b.Quotas.Requests.Remaining != 0 || b.InFlight != 0 {
 			t.Fatalf("bucket = %+v, want the 429 recorded with retry-after and zero remaining", b)
-		}
-		if b.InFlight != 0 {
-			t.Fatalf("in flight = %d, want 0", b.InFlight)
 		}
 	})
 
@@ -194,8 +240,127 @@ func TestProxy(t *testing.T) {
 			t.Fatalf("status = %d, stream = %q, want a complete message stream", response.StatusCode, body)
 		}
 		b := h.bucket(t, "anthropic", "claude-sonnet-4-5")
-		if b.TokensPerCall <= 5 || b.Tokens.Limit != 10000 {
+		if b.TokensPerCall <= 5 || b.Quotas.Tokens.Limit != 10000 {
 			t.Fatalf("bucket = %+v, want usage from message_delta and Anthropic limits", b)
+		}
+	})
+
+	t.Run("inflates a gzip response to read its usage", func(t *testing.T) {
+		h := newHarnessWithHandler(t, &clock{now: start}, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			rateLimitHeaders(w.Header())
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Content-Encoding", "gzip")
+			writer := gzip.NewWriter(w)
+			fmt.Fprint(writer, `{"usage":{"prompt_tokens":100,"completion_tokens":50}}`)
+			_ = writer.Close()
+		}), 0)
+
+		response, body := h.post(t, "/v1/chat/completions", "sk-test", chat)
+
+		if response.StatusCode != http.StatusOK || !strings.Contains(body, `"usage"`) {
+			t.Fatalf("status = %d, body = %q, want the inflated JSON at the client", response.StatusCode, body)
+		}
+		if b := h.bucket(t, "openai", "gpt-4.1-mini"); b.TokensPerCall != 150 {
+			t.Fatalf("tokens per call = %v, want 150 from the gzip body", b.TokensPerCall)
+		}
+	})
+
+	t.Run("forwards stream events as they arrive instead of buffering the stream", func(t *testing.T) {
+		release := make(chan struct{})
+		var once sync.Once
+		t.Cleanup(func() { once.Do(func() { close(release) }) })
+		h := newHarnessWithHandler(t, &clock{now: start}, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			rateLimitHeaders(w.Header())
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprint(w, "data: first\n\n")
+			w.(http.Flusher).Flush()
+			<-release
+			fmt.Fprint(w, "data: second\n\n")
+		}), 0)
+
+		response := h.request(t, context.Background(), "/v1/chat/completions", "sk-test", chat)
+		defer func() { _ = response.Body.Close() }()
+		reader := bufio.NewReader(response.Body)
+		firstLine := make(chan string, 1)
+		go func() {
+			line, _ := reader.ReadString('\n')
+			firstLine <- line
+		}()
+
+		select {
+		case line := <-firstLine:
+			if line != "data: first\n" {
+				t.Fatalf("first line = %q", line)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatal("the first event did not reach the client while the upstream was still streaming")
+		}
+		once.Do(func() { close(release) })
+		rest, _ := io.ReadAll(reader)
+		if !strings.Contains(string(rest), "data: second") {
+			t.Fatalf("rest = %q, want the second event", rest)
+		}
+	})
+
+	t.Run("releases the slot and counts an abort when the client stops reading a stream", func(t *testing.T) {
+		h := newHarnessWithHandler(t, &clock{now: start}, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			rateLimitHeaders(w.Header())
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprint(w, "data: first\n\n")
+			w.(http.Flusher).Flush()
+			<-r.Context().Done()
+		}), 0)
+		ctx, cancel := context.WithCancel(context.Background())
+		response := h.request(t, ctx, "/v1/chat/completions", "sk-test", chat)
+		if _, err := bufio.NewReader(response.Body).ReadString('\n'); err != nil {
+			t.Fatal(err)
+		}
+
+		cancel()
+		_ = response.Body.Close()
+
+		b := h.waitForIdle(t, "openai", "gpt-4.1-mini")
+		if b.Aborted != 1 || b.Responses != 1 || b.Latency != 0 || b.UsageMissing != 0 {
+			t.Fatalf("bucket = %+v, want one abort with no latency or usage update", b)
+		}
+	})
+
+	t.Run("still forwards a response that is too large to inspect and counts its usage as missing", func(t *testing.T) {
+		long := `{"filler":"` + strings.Repeat("x", 2000) + `","usage":{"prompt_tokens":1,"completion_tokens":1}}`
+		h := newHarnessWithHandler(t, &clock{now: start}, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			rateLimitHeaders(w.Header())
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, long)
+		}), 256)
+
+		_, body := h.post(t, "/v1/chat/completions", "sk-test", chat)
+
+		if body != long {
+			t.Fatalf("client received %d bytes, want the full %d", len(body), len(long))
+		}
+		if b := h.bucket(t, "openai", "gpt-4.1-mini"); b.UsageMissing != 1 || b.TokensPerCall != 0 {
+			t.Fatalf("bucket = %+v, want usage missing because the body exceeded the capture limit", b)
+		}
+	})
+
+	t.Run("counts and logs malformed rate-limit headers", func(t *testing.T) {
+		h := newHarnessWithHandler(t, &clock{now: start}, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("x-ratelimit-limit-requests", "60")
+			w.Header().Set("x-ratelimit-remaining-requests", "59")
+			w.Header().Set("x-ratelimit-reset-requests", "soon")
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"usage":{"prompt_tokens":1,"completion_tokens":1}}`)
+		}), 0)
+
+		h.post(t, "/v1/chat/completions", "sk-test", chat)
+
+		if b := h.bucket(t, "openai", "gpt-4.1-mini"); b.HeadersMalformed != 1 || b.HeadersMissing != 0 {
+			t.Fatalf("bucket = %+v, want one malformed header count", b)
+		}
+		if !strings.Contains(h.logs.String(), "x-ratelimit-reset-requests") {
+			t.Fatalf("logs = %q, want the malformed header named", h.logs.String())
 		}
 	})
 
@@ -205,15 +370,24 @@ func TestProxy(t *testing.T) {
 		h.post(t, "/v1/chat/completions", "sk-first", chat)
 		h.post(t, "/v1/chat/completions", "sk-second", chat)
 		h.post(t, "/v1/messages", "sk-first", message)
+		h.post(t, "/v1/chat/completions", "", chat)
 
 		buckets := h.store.Buckets()
-		if len(buckets) != 3 {
-			t.Fatalf("buckets = %d, want 3", len(buckets))
+		if len(buckets) != 4 {
+			t.Fatalf("buckets = %d, want 4", len(buckets))
 		}
+		anonymous := 0
 		for _, b := range buckets {
+			if b.Key.Key == "anonymous" {
+				anonymous++
+				continue
+			}
 			if len(b.Key.Key) != 12 || strings.Contains(b.Key.Key, "sk-") {
 				t.Fatalf("key label = %q, want a 12-character hash that never leaks the credential", b.Key.Key)
 			}
+		}
+		if anonymous != 1 {
+			t.Fatalf("anonymous buckets = %d, want exactly the request without a credential", anonymous)
 		}
 	})
 
@@ -224,6 +398,16 @@ func TestProxy(t *testing.T) {
 
 		if response.StatusCode != http.StatusBadRequest || len(h.store.Buckets()) != 0 {
 			t.Fatalf("status = %d, buckets = %d, want 400 and none", response.StatusCode, len(h.store.Buckets()))
+		}
+	})
+
+	t.Run("rejects a model name longer than the label limit", func(t *testing.T) {
+		h := newHarness(t)
+
+		response, body := h.post(t, "/v1/chat/completions", "sk-test", `{"model":"`+strings.Repeat("m", 300)+`","messages":[]}`)
+
+		if response.StatusCode != http.StatusBadRequest || !strings.Contains(body, "too long") || len(h.store.Buckets()) != 0 {
+			t.Fatalf("status = %d, body = %s, want 400 naming the length and no bucket", response.StatusCode, body)
 		}
 	})
 
@@ -247,18 +431,21 @@ func TestProxy(t *testing.T) {
 		}
 	})
 
-	t.Run("answers 502 and releases the in-flight slot when the upstream is unreachable", func(t *testing.T) {
+	t.Run("answers 502, releases the slot and logs when the upstream is unreachable", func(t *testing.T) {
 		closed := httptest.NewServer(http.NotFoundHandler())
 		closed.Close()
-		h := newHarnessWithUpstream(t, &clock{now: start}, closed.URL)
+		h := newHarnessWithUpstream(t, &clock{now: start}, closed.URL, 0)
 
 		response, _ := h.post(t, "/v1/chat/completions", "sk-test", chat)
 
 		if response.StatusCode != http.StatusBadGateway {
 			t.Fatalf("status = %d, want 502", response.StatusCode)
 		}
-		if b := h.bucket(t, "openai", "gpt-4.1-mini"); b.InFlight != 0 || b.Responses != 0 {
-			t.Fatalf("bucket = %+v, want the slot released and nothing observed", b)
+		if b := h.bucket(t, "openai", "gpt-4.1-mini"); b.InFlight != 0 || b.Responses != 0 || b.UpstreamErrors != 1 {
+			t.Fatalf("bucket = %+v, want the slot released and one upstream error", b)
+		}
+		if !strings.Contains(h.logs.String(), "upstream request failed") {
+			t.Fatalf("logs = %q, want the failure logged", h.logs.String())
 		}
 	})
 

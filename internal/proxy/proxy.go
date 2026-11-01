@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -23,17 +24,20 @@ type Config struct {
 	Anthropic       *url.URL
 	MaxRequestBytes int64
 	MaxCaptureBytes int64
+	MaxModelBytes   int
+	Logger          *slog.Logger
 }
 
 func DefaultConfig() Config {
-	return Config{MaxRequestBytes: 8 << 20, MaxCaptureBytes: 4 << 20}
+	return Config{MaxRequestBytes: 8 << 20, MaxCaptureBytes: 4 << 20, MaxModelBytes: 256, Logger: slog.Default()}
 }
 
 type Proxy struct {
-	cfg   Config
-	store *state.Store
-	now   func() time.Time
-	mux   *http.ServeMux
+	cfg       Config
+	store     *state.Store
+	now       func() time.Time
+	transport http.RoundTripper
+	mux       *http.ServeMux
 }
 
 var errTooLarge = errors.New("request body too large")
@@ -42,13 +46,17 @@ func New(cfg Config, store *state.Store, now func() time.Time) (*Proxy, error) {
 	switch {
 	case cfg.OpenAI == nil || cfg.Anthropic == nil:
 		return nil, errors.New("both upstreams are required")
-	case cfg.MaxRequestBytes <= 0 || cfg.MaxCaptureBytes <= 0:
-		return nil, errors.New("request and capture limits must be positive")
+	case cfg.MaxRequestBytes <= 0 || cfg.MaxCaptureBytes <= 0 || cfg.MaxModelBytes <= 0:
+		return nil, errors.New("request, capture and model limits must be positive")
+	case cfg.Logger == nil:
+		return nil, errors.New("logger is required")
 	}
-	p := &Proxy{cfg: cfg, store: store, now: now, mux: http.NewServeMux()}
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.MaxIdleConnsPerHost = 100
+	p := &Proxy{cfg: cfg, store: store, now: now, transport: transport, mux: http.NewServeMux()}
 	p.mux.Handle("POST /v1/chat/completions", p.route(headers.OpenAI, cfg.OpenAI))
 	p.mux.Handle("POST /v1/messages", p.route(headers.Anthropic, cfg.Anthropic))
-	p.mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+	p.mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
 		writeError(w, http.StatusNotFound, "quotaware proxies POST /v1/chat/completions and POST /v1/messages only")
 	})
 	return p, nil
@@ -72,6 +80,7 @@ func (p *Proxy) route(provider headers.Provider, upstream *url.URL) http.Handler
 		Rewrite: func(request *httputil.ProxyRequest) {
 			request.SetURL(upstream)
 		},
+		Transport:      p.transport,
 		ModifyResponse: p.observe,
 		ErrorHandler:   p.failed,
 	}
@@ -85,9 +94,9 @@ func (p *Proxy) route(provider headers.Provider, upstream *url.URL) http.Handler
 			writeError(w, http.StatusBadRequest, "unreadable request body")
 			return
 		}
-		model, ok := modelOf(body)
-		if !ok {
-			writeError(w, http.StatusBadRequest, "model is required")
+		model, err := modelOf(body, p.cfg.MaxModelBytes)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		c := &call{
@@ -97,7 +106,7 @@ func (p *Proxy) route(provider headers.Provider, upstream *url.URL) http.Handler
 		}
 		r.Body = io.NopCloser(bytes.NewReader(body))
 		r.ContentLength = int64(len(body))
-		p.store.Begin(c.key)
+		p.store.Begin(c.key, c.started)
 		reverse.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), callContextKey{}, c)))
 	})
 }
@@ -108,50 +117,71 @@ func (p *Proxy) observe(response *http.Response) error {
 		return nil
 	}
 	now := p.now()
-	limits, limitsErr := headers.Parse(c.provider, response.Header, now)
-	retryAfter, retryErr := headers.RetryAfter(response.Header, now)
-	if retryErr != nil {
+	quotas, headersStatus := p.parseLimits(c, response.Header, now)
+	retryAfter, err := headers.RetryAfter(response.Header, now)
+	if err != nil {
+		p.cfg.Logger.Warn("retry-after malformed", "provider", c.provider, "model", c.key.Model, "error", err.Error())
 		retryAfter = 0
 	}
-	contentType := response.Header.Get("Content-Type")
 	status := response.StatusCode
+	contentType := response.Header.Get("Content-Type")
+	encoding := response.Header.Get("Content-Encoding")
 	response.Body = &capture{
 		ReadCloser: response.Body,
 		limit:      p.cfg.MaxCaptureBytes,
 		done: func(body []byte, complete bool) {
 			c.once.Do(func() {
-				p.store.End(c.key, p.sample(c, status, limits, limitsErr == nil, retryAfter, contentType, body, complete))
+				p.store.End(c.key, p.sample(c, status, headersStatus, quotas, retryAfter, contentType, encoding, body, complete))
 			})
 		},
 	}
 	return nil
 }
 
-func (p *Proxy) sample(c *call, status int, limits headers.Limits, hasLimits bool, retryAfter time.Duration, contentType string, body []byte, complete bool) state.Sample {
+func (p *Proxy) parseLimits(c *call, h http.Header, now time.Time) (state.Quotas, state.HeadersStatus) {
+	limits, err := headers.Parse(c.provider, h, now)
+	switch {
+	case err == nil:
+		return state.Quotas{
+			Requests:      limits.Requests.Quota(),
+			Tokens:        limits.Tokens.Quota(),
+			ProjectTokens: limits.ProjectTokens.Quota(),
+			InputTokens:   limits.InputTokens.Quota(),
+			OutputTokens:  limits.OutputTokens.Quota(),
+		}, state.HeadersPresent
+	case errors.Is(err, headers.ErrMissing):
+		return state.Quotas{}, state.HeadersMissing
+	default:
+		p.cfg.Logger.Warn("rate-limit headers malformed", "provider", c.provider, "model", c.key.Model, "error", err.Error())
+		return state.Quotas{}, state.HeadersMalformed
+	}
+}
+
+func (p *Proxy) sample(c *call, status int, headersStatus state.HeadersStatus, quotas state.Quotas, retryAfter time.Duration, contentType, encoding string, body []byte, complete bool) state.Sample {
 	now := p.now()
 	s := state.Sample{
 		Status:     status,
-		HasLimits:  hasLimits,
+		Complete:   complete,
+		Headers:    headersStatus,
+		Quotas:     quotas,
 		Latency:    now.Sub(c.started),
 		RetryAfter: retryAfter,
 		At:         now,
 	}
-	if hasLimits {
-		s.Requests = limits.Requests.Quota()
-		s.Tokens = limits.Tokens.Quota()
-		s.ProjectTokens = limits.ProjectTokens.Quota()
-	}
 	if complete && status >= 200 && status < 300 {
-		s.Usage, s.HasUsage = extractUsage(c.provider, contentType, body)
+		if decoded, ok := decompress(encoding, body, p.cfg.MaxCaptureBytes); ok {
+			s.Usage, s.HasUsage = extractUsage(c.provider, contentType, decoded)
+		}
 	}
 	return s
 }
 
-func (p *Proxy) failed(w http.ResponseWriter, r *http.Request, _ error) {
+func (p *Proxy) failed(w http.ResponseWriter, r *http.Request, err error) {
 	if c, ok := r.Context().Value(callContextKey{}).(*call); ok {
 		c.once.Do(func() {
-			p.store.End(c.key, state.Sample{Status: 0})
+			p.store.Fail(c.key, p.now())
 		})
+		p.cfg.Logger.Error("upstream request failed", "provider", c.provider, "model", c.key.Model, "error", err.Error())
 	}
 	writeError(w, http.StatusBadGateway, "upstream unavailable")
 }
@@ -167,14 +197,17 @@ func readBody(r *http.Request, limit int64) ([]byte, error) {
 	return body, nil
 }
 
-func modelOf(body []byte) (string, bool) {
+func modelOf(body []byte, limit int) (string, error) {
 	var request struct {
 		Model string `json:"model"`
 	}
 	if err := json.Unmarshal(body, &request); err != nil || request.Model == "" {
-		return "", false
+		return "", errors.New("model is required")
 	}
-	return request.Model, true
+	if len(request.Model) > limit {
+		return "", errors.New("model is too long")
+	}
+	return request.Model, nil
 }
 
 func credentialHash(h http.Header) string {
@@ -230,10 +263,10 @@ func (c *capture) Close() error {
 
 func (c *capture) finish(complete bool) {
 	c.once.Do(func() {
+		body := c.buffer.Bytes()
 		if c.overflow {
-			c.done(nil, false)
-			return
+			body = nil
 		}
-		c.done(c.buffer.Bytes(), complete)
+		c.done(body, complete)
 	})
 }
