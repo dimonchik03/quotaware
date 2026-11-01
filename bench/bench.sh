@@ -63,8 +63,8 @@ export_series() {
   }
   range replicas 'count(up{job="workers"} == 1)'
   range inflight 'sum(worker_calls_inflight)'
-  range rate_limited_per_minute 'sum(rate(worker_calls_total{status="429"}[1m])) * 60'
-  range retries_per_minute 'sum(rate(worker_retries_total[1m])) * 60'
+  range rate_limited_per_minute '(sum(rate(worker_calls_total{status="429"}[1m])) * 60) or vector(0)'
+  range retries_per_minute '(sum(rate(worker_retries_total[1m])) * 60) or vector(0)'
   range completed_per_minute 'sum(rate(worker_jobs_completed_total[1m])) * 60'
   range queue_length 'producer_queue_length'
   range multiplier 'producer_load_multiplier'

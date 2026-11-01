@@ -40,7 +40,7 @@ func Build(baseline, capped Run, concurrency int) Report {
 	measure("Idle pod-seconds (in backoff)", func(r Run) string {
 		return fmt.Sprintf("%.0f", r.Totals["backoff_seconds_total"]/float64(max(concurrency, 1)))
 	})
-	measure("Time to drain the burst", func(r Run) string { return drainTime(r, report.Phases) })
+	measure("Time to drain the burst", func(r Run) string { return drainTime(r, phases(r)) })
 	measure("Time to react after the first 429", func(r Run) string { return reactionTime(r) })
 	return report
 }

@@ -42,6 +42,19 @@ func vectorJSON(t *testing.T, value float64) []byte {
 
 func writeRun(t *testing.T, root, name string, replicas, limited, queue, multiplier, ceiling [][2]float64, totals map[string]float64) {
 	t.Helper()
+	writeRunAt(t, root, name, start, replicas, limited, queue, multiplier, ceiling, totals)
+}
+
+func shift(values [][2]float64, seconds float64) [][2]float64 {
+	shifted := make([][2]float64, len(values))
+	for i, v := range values {
+		shifted[i] = [2]float64{v[0] + seconds, v[1]}
+	}
+	return shifted
+}
+
+func writeRunAt(t *testing.T, root, name string, runStart time.Time, replicas, limited, queue, multiplier, ceiling [][2]float64, totals map[string]float64) {
+	t.Helper()
 	dir := filepath.Join(root, name)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
@@ -51,7 +64,7 @@ func writeRun(t *testing.T, root, name string, replicas, limited, queue, multipl
 			t.Fatal(err)
 		}
 	}
-	write("run.json", []byte(`{"start":`+strconvFloat(float64(start.Unix()))+`,"end":`+strconvFloat(float64(start.Add(4*time.Minute).Unix()))+`}`))
+	write("run.json", []byte(`{"start":`+strconvFloat(float64(runStart.Unix()))+`,"end":`+strconvFloat(float64(runStart.Add(4*time.Minute).Unix()))+`}`))
 	write("replicas.json", matrixJSON(t, replicas))
 	write("rate_limited_per_minute.json", matrixJSON(t, limited))
 	write("queue_length.json", matrixJSON(t, queue))
@@ -76,12 +89,13 @@ func TestReport(t *testing.T) {
 		multiplier,
 		nil,
 		map[string]float64{"jobs_total": 900, "completed_total": 900, "failed_total": 0, "rate_limited_total": 500, "retries_total": 500, "latency_p50": 12, "latency_p95": 60, "backoff_seconds_total": 840})
-	writeRun(t, root, "B",
-		[][2]float64{{at(0), 1}, {at(60), 4}, {at(120), 8}, {at(180), 8}, {at(240), 8}},
-		[][2]float64{{at(0), 0}, {at(60), 0}, {at(120), 0}, {at(180), 0}, {at(240), 0}},
-		[][2]float64{{at(0), 0}, {at(60), 10}, {at(120), 500}, {at(180), 200}, {at(240), 0}},
-		multiplier,
-		[][2]float64{{at(0), 1}, {at(60), 8}, {at(120), 8}, {at(180), 8}, {at(240), 8}},
+	later := 1800.0
+	writeRunAt(t, root, "B", start.Add(30*time.Minute),
+		shift([][2]float64{{at(0), 1}, {at(60), 4}, {at(120), 8}, {at(180), 8}, {at(240), 8}}, later),
+		shift([][2]float64{{at(0), 0}, {at(60), 0}, {at(120), 0}, {at(180), 0}, {at(240), 0}}, later),
+		shift([][2]float64{{at(0), 0}, {at(60), 10}, {at(120), 500}, {at(180), 200}, {at(240), 0}}, later),
+		shift(multiplier, later),
+		shift([][2]float64{{at(0), 1}, {at(60), 8}, {at(120), 8}, {at(180), 8}, {at(240), 8}}, later),
 		map[string]float64{"jobs_total": 900, "completed_total": 900, "failed_total": 0, "rate_limited_total": 0, "retries_total": 0, "latency_p50": 15, "latency_p95": 40, "backoff_seconds_total": 0})
 	baseline, err := plot.LoadRun(filepath.Join(root, "A"))
 	if err != nil {
