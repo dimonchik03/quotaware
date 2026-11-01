@@ -16,40 +16,74 @@ type Key struct {
 	Key      string
 }
 
-type Sample struct {
-	Status        int
-	HasLimits     bool
+type HeadersStatus int
+
+const (
+	HeadersPresent HeadersStatus = iota
+	HeadersMissing
+	HeadersMalformed
+)
+
+type Quotas struct {
 	Requests      headroom.Quota
 	Tokens        headroom.Quota
 	ProjectTokens headroom.Quota
-	HasUsage      bool
-	Usage         float64
-	Latency       time.Duration
-	RetryAfter    time.Duration
-	At            time.Time
+	InputTokens   headroom.Quota
+	OutputTokens  headroom.Quota
+}
+
+func (q Quotas) merge(update Quotas) Quotas {
+	return Quotas{
+		Requests:      keep(q.Requests, update.Requests),
+		Tokens:        keep(q.Tokens, update.Tokens),
+		ProjectTokens: keep(q.ProjectTokens, update.ProjectTokens),
+		InputTokens:   keep(q.InputTokens, update.InputTokens),
+		OutputTokens:  keep(q.OutputTokens, update.OutputTokens),
+	}
+}
+
+func keep(current, update headroom.Quota) headroom.Quota {
+	if update.Known() {
+		return update
+	}
+	return current
+}
+
+type Sample struct {
+	Status     int
+	Complete   bool
+	Headers    HeadersStatus
+	Quotas     Quotas
+	HasUsage   bool
+	Usage      float64
+	Latency    time.Duration
+	RetryAfter time.Duration
+	At         time.Time
 }
 
 type Bucket struct {
-	Key            Key
-	Requests       headroom.Quota
-	Tokens         headroom.Quota
-	ProjectTokens  headroom.Quota
-	TokensPerCall  float64
-	Latency        time.Duration
-	InFlight       int
-	ObservedAt     time.Time
-	Responses      int64
-	RateLimited    int64
-	HeadersMissing int64
-	UsageMissing   int64
-	RetryAfter     time.Duration
+	Key              Key
+	Quotas           Quotas
+	TokensPerCall    float64
+	Latency          time.Duration
+	InFlight         int
+	ObservedAt       time.Time
+	LastSeen         time.Time
+	Responses        int64
+	RateLimited      int64
+	Aborted          int64
+	UpstreamErrors   int64
+	HeadersMissing   int64
+	HeadersMalformed int64
+	UsageMissing     int64
+	RetryAfter       time.Duration
 }
 
 func (b Bucket) Observation() headroom.Observation {
 	return headroom.Observation{
-		Requests:      b.Requests,
-		Tokens:        b.Tokens,
-		ProjectTokens: b.ProjectTokens,
+		Requests:      b.Quotas.Requests,
+		Tokens:        b.Quotas.Tokens,
+		ProjectTokens: b.Quotas.ProjectTokens,
 		TokensPerCall: b.TokensPerCall,
 		Latency:       b.Latency,
 		InFlight:      b.InFlight,
@@ -70,10 +104,21 @@ func New(alpha float64) (*Store, error) {
 	return &Store{alpha: alpha, buckets: map[Key]*Bucket{}}, nil
 }
 
-func (s *Store) Begin(key Key) {
+func (s *Store) Begin(key Key, now time.Time) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.bucket(key).InFlight++
+	b := s.bucket(key)
+	b.InFlight++
+	b.LastSeen = latest(b.LastSeen, now)
+}
+
+func (s *Store) Fail(key Key, now time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	b := s.bucket(key)
+	b.InFlight = max(b.InFlight-1, 0)
+	b.UpstreamErrors++
+	b.LastSeen = latest(b.LastSeen, now)
 }
 
 func (s *Store) End(key Key, sample Sample) {
@@ -81,20 +126,26 @@ func (s *Store) End(key Key, sample Sample) {
 	defer s.mu.Unlock()
 	b := s.bucket(key)
 	b.InFlight = max(b.InFlight-1, 0)
-	if sample.Status == 0 {
-		return
-	}
+	b.LastSeen = latest(b.LastSeen, sample.At)
 	b.Responses++
 	if sample.Status == http.StatusTooManyRequests {
 		b.RateLimited++
 		b.RetryAfter = sample.RetryAfter
 	}
-	switch {
-	case sample.HasLimits:
-		b.Requests, b.Tokens, b.ProjectTokens = sample.Requests, sample.Tokens, sample.ProjectTokens
+	switch sample.Headers {
+	case HeadersPresent:
+		b.Quotas = b.Quotas.merge(sample.Quotas)
 		b.ObservedAt = sample.At
-	case carriesLimits(sample.Status):
-		b.HeadersMissing++
+	case HeadersMissing:
+		if carriesLimits(sample.Status) {
+			b.HeadersMissing++
+		}
+	case HeadersMalformed:
+		b.HeadersMalformed++
+	}
+	if !sample.Complete {
+		b.Aborted++
+		return
 	}
 	if !succeeded(sample.Status) {
 		return
@@ -105,6 +156,19 @@ func (s *Store) End(key Key, sample Sample) {
 	} else {
 		b.UsageMissing++
 	}
+}
+
+func (s *Store) Evict(now time.Time, idleFor time.Duration) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	evicted := 0
+	for key, b := range s.buckets {
+		if b.InFlight == 0 && now.Sub(b.LastSeen) > idleFor {
+			delete(s.buckets, key)
+			evicted++
+		}
+	}
+	return evicted
 }
 
 func (s *Store) Bucket(key Key) (Bucket, bool) {
@@ -155,6 +219,13 @@ func (s *Store) smooth(previous, sample float64) float64 {
 		return sample
 	}
 	return s.alpha*sample + (1-s.alpha)*previous
+}
+
+func latest(a, b time.Time) time.Time {
+	if b.After(a) {
+		return b
+	}
+	return a
 }
 
 func carriesLimits(status int) bool {
