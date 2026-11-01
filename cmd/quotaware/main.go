@@ -9,6 +9,7 @@ import (
 const usage = `usage: quotaware <command> [flags]
 
 commands:
+  proxy      observe provider rate-limit headers in front of OpenAI and Anthropic
   simulate   replay a JSONL file of observations and print the replica ceiling per line
 `
 
@@ -22,6 +23,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return 2
 	}
 	switch args[0] {
+	case "proxy":
+		return runProxy(args[1:], stderr)
 	case "simulate":
 		return runSimulate(args[1:], stdin, stdout, stderr)
 	default:
