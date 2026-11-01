@@ -1,4 +1,4 @@
-.PHONY: build test race lint fmt
+.PHONY: build test race lint fmt e2e
 
 build:
 	go build ./...
@@ -14,3 +14,7 @@ lint:
 
 fmt:
 	gofmt -l -w .
+
+e2e:
+	docker compose up -d --build --wait || { docker compose down -v; exit 1; }
+	go test -count=1 -tags e2e ./e2e/...; status=$$?; docker compose down -v; exit $$status

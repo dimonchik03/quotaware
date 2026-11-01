@@ -44,7 +44,7 @@ Each input line is one JSON object describing a bucket at a point in time:
 `at` is the evaluation time. `observed_at` is optional and defaults to `at`; set it
 earlier to replay a stale bucket. `requests` and `tokens` carry the provider's
 limit, remaining and reset for the window; leave one out when the provider does
-not report it. `tokens_per_call` and `latency_ms` are the smoothed averages the
+not report it. `project_tokens` is the optional OpenAI project-level token window. `tokens_per_call` and `latency_ms` are the smoothed averages the
 proxy would hold, `in_flight` the calls currently open. Unknown keys are rejected.
 
 Output is tab-separated. The reason column says which rule produced the number:
@@ -52,6 +52,58 @@ the headroom formula, a clamp to `-min` or `-max`, the `-max-step-up` cap on
 raises, the drain guard that keeps pods alive for calls in flight, a frozen
 ceiling for stale observations, or the default when nothing usable was observed.
 Run with `-h` for every knob.
+
+## Run the proxy
+
+The proxy forwards `POST /v1/chat/completions` to OpenAI and `POST /v1/messages`
+to Anthropic without touching the request or the response, streams included, and
+records what it sees per `(provider, model, credential hash)`. Point your workers'
+`base_url` at it:
+
+    quotaware proxy -listen :8080 -admin :9100
+
+`-openai-upstream` and `-anthropic-upstream` default to the public APIs. The admin
+port serves `/metrics` and `/healthz`.
+
+To see it work without a provider account, `docker compose up --build` starts the
+proxy in front of `bench/fakeprovider`, a provider stand-in with real rate-limit
+headers in both formats, 429s with `retry-after`, SSE streams and a deterministic
+seed. The same stack backs `make e2e`. A session against a provider limited to
+three requests per minute:
+
+    $ curl -si localhost:18080/v1/chat/completions -H "Authorization: Bearer sk-demo" \
+        -d '{"model":"gpt-4.1-mini","messages":[{"role":"user","content":"hello"}]}'
+    HTTP/1.1 200 OK
+    X-Ratelimit-Limit-Requests: 3
+    X-Ratelimit-Remaining-Requests: 2
+    X-Ratelimit-Reset-Requests: 59.943s
+    X-Ratelimit-Limit-Tokens: 50000
+    X-Ratelimit-Remaining-Tokens: 49833
+    ...
+    {"choices":[...],"usage":{"completion_tokens":150,"prompt_tokens":17,"total_tokens":167}}
+
+    $ for i in 1 2 3; do curl -s -o /dev/null -w "%{http_code} retry-after=%header{retry-after}\n" ...; done
+    200 retry-after=
+    200 retry-after=
+    429 retry-after=60
+
+    $ curl -s localhost:19100/metrics | grep -E "^quotaware_(remaining|tokens_per_call|429|retry)"
+    quotaware_429_total{key="05eeabac53a7",model="gpt-4.1-mini",provider="openai"} 1
+    quotaware_remaining_requests{key="05eeabac53a7",model="gpt-4.1-mini",provider="openai"} 0
+    quotaware_remaining_tokens{key="05eeabac53a7",model="gpt-4.1-mini",provider="openai",window="tokens"} 49499
+    quotaware_retry_after_seconds{key="05eeabac53a7",model="gpt-4.1-mini",provider="openai"} 60
+    quotaware_tokens_per_call{key="05eeabac53a7",model="gpt-4.1-mini",provider="openai"} 167
+
+What the proxy records per bucket: the limit, remaining and reset of every window
+the provider reports, a smoothed tokens-per-call and latency over successful calls,
+calls in flight, 429s with their `retry-after`, upstream failures, streams the client
+abandoned, and how often headers were missing or malformed or usage was absent.
+Buckets that see no traffic for ten minutes are dropped. Tokens per call count what the provider charges against the quota: prompt
+plus completion tokens for OpenAI, uncached input plus cache writes plus output for
+Anthropic. Usage comes from the response body, so OpenAI streams only report it when
+the client sets `stream_options.include_usage`; a stream without it is counted in
+`quotaware_usage_missing_total` instead of guessed. The credential is hashed before
+it becomes a label.
 
 ## Planned usage
 
@@ -67,8 +119,9 @@ Not a gateway, not a rate limiter, not a cost dashboard. See `docs/SPEC.md`.
 
 ## Status
 
-v0.1 in progress. Milestone 1 (header parsers, headroom algorithm, `simulate`) is
-done; the proxy, the scaler and the benchmark follow. Specification in `docs/SPEC.md`,
+v0.1 in progress. Header parsers, the headroom algorithm, `simulate`, the proxy
+with its metrics and the fake provider are done. The KEDA scaler, the
+`quotaware_ceiling` series, the Grafana dashboard and the benchmark follow. Specification in `docs/SPEC.md`,
 decisions in `docs/adr`.
 
 ## License

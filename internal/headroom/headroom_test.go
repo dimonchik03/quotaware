@@ -191,6 +191,22 @@ func TestCompute(t *testing.T) {
 			wantReason:  headroom.ReasonClamped,
 		},
 		{
+			name:        "a tighter project token window bounds the ceiling",
+			config:      config(),
+			observation: withProjectTokens(observation(900, 500000, midWindow), 300000, 300000, midWindow),
+			now:         now,
+			wantCeiling: 2,
+			wantReason:  headroom.ReasonHeadroom,
+		},
+		{
+			name:        "a depleted project token window lowers the ceiling before the organization window does",
+			config:      config(),
+			observation: withProjectTokens(observation(900, 500000, midWindow), 600000, 240000, midWindow),
+			now:         now,
+			wantCeiling: 3,
+			wantReason:  headroom.ReasonHeadroom,
+		},
+		{
 			name:        "the token constraint is ignored until tokens per call are observed",
 			config:      config(),
 			observation: withTokensPerCall(observation(900, 500000, midWindow), 0),
@@ -303,6 +319,11 @@ func withLatency(o headroom.Observation, latency time.Duration) headroom.Observa
 func withLimits(o headroom.Observation, requests, tokens float64) headroom.Observation {
 	o.Requests.Limit = requests
 	o.Tokens.Limit = tokens
+	return o
+}
+
+func withProjectTokens(o headroom.Observation, limit, remaining float64, resetAt time.Time) headroom.Observation {
+	o.ProjectTokens = headroom.Quota{Limit: limit, Remaining: remaining, ResetAt: resetAt}
 	return o
 }
 
