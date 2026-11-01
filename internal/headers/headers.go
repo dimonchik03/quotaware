@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/dimonchik03/quotaware/internal/headroom"
 )
 
 type Provider string
@@ -26,18 +28,25 @@ func (w Window) Known() bool {
 	return w.Limit > 0
 }
 
+func (w Window) Quota() headroom.Quota {
+	return headroom.Quota{Limit: float64(w.Limit), Remaining: float64(w.Remaining), ResetAt: w.ResetAt}
+}
+
 type Limits struct {
-	Provider     Provider
-	Requests     Window
-	Tokens       Window
-	InputTokens  Window
-	OutputTokens Window
-	RetryAfter   time.Duration
+	Provider      Provider
+	Requests      Window
+	Tokens        Window
+	ProjectTokens Window
+	InputTokens   Window
+	OutputTokens  Window
+	RetryAfter    time.Duration
 }
 
 var (
 	ErrMissing         = errors.New("rate-limit headers missing")
 	ErrUnknownProvider = errors.New("unknown provider")
+
+	errAbsentCounterpart = errors.New("limit and remaining must be reported together")
 )
 
 type MalformedError struct {
@@ -47,6 +56,9 @@ type MalformedError struct {
 }
 
 func (e *MalformedError) Error() string {
+	if e.Value == "" {
+		return fmt.Sprintf("header %s: %v", e.Header, e.Err)
+	}
 	return fmt.Sprintf("header %s has malformed value %q: %v", e.Header, e.Value, e.Err)
 }
 
@@ -65,111 +77,13 @@ func Parse(provider Provider, h http.Header, now time.Time) (Limits, error) {
 	}
 }
 
-func parseOpenAI(h http.Header, now time.Time) (Limits, error) {
-	requests, err := openAIWindow(h, "requests", now)
-	if err != nil {
-		return Limits{}, err
-	}
-	tokens, err := openAIWindow(h, "tokens", now)
-	if err != nil {
-		return Limits{}, err
-	}
-	projectTokens, err := openAIWindow(h, "project-tokens", now)
-	if err != nil {
-		return Limits{}, err
-	}
-	limits := Limits{Provider: OpenAI, Requests: requests, Tokens: tighter(tokens, projectTokens)}
-	if !limits.Requests.Known() && !limits.Tokens.Known() {
-		return Limits{}, ErrMissing
-	}
-	limits.RetryAfter, err = retryAfter(h, now)
-	if err != nil {
-		return Limits{}, err
-	}
-	return limits, nil
-}
-
-func openAIWindow(h http.Header, kind string, now time.Time) (Window, error) {
-	limit, ok, err := integerHeader(h, "x-ratelimit-limit-"+kind)
-	if err != nil || !ok {
-		return Window{}, err
-	}
-	remaining, ok, err := integerHeader(h, "x-ratelimit-remaining-"+kind)
-	if err != nil || !ok {
-		return Window{}, err
-	}
-	reset, ok, err := durationHeader(h, "x-ratelimit-reset-"+kind)
-	if err != nil {
-		return Window{}, err
-	}
-	w := Window{Limit: limit, Remaining: remaining}
-	if ok {
-		w.ResetAt = now.Add(reset)
-	}
-	return w, nil
-}
-
-func parseAnthropic(h http.Header, now time.Time) (Limits, error) {
-	limits := Limits{Provider: Anthropic}
-	var err error
-	if limits.Requests, err = anthropicWindow(h, "requests"); err != nil {
-		return Limits{}, err
-	}
-	if limits.Tokens, err = anthropicWindow(h, "tokens"); err != nil {
-		return Limits{}, err
-	}
-	if limits.InputTokens, err = anthropicWindow(h, "input-tokens"); err != nil {
-		return Limits{}, err
-	}
-	if limits.OutputTokens, err = anthropicWindow(h, "output-tokens"); err != nil {
-		return Limits{}, err
-	}
-	if !limits.Requests.Known() && !limits.Tokens.Known() {
-		return Limits{}, ErrMissing
-	}
-	if limits.RetryAfter, err = retryAfter(h, now); err != nil {
-		return Limits{}, err
-	}
-	return limits, nil
-}
-
-func anthropicWindow(h http.Header, kind string) (Window, error) {
-	prefix := "anthropic-ratelimit-" + kind
-	limit, ok, err := integerHeader(h, prefix+"-limit")
-	if err != nil || !ok {
-		return Window{}, err
-	}
-	remaining, ok, err := integerHeader(h, prefix+"-remaining")
-	if err != nil || !ok {
-		return Window{}, err
-	}
-	resetAt, _, err := timestampHeader(h, prefix+"-reset")
-	if err != nil {
-		return Window{}, err
-	}
-	return Window{Limit: limit, Remaining: remaining, ResetAt: resetAt}, nil
-}
-
-func tighter(a, b Window) Window {
-	switch {
-	case !b.Known():
-		return a
-	case !a.Known():
-		return b
-	case b.Remaining < a.Remaining:
-		return b
-	default:
-		return a
-	}
-}
-
-func retryAfter(h http.Header, now time.Time) (time.Duration, error) {
+func RetryAfter(h http.Header, now time.Time) (time.Duration, error) {
 	value := strings.TrimSpace(h.Get("Retry-After"))
 	if value == "" {
 		return 0, nil
 	}
-	if seconds, err := strconv.ParseFloat(value, 64); err == nil {
-		return time.Duration(seconds * float64(time.Second)), nil
+	if seconds, err := strconv.ParseUint(value, 10, 32); err == nil {
+		return time.Duration(seconds) * time.Second, nil
 	}
 	at, err := http.ParseTime(value)
 	if err != nil {
@@ -178,38 +92,57 @@ func retryAfter(h http.Header, now time.Time) (time.Duration, error) {
 	return max(at.Sub(now), 0), nil
 }
 
+func complete(limits Limits, h http.Header, now time.Time) (Limits, error) {
+	if !limits.Requests.Known() && !limits.Tokens.Known() {
+		return Limits{}, ErrMissing
+	}
+	retryAfter, err := RetryAfter(h, now)
+	if err != nil {
+		return Limits{}, err
+	}
+	limits.RetryAfter = retryAfter
+	return limits, nil
+}
+
+type resetParser func(value string, now time.Time) (time.Time, error)
+
+func window(h http.Header, limitName, remainingName, resetName string, now time.Time, parseReset resetParser) (Window, error) {
+	limit, limitPresent, err := integerHeader(h, limitName)
+	if err != nil {
+		return Window{}, err
+	}
+	remaining, remainingPresent, err := integerHeader(h, remainingName)
+	if err != nil {
+		return Window{}, err
+	}
+	switch {
+	case !limitPresent && !remainingPresent:
+		return Window{}, nil
+	case !limitPresent:
+		return Window{}, &MalformedError{Header: limitName, Err: errAbsentCounterpart}
+	case !remainingPresent:
+		return Window{}, &MalformedError{Header: remainingName, Err: errAbsentCounterpart}
+	}
+	parsed := Window{Limit: limit, Remaining: remaining}
+	value := strings.TrimSpace(h.Get(resetName))
+	if value == "" {
+		return parsed, nil
+	}
+	parsed.ResetAt, err = parseReset(value, now)
+	if err != nil {
+		return Window{}, &MalformedError{Header: resetName, Value: value, Err: err}
+	}
+	return parsed, nil
+}
+
 func integerHeader(h http.Header, name string) (int64, bool, error) {
 	value := strings.TrimSpace(h.Get(name))
 	if value == "" {
 		return 0, false, nil
 	}
-	n, err := strconv.ParseInt(value, 10, 64)
+	count, err := strconv.ParseInt(value, 10, 64)
 	if err != nil {
 		return 0, false, &MalformedError{Header: name, Value: value, Err: err}
 	}
-	return n, true, nil
-}
-
-func durationHeader(h http.Header, name string) (time.Duration, bool, error) {
-	value := strings.TrimSpace(h.Get(name))
-	if value == "" {
-		return 0, false, nil
-	}
-	d, err := time.ParseDuration(value)
-	if err != nil {
-		return 0, false, &MalformedError{Header: name, Value: value, Err: err}
-	}
-	return d, true, nil
-}
-
-func timestampHeader(h http.Header, name string) (time.Time, bool, error) {
-	value := strings.TrimSpace(h.Get(name))
-	if value == "" {
-		return time.Time{}, false, nil
-	}
-	t, err := time.Parse(time.RFC3339, value)
-	if err != nil {
-		return time.Time{}, false, &MalformedError{Header: name, Value: value, Err: err}
-	}
-	return t, true, nil
+	return count, true, nil
 }
