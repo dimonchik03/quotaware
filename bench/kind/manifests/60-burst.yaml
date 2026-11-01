@@ -1,0 +1,32 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: burst
+  namespace: quotaware-demo
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: burst
+          image: curlimages/curl:8.11.1
+          command:
+            - sh
+            - -c
+            - |
+              end=$(( $(date +%s) + ${DURATION_SECONDS} ))
+              loop() {
+                while [ "$(date +%s)" -lt "$end" ]; do
+                  curl -s -o /dev/null http://quotaware:8080/v1/chat/completions \
+                    -H 'Authorization: Bearer sk-another-team' -H 'Content-Type: application/json' \
+                    -d '{"model":"gpt-4.1-mini","messages":[{"role":"user","content":"burst"}]}'
+                done
+              }
+              for i in $(seq 1 ${CONCURRENCY}); do loop & done
+              wait
+          env:
+            - name: DURATION_SECONDS
+              value: "60"
+            - name: CONCURRENCY
+              value: "30"
