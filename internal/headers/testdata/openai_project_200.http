@@ -1,0 +1,13 @@
+HTTP/1.1 200 OK
+Content-Type: application/json
+x-ratelimit-limit-requests: 10000
+x-ratelimit-limit-tokens: 1000000
+x-ratelimit-remaining-requests: 9990
+x-ratelimit-remaining-tokens: 950000
+x-ratelimit-reset-requests: 60ms
+x-ratelimit-reset-tokens: 3s
+x-ratelimit-limit-project-tokens: 100000
+x-ratelimit-remaining-project-tokens: 20000
+x-ratelimit-reset-project-tokens: 48s
+Content-Length: 0
+
