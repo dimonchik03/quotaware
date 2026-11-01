@@ -60,8 +60,9 @@ Per response it records, keyed by bucket `(provider, model, api-key hash)`:
   missing, never estimated);
 - wall-clock latency and in-flight count.
 
-Phase 2 collectors that remove the extra hop: a Go `http.RoundTripper` wrapper and a
-Python `httpx` event hook that post the same observation to `POST /observe`.
+Collectors that remove the extra hop: a Go `http.RoundTripper` wrapper and a Python
+`httpx` event hook that post the same observation to `POST /v1/observe` on the admin
+port, optionally behind a bearer token (ADR 0007).
 
 ### 2. State
 
@@ -110,10 +111,11 @@ Guards:
 
 AIMD fallback when headers are absent, unparseable or stale (Gemini, some gateways,
 Azure variants to be verified): classic congestion control. If the 429 ratio in the
-last window exceeds `aimd.threshold` (default 0.02), multiply the ceiling by
-`aimd.decrease` (default 0.5) and hold it until the longest observed `retry-after`
-elapses; otherwise add `aimd.increase` (default 1) per interval up to `max_replicas`.
-Header mode and AIMD run together; AIMD acts as a guard even when headers exist.
+last minute exceeds `aimdThreshold` (default 0.02), multiply the ceiling by
+`aimdDecrease` (default 0.5) and hold it until the longest observed `retry-after`
+elapses, at least one minute; otherwise add `aimdIncrease` (default 1) per
+`stepInterval` up to `maxReplicas`. Header mode and AIMD run together; AIMD acts as a
+guard even when headers exist (ADR 0006).
 
 ### 4. Actuation: `quotaware scaler`
 
@@ -138,7 +140,8 @@ Trigger metadata: `scalerAddress`, `bucket` (`openai/gpt-4.1-mini`), `concurrenc
 and optionally `credential` (the hashed key label, to narrow a shared model to one
 key), `safety` (0.85), `share` (1), `maxStepUp` (2), `stepInterval` (15s),
 `defaultCeiling` (1), `minReplicas` (1), `maxReplicas` (100, mirror
-`maxReplicaCount` by hand), `staleAfter` (2m), `staleHard` (10m), `window` (1m).
+`maxReplicaCount` by hand), `staleAfter` (2m), `staleHard` (10m), `window` (1m),
+`aimdThreshold` (0.02), `aimdDecrease` (0.5), `aimdIncrease` (1).
 Ceilings are computed per ScaledObject and per bucket, summed across the credentials
 that match and clamped to `maxReplicas`. A cap trigger never reports `IsActive`;
 activation stays with the demand trigger.
@@ -232,14 +235,16 @@ way. If B does not win, that is still the write-up, and a bug hunt.
       internal/headroom/      the algorithm as pure functions; table-driven and property tests
       internal/aimd/          congestion-control fallback, pure
       internal/state/         bucket state, EWMA, staleness; memory and redis backends
-      internal/headers/       openai.go, anthropic.go, fixtures/, *_test.go
-      internal/proxy/         reverse proxy, SSE passthrough, usage extraction
+      internal/headers/       openai.go, anthropic.go, testdata/, *_test.go
+      internal/usage/         usage extraction, body capture, credential hashing
+      internal/proxy/         reverse proxy, SSE passthrough, the /v1/observe endpoint
       internal/scaler/        gRPC ExternalScaler; proto vendored from KEDA
       internal/queue/         queue depth readers for single-trigger mode
       internal/metrics/       Prometheus registry
+      collector/              Go RoundTripper and Python httpx hooks posting to /v1/observe
       deploy/                 Helm chart (Deployment, Service, ScaledObject examples), grafana/
       bench/                  fakeprovider/, producer/, worker/, kind/, prometheus/, plot/, results/
-      docs/                   SPEC.md, design.md, adr/, benchmark.md
+      docs/                   SPEC.md, design.md, adr/, benchmark.md, release.md
       .github/workflows/      test and lint on PR; kind smoke run on demand
 
 Dependency direction, inward only: `headroom` and `aimd` are the domain and import
