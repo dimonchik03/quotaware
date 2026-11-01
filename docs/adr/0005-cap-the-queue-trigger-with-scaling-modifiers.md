@@ -19,15 +19,24 @@ survive KEDA restarts, HPA sync and the operator's own caching.
 
 The external scaler reports the ceiling as a plain replica count (`targetSize: 1`
 with `AverageValue` semantics) and never activates a ScaledObject on its own. The
-queue trigger keeps providing demand and activation. The two are combined by KEDA's
-`scalingModifiers` with the formula `demand < ceiling ? demand : ceiling`, which is
-the documented ternary form; `min()` from the bundled expression language is not
-relied on until it is verified. For clusters without `scalingModifiers`, the scaler
+queue trigger keeps providing demand. The two are combined by KEDA's
+`scalingModifiers` with the formula `demand / N < ceiling ? demand / N : ceiling`,
+where `N` is the jobs-per-replica target: inside a formula KEDA uses the raw trigger
+values and ignores each trigger's own target, so the division has to be written out.
+The ternary is the documented form; `min()` from the bundled expression language is
+not relied on until it is verified. With `scalingModifiers` KEDA activates the
+ScaledObject from the formula result, not from the individual triggers, so an
+exhausted quota deactivates it; deployments that must stay warm keep
+`minReplicaCount` at one or more. For clusters without `scalingModifiers`, the scaler
 offers a single-trigger mode in which it reads the queue depth itself and returns
 the minimum, with activation from the queue.
 
-Ceilings are computed per ScaledObject and per observed bucket, so hysteresis is
-tracked per consumer, and summed across credentials that share a model.
+Ceilings are computed per ScaledObject and per observed bucket under one lock, so
+hysteresis is tracked per consumer and concurrent polls (KEDA asks from its polling
+loop and from every HPA sync) cannot raise the ceiling twice. A raise is limited to
+`maxStepUp` per `stepInterval`, measured from the last change; a drop is immediate.
+Ceilings are summed across credentials that share a model and clamped to
+`maxReplicas`.
 
 ## Alternatives considered
 
