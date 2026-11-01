@@ -27,15 +27,23 @@ import (
 var now = time.Date(2026, 11, 1, 18, 0, 0, 0, time.UTC)
 
 type fakeQueue struct {
-	mu    sync.Mutex
-	depth int64
-	err   error
+	mu     sync.Mutex
+	depth  int64
+	err    error
+	closed bool
 }
 
 func (q *fakeQueue) Len(context.Context, string) (int64, error) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	return q.depth, q.err
+}
+
+func (q *fakeQueue) Close() error {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.closed = true
+	return nil
 }
 
 func (q *fakeQueue) set(depth int64, err error) {
@@ -49,6 +57,24 @@ type fixture struct {
 	store   *state.Store
 	queue   *fakeQueue
 	logs    *strings.Builder
+	clock   *clock
+}
+
+type clock struct {
+	mu  sync.Mutex
+	now time.Time
+}
+
+func (c *clock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.now
+}
+
+func (c *clock) Advance(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.now = c.now.Add(d)
 }
 
 func newFixture(t *testing.T) *fixture {
@@ -59,29 +85,31 @@ func newFixture(t *testing.T) *fixture {
 	}
 	queue := &fakeQueue{}
 	logs := &strings.Builder{}
+	c := &clock{now: now}
 	cfg := scaler.DefaultConfig()
 	cfg.PushInterval = 10 * time.Millisecond
-	service, err := scaler.New(cfg, store, func(string) scaler.QueueDepth { return queue }, func() time.Time { return now }, slog.New(slog.NewTextHandler(logs, nil)))
+	service, err := scaler.New(cfg, store, func(string) scaler.QueueDepth { return queue }, c.Now, slog.New(slog.NewTextHandler(logs, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &fixture{service: service, store: store, queue: queue, logs: logs}
+	return &fixture{service: service, store: store, queue: queue, logs: logs, clock: c}
 }
 
 func (f *fixture) observe(key state.Key, remainingRequests, remainingTokens float64) {
-	f.store.Begin(key, now)
+	at := f.clock.Now()
+	f.store.Begin(key, at)
 	f.store.End(key, state.Sample{
 		Status:   http.StatusOK,
 		Complete: true,
 		Headers:  state.HeadersPresent,
 		Quotas: state.Quotas{
-			Requests: headroom.Quota{Limit: 1000, Remaining: remainingRequests, ResetAt: now.Add(30 * time.Second)},
-			Tokens:   headroom.Quota{Limit: 600000, Remaining: remainingTokens, ResetAt: now.Add(30 * time.Second)},
+			Requests: headroom.Quota{Limit: 1000, Remaining: remainingRequests, ResetAt: at.Add(30 * time.Second)},
+			Tokens:   headroom.Quota{Limit: 600000, Remaining: remainingTokens, ResetAt: at.Add(30 * time.Second)},
 		},
 		HasUsage: true,
 		Usage:    1000,
 		Latency:  2 * time.Second,
-		At:       now,
+		At:       at,
 	})
 }
 
@@ -91,6 +119,12 @@ func ref(metadata map[string]string) *externalscaler.ScaledObjectRef {
 
 func capMetadata() map[string]string {
 	return map[string]string{"bucket": "openai/gpt-4.1-mini", "concurrency": "4", "maxStepUp": "100", "defaultCeiling": "1"}
+}
+
+func queueMetadata() map[string]string {
+	metadata := capMetadata()
+	metadata["redisAddress"], metadata["listName"], metadata["listLength"] = "redis:6379", "jobs", "10"
+	return metadata
 }
 
 func metric(t *testing.T, f *fixture, metadata map[string]string) int64 {
@@ -104,6 +138,31 @@ func metric(t *testing.T, f *fixture, metadata map[string]string) int64 {
 
 func code(err error) codes.Code {
 	return status.Code(err)
+}
+
+var bucketA = state.Key{Provider: "openai", Model: "gpt-4.1-mini", Key: "a"}
+
+func TestNew(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	store, _ := state.New(0.5)
+	cases := []struct {
+		name  string
+		store *state.Store
+		now   func() time.Time
+		cfg   scaler.Config
+	}{
+		{"rejects a nil store", nil, time.Now, scaler.DefaultConfig()},
+		{"rejects a nil clock", store, nil, scaler.DefaultConfig()},
+		{"rejects a zero push interval", store, time.Now, scaler.Config{Defaults: headroom.DefaultConfig()}},
+		{"rejects invalid defaults", store, time.Now, scaler.Config{PushInterval: time.Second}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := scaler.New(tc.cfg, tc.store, nil, tc.now, logger); err == nil {
+				t.Fatal("expected an error")
+			}
+		})
+	}
 }
 
 func TestMetadata(t *testing.T) {
@@ -139,10 +198,8 @@ func TestMetadata(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		metadata := capMetadata()
-		metadata["redisAddress"], metadata["listName"] = "redis:6379", "jobs"
 
-		_, err = service.GetMetricSpec(context.Background(), ref(metadata))
+		_, err = service.GetMetricSpec(context.Background(), ref(queueMetadata()))
 
 		if code(err) != codes.FailedPrecondition {
 			t.Fatalf("code = %v, want FailedPrecondition", code(err))
@@ -159,23 +216,40 @@ func TestGetMetricSpec(t *testing.T) {
 		t.Fatal(err)
 	}
 	spec := response.GetMetricSpecs()[0]
-	if spec.GetMetricName() != scaler.MetricName || spec.GetTargetSize() != 1 {
-		t.Fatalf("spec = %+v, want the ceiling metric with target size one", spec)
+	if spec.GetMetricName() != scaler.MetricName || spec.GetTargetSize() != 1 || spec.GetTargetSizeFloat() != 1 {
+		t.Fatalf("spec = %+v, want the ceiling metric with target size one in both fields", spec)
 	}
 }
 
 func TestGetMetrics(t *testing.T) {
-	t.Run("reports the default ceiling before any observation", func(t *testing.T) {
+	t.Run("reports the default ceiling before any observation and records it", func(t *testing.T) {
 		f := newFixture(t)
 
 		if got := metric(t, f, capMetadata()); got != 1 {
 			t.Fatalf("ceiling = %d, want the default of 1", got)
 		}
+		if ceilings := f.store.Ceilings(); len(ceilings) != 1 || ceilings[0].Value != 1 || ceilings[0].Consumer.Bucket.Model != "gpt-4.1-mini" {
+			t.Fatalf("recorded = %+v, want the default ceiling recorded for the consumer", ceilings)
+		}
+	})
+
+	t.Run("answers under the metric name KEDA asked for, in both value fields", func(t *testing.T) {
+		f := newFixture(t)
+
+		response, err := f.service.GetMetrics(context.Background(), &externalscaler.GetMetricsRequest{ScaledObjectRef: ref(capMetadata()), MetricName: "s1-quotaware-ceiling"})
+
+		if err != nil {
+			t.Fatal(err)
+		}
+		value := response.GetMetricValues()[0]
+		if value.GetMetricName() != "s1-quotaware-ceiling" || value.GetMetricValue() != 1 || value.GetMetricValueFloat() != 1 {
+			t.Fatalf("value = %+v, want the requested name echoed with both fields set", value)
+		}
 	})
 
 	t.Run("reports the headroom ceiling of the observed bucket", func(t *testing.T) {
 		f := newFixture(t)
-		f.observe(state.Key{Provider: "openai", Model: "gpt-4.1-mini", Key: "a"}, 900, 500000)
+		f.observe(bucketA, 900, 500000)
 
 		if got := metric(t, f, capMetadata()); got != 4 {
 			t.Fatalf("ceiling = %d, want 4", got)
@@ -184,7 +258,7 @@ func TestGetMetrics(t *testing.T) {
 
 	t.Run("sums the ceilings of credentials that share a model", func(t *testing.T) {
 		f := newFixture(t)
-		f.observe(state.Key{Provider: "openai", Model: "gpt-4.1-mini", Key: "a"}, 900, 500000)
+		f.observe(bucketA, 900, 500000)
 		f.observe(state.Key{Provider: "openai", Model: "gpt-4.1-mini", Key: "b"}, 900, 500000)
 		f.observe(state.Key{Provider: "openai", Model: "gpt-4.1", Key: "a"}, 900, 500000)
 
@@ -193,37 +267,39 @@ func TestGetMetrics(t *testing.T) {
 		}
 	})
 
+	t.Run("clamps the sum across credentials to maxReplicas", func(t *testing.T) {
+		f := newFixture(t)
+		f.observe(bucketA, 900, 500000)
+		f.observe(state.Key{Provider: "openai", Model: "gpt-4.1-mini", Key: "b"}, 900, 500000)
+		metadata := capMetadata()
+		metadata["maxReplicas"] = "6"
+
+		if got := metric(t, f, metadata); got != 6 {
+			t.Fatalf("ceiling = %d, want the sum clamped to 6", got)
+		}
+	})
+
 	t.Run("narrows to one credential when the metadata names it", func(t *testing.T) {
 		f := newFixture(t)
-		f.observe(state.Key{Provider: "openai", Model: "gpt-4.1-mini", Key: "a"}, 900, 500000)
+		f.observe(bucketA, 900, 500000)
 		f.observe(state.Key{Provider: "openai", Model: "gpt-4.1-mini", Key: "b"}, 900, 500000)
 		metadata := capMetadata()
 		metadata["credential"] = "b"
 
-		if got := metric(t, f, capMetadata()); got != 8 {
-			t.Fatalf("ceiling = %d, want 8 without a credential filter", got)
-		}
 		if got := metric(t, f, metadata); got != 4 {
 			t.Fatalf("ceiling = %d, want 4 for one credential", got)
 		}
 	})
 
-	t.Run("applies the step-up cap between consecutive polls and records the ceiling", func(t *testing.T) {
+	t.Run("records the ceiling per scaled object and logs the change", func(t *testing.T) {
 		f := newFixture(t)
-		f.observe(state.Key{Provider: "openai", Model: "gpt-4.1-mini", Key: "a"}, 900, 500000)
-		metadata := capMetadata()
-		metadata["maxStepUp"] = "1"
-		metadata["defaultCeiling"] = "1"
+		f.observe(bucketA, 900, 500000)
 
-		first := metric(t, f, metadata)
-		second := metric(t, f, metadata)
+		metric(t, f, capMetadata())
 
-		if first != 4 || second != 4 {
-			t.Fatalf("ceilings = %d, %d, want 4 on the first poll without a previous and 4 after", first, second)
-		}
 		ceilings := f.store.Ceilings()
-		if len(ceilings) != 1 || ceilings[0].Value != 4 || ceilings[0].Consumer.ScaledObject != "llm-workers" {
-			t.Fatalf("recorded ceilings = %+v, want one for llm-workers at 4", ceilings)
+		if len(ceilings) != 1 || ceilings[0].Value != 4 || ceilings[0].Consumer.ScaledObject != "llm-workers" || !ceilings[0].ChangedAt.Equal(now) {
+			t.Fatalf("recorded ceilings = %+v, want one for llm-workers at 4 changed now", ceilings)
 		}
 		if !strings.Contains(f.logs.String(), "ceiling changed") {
 			t.Fatalf("logs = %q, want the first ceiling logged", f.logs.String())
@@ -232,43 +308,75 @@ func TestGetMetrics(t *testing.T) {
 
 	t.Run("steps up from a ceiling it reported earlier", func(t *testing.T) {
 		f := newFixture(t)
-		key := state.Key{Provider: "openai", Model: "gpt-4.1-mini", Key: "a"}
-		f.observe(key, 0, 0)
+		f.observe(bucketA, 0, 0)
 		metadata := capMetadata()
 		metadata["maxStepUp"] = "1"
 
 		exhausted := metric(t, f, metadata)
-		f.observe(key, 900, 500000)
+		f.clock.Advance(20 * time.Second)
+		f.observe(bucketA, 900, 500000)
 		recovering := metric(t, f, metadata)
 
-		if exhausted != 0 || recovering != 1 {
-			t.Fatalf("ceilings = %d then %d, want 0 while exhausted and 1 after one step up", exhausted, recovering)
+		if exhausted != 1 || recovering != 2 {
+			t.Fatalf("ceilings = %d then %d, want the minimum of 1 while exhausted and one step up after", exhausted, recovering)
 		}
 	})
 
-	t.Run("queue mode returns the smaller of demand and ceiling", func(t *testing.T) {
+	t.Run("does not raise twice within one step interval however often KEDA asks", func(t *testing.T) {
 		f := newFixture(t)
-		f.observe(state.Key{Provider: "openai", Model: "gpt-4.1-mini", Key: "a"}, 900, 500000)
+		f.observe(bucketA, 0, 0)
 		metadata := capMetadata()
-		metadata["redisAddress"], metadata["listName"], metadata["listLength"] = "redis:6379", "jobs", "10"
+		metadata["maxStepUp"] = "1"
+		metric(t, f, metadata)
+		f.clock.Advance(20 * time.Second)
+		f.observe(bucketA, 900, 500000)
+
+		first := metric(t, f, metadata)
+		second := metric(t, f, metadata)
+		third := metric(t, f, metadata)
+
+		if first != 2 || second != 2 || third != 2 {
+			t.Fatalf("ceilings = %d, %d, %d, want one raise held for the step interval", first, second, third)
+		}
+	})
+
+	t.Run("queue mode returns the demand when it is below the ceiling", func(t *testing.T) {
+		f := newFixture(t)
+		f.observe(bucketA, 900, 500000)
 		f.queue.set(25, nil)
 
-		if got := metric(t, f, metadata); got != 3 {
+		if got := metric(t, f, queueMetadata()); got != 3 {
 			t.Fatalf("metric = %d, want demand ceil(25/10) = 3 below the ceiling of 4", got)
 		}
+	})
+
+	t.Run("queue mode returns the ceiling when demand exceeds it", func(t *testing.T) {
+		f := newFixture(t)
+		f.observe(bucketA, 900, 500000)
 		f.queue.set(95, nil)
-		if got := metric(t, f, metadata); got != 4 {
+
+		if got := metric(t, f, queueMetadata()); got != 4 {
 			t.Fatalf("metric = %d, want the ceiling of 4 below a demand of 10", got)
+		}
+	})
+
+	t.Run("queue mode defaults the list length to one", func(t *testing.T) {
+		f := newFixture(t)
+		f.observe(bucketA, 900, 500000)
+		f.queue.set(3, nil)
+		metadata := queueMetadata()
+		delete(metadata, "listLength")
+
+		if got := metric(t, f, metadata); got != 3 {
+			t.Fatalf("metric = %d, want one replica per queued item", got)
 		}
 	})
 
 	t.Run("queue mode fails loudly when the queue cannot be read", func(t *testing.T) {
 		f := newFixture(t)
-		metadata := capMetadata()
-		metadata["redisAddress"], metadata["listName"] = "redis:6379", "jobs"
 		f.queue.set(0, errors.New("connection refused"))
 
-		_, err := f.service.GetMetrics(context.Background(), &externalscaler.GetMetricsRequest{ScaledObjectRef: ref(metadata)})
+		_, err := f.service.GetMetrics(context.Background(), &externalscaler.GetMetricsRequest{ScaledObjectRef: ref(queueMetadata())})
 
 		if code(err) != codes.Unavailable {
 			t.Fatalf("code = %v, want Unavailable", code(err))
@@ -279,7 +387,7 @@ func TestGetMetrics(t *testing.T) {
 func TestIsActive(t *testing.T) {
 	t.Run("a cap trigger never activates a scaled object on its own", func(t *testing.T) {
 		f := newFixture(t)
-		f.observe(state.Key{Provider: "openai", Model: "gpt-4.1-mini", Key: "a"}, 900, 500000)
+		f.observe(bucketA, 900, 500000)
 
 		response, err := f.service.IsActive(context.Background(), ref(capMetadata()))
 
@@ -290,11 +398,9 @@ func TestIsActive(t *testing.T) {
 
 	t.Run("a queue trigger is active while the list has items", func(t *testing.T) {
 		f := newFixture(t)
-		metadata := capMetadata()
-		metadata["redisAddress"], metadata["listName"] = "redis:6379", "jobs"
 		f.queue.set(1, nil)
 
-		response, err := f.service.IsActive(context.Background(), ref(metadata))
+		response, err := f.service.IsActive(context.Background(), ref(queueMetadata()))
 
 		if err != nil || !response.GetResult() {
 			t.Fatalf("active = %v err = %v, want active", response.GetResult(), err)
@@ -302,9 +408,23 @@ func TestIsActive(t *testing.T) {
 	})
 }
 
+func TestClose(t *testing.T) {
+	f := newFixture(t)
+	f.queue.set(1, nil)
+	metric(t, f, queueMetadata())
+
+	if err := f.service.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if !f.queue.closed {
+		t.Fatal("the cached queue client was not closed")
+	}
+}
+
 func TestOverGRPC(t *testing.T) {
 	f := newFixture(t)
-	f.observe(state.Key{Provider: "openai", Model: "gpt-4.1-mini", Key: "a"}, 900, 500000)
+	f.observe(bucketA, 900, 500000)
 	listener := bufconn.Listen(1 << 20)
 	server := grpc.NewServer()
 	f.service.Register(server)
@@ -328,11 +448,10 @@ func TestOverGRPC(t *testing.T) {
 	})
 
 	t.Run("streams the activity state and pushes a change", func(t *testing.T) {
-		metadata := capMetadata()
-		metadata["redisAddress"], metadata["listName"] = "redis:6379", "jobs"
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		stream, err := client.StreamIsActive(ctx, ref(metadata))
+		f.queue.set(0, nil)
+		stream, err := client.StreamIsActive(ctx, ref(queueMetadata()))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -345,6 +464,45 @@ func TestOverGRPC(t *testing.T) {
 		second, err := stream.Recv()
 		if err != nil || !second.GetResult() {
 			t.Fatalf("second = %v err = %v, want the change to active pushed", second.GetResult(), err)
+		}
+	})
+
+	t.Run("ends the stream with Unavailable when the queue fails", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		f.queue.set(0, nil)
+		stream, err := client.StreamIsActive(ctx, ref(queueMetadata()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := stream.Recv(); err != nil {
+			t.Fatal(err)
+		}
+
+		f.queue.set(0, errors.New("connection reset"))
+		_, err = stream.Recv()
+
+		if code(err) != codes.Unavailable {
+			t.Fatalf("code = %v, want Unavailable", code(err))
+		}
+	})
+
+	t.Run("keeps a cap trigger stream open without sending again", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+		defer cancel()
+		stream, err := client.StreamIsActive(ctx, ref(capMetadata()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		first, err := stream.Recv()
+		if err != nil || first.GetResult() {
+			t.Fatalf("first = %v err = %v, want a single inactive state", first.GetResult(), err)
+		}
+
+		_, err = stream.Recv()
+
+		if code(err) != codes.DeadlineExceeded {
+			t.Fatalf("code = %v, want the stream to stay open until the client leaves", code(err))
 		}
 	})
 

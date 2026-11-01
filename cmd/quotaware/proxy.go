@@ -136,6 +136,11 @@ func runObserver(command string, args []string, stderr io.Writer, withScaler boo
 		}
 		rpc = grpc.NewServer()
 		service.Register(rpc)
+		defer func() {
+			if err := service.Close(); err != nil {
+				logger.Warn("closing queue clients", "error", err.Error())
+			}
+		}()
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

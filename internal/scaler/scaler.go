@@ -24,6 +24,7 @@ const MetricName = "quotaware-ceiling"
 
 type QueueDepth interface {
 	Len(ctx context.Context, name string) (int64, error)
+	Close() error
 }
 
 type QueueFactory func(address string) QueueDepth
@@ -34,10 +35,7 @@ type Config struct {
 }
 
 func DefaultConfig() Config {
-	defaults := headroom.DefaultConfig()
-	defaults.MinReplicas = 0
-	defaults.MaxReplicas = 100
-	return Config{Defaults: defaults, PushInterval: 5 * time.Second}
+	return Config{Defaults: headroom.DefaultConfig(), PushInterval: 5 * time.Second}
 }
 
 type Service struct {
@@ -54,10 +52,14 @@ type Service struct {
 
 func New(cfg Config, store *state.Store, queues QueueFactory, now func() time.Time, logger *slog.Logger) (*Service, error) {
 	switch {
-	case cfg.PushInterval <= 0:
-		return nil, errors.New("push interval must be positive")
+	case store == nil:
+		return nil, errors.New("store is required")
+	case now == nil:
+		return nil, errors.New("clock is required")
 	case logger == nil:
 		return nil, errors.New("logger is required")
+	case cfg.PushInterval <= 0:
+		return nil, errors.New("push interval must be positive")
 	}
 	if err := cfg.Defaults.Validate(); err != nil {
 		return nil, fmt.Errorf("defaults: %w", err)
@@ -67,6 +69,17 @@ func New(cfg Config, store *state.Store, queues QueueFactory, now func() time.Ti
 
 func (s *Service) Register(server *grpc.Server) {
 	externalscaler.RegisterExternalScalerServer(server, s)
+}
+
+func (s *Service) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var failure error
+	for address, reader := range s.queueByAddr {
+		failure = errors.Join(failure, reader.Close())
+		delete(s.queueByAddr, address)
+	}
+	return failure
 }
 
 type trigger struct {
@@ -90,55 +103,92 @@ func (s *Service) parse(ref *externalscaler.ScaledObjectRef) (trigger, error) {
 	if !ok || provider == "" || model == "" {
 		return trigger{}, status.Error(codes.InvalidArgument, `metadata "bucket" must be "provider/model"`)
 	}
-	t := trigger{provider: provider, model: model, credential: metadata["credential"], cfg: s.cfg.Defaults}
+	cfg, err := s.parseConfig(metadata)
+	if err != nil {
+		return trigger{}, err
+	}
+	queue, err := s.parseQueue(metadata)
+	if err != nil {
+		return trigger{}, err
+	}
+	return trigger{provider: provider, model: model, credential: metadata["credential"], cfg: cfg, queue: queue}, nil
+}
+
+type intField struct {
+	name   string
+	target *int
+}
+
+type floatField struct {
+	name   string
+	target *float64
+}
+
+type durationField struct {
+	name   string
+	target *time.Duration
+}
+
+func (s *Service) parseConfig(metadata map[string]string) (headroom.Config, error) {
+	cfg := s.cfg.Defaults
 	if _, present := metadata["concurrency"]; !present {
-		return trigger{}, status.Error(codes.InvalidArgument, `metadata "concurrency" is required`)
+		return headroom.Config{}, status.Error(codes.InvalidArgument, `metadata "concurrency" is required`)
 	}
-	ints := map[string]*int{
-		"concurrency":    &t.cfg.Concurrency,
-		"maxStepUp":      &t.cfg.MaxStepUp,
-		"defaultCeiling": &t.cfg.DefaultCeiling,
-		"minReplicas":    &t.cfg.MinReplicas,
-		"maxReplicas":    &t.cfg.MaxReplicas,
+	ints := []intField{
+		{"concurrency", &cfg.Concurrency},
+		{"maxStepUp", &cfg.MaxStepUp},
+		{"defaultCeiling", &cfg.DefaultCeiling},
+		{"minReplicas", &cfg.MinReplicas},
+		{"maxReplicas", &cfg.MaxReplicas},
 	}
-	for name, target := range ints {
-		if err := parseInt(metadata, name, target); err != nil {
-			return trigger{}, err
+	for _, field := range ints {
+		if err := parseInt(metadata, field.name, field.target); err != nil {
+			return headroom.Config{}, err
 		}
 	}
-	floats := map[string]*float64{"safety": &t.cfg.Safety, "share": &t.cfg.Share}
-	for name, target := range floats {
-		if err := parseFloat(metadata, name, target); err != nil {
-			return trigger{}, err
+	floats := []floatField{{"safety", &cfg.Safety}, {"share", &cfg.Share}}
+	for _, field := range floats {
+		if err := parseFloat(metadata, field.name, field.target); err != nil {
+			return headroom.Config{}, err
 		}
 	}
-	durations := map[string]*time.Duration{"window": &t.cfg.Window, "staleAfter": &t.cfg.StaleAfter, "staleHard": &t.cfg.StaleHard}
-	for name, target := range durations {
-		if err := parseDuration(metadata, name, target); err != nil {
-			return trigger{}, err
+	durations := []durationField{
+		{"window", &cfg.Window},
+		{"stepInterval", &cfg.StepInterval},
+		{"staleAfter", &cfg.StaleAfter},
+		{"staleHard", &cfg.StaleHard},
+	}
+	for _, field := range durations {
+		if err := parseDuration(metadata, field.name, field.target); err != nil {
+			return headroom.Config{}, err
 		}
 	}
-	if err := t.cfg.Validate(); err != nil {
-		return trigger{}, status.Error(codes.InvalidArgument, err.Error())
+	if err := cfg.Validate(); err != nil {
+		return headroom.Config{}, status.Error(codes.InvalidArgument, err.Error())
 	}
-	if address, present := metadata["redisAddress"]; present {
-		if s.queues == nil {
-			return trigger{}, status.Error(codes.FailedPrecondition, "queue reading is not enabled on this scaler")
-		}
-		q := &queueTrigger{address: address, list: metadata["listName"], listLength: 1}
-		if q.address == "" || q.list == "" {
-			return trigger{}, status.Error(codes.InvalidArgument, `metadata "redisAddress" and "listName" are both required for queue mode`)
-		}
-		if raw, present := metadata["listLength"]; present {
-			length, err := strconv.ParseInt(raw, 10, 64)
-			if err != nil || length <= 0 {
-				return trigger{}, status.Error(codes.InvalidArgument, `metadata "listLength" must be a positive integer`)
-			}
-			q.listLength = length
-		}
-		t.queue = q
+	return cfg, nil
+}
+
+func (s *Service) parseQueue(metadata map[string]string) (*queueTrigger, error) {
+	address, present := metadata["redisAddress"]
+	if !present {
+		return nil, nil
 	}
-	return t, nil
+	if s.queues == nil {
+		return nil, status.Error(codes.FailedPrecondition, "queue reading is not enabled on this scaler")
+	}
+	q := &queueTrigger{address: address, list: metadata["listName"], listLength: 1}
+	if q.address == "" || q.list == "" {
+		return nil, status.Error(codes.InvalidArgument, `metadata "redisAddress" and "listName" are both required for queue mode`)
+	}
+	if raw, present := metadata["listLength"]; present {
+		length, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || length <= 0 {
+			return nil, status.Error(codes.InvalidArgument, `metadata "listLength" must be a positive integer`)
+		}
+		q.listLength = length
+	}
+	return q, nil
 }
 
 func parseInt(metadata map[string]string, name string, target *int) error {
@@ -185,7 +235,7 @@ func (s *Service) GetMetricSpec(_ context.Context, ref *externalscaler.ScaledObj
 		return nil, err
 	}
 	return &externalscaler.GetMetricSpecResponse{
-		MetricSpecs: []*externalscaler.MetricSpec{{MetricName: MetricName, TargetSize: 1}},
+		MetricSpecs: []*externalscaler.MetricSpec{{MetricName: MetricName, TargetSize: 1, TargetSizeFloat: 1}},
 	}, nil
 }
 
@@ -203,8 +253,12 @@ func (s *Service) GetMetrics(ctx context.Context, request *externalscaler.GetMet
 		}
 		value = min(value, demand)
 	}
+	name := request.GetMetricName()
+	if name == "" {
+		name = MetricName
+	}
 	return &externalscaler.GetMetricsResponse{
-		MetricValues: []*externalscaler.MetricValue{{MetricName: MetricName, MetricValue: int64(value)}},
+		MetricValues: []*externalscaler.MetricValue{{MetricName: name, MetricValue: int64(value), MetricValueFloat: float64(value)}},
 	}, nil
 }
 
@@ -232,6 +286,10 @@ func (s *Service) StreamIsActive(ref *externalscaler.ScaledObjectRef, stream ext
 	}
 	if err := stream.Send(&externalscaler.IsActiveResponse{Result: last}); err != nil {
 		return err
+	}
+	if t.queue == nil {
+		<-ctx.Done()
+		return nil
 	}
 	ticker := time.NewTicker(s.cfg.PushInterval)
 	defer ticker.Stop()
@@ -299,27 +357,33 @@ func (s *Service) ceiling(ref *externalscaler.ScaledObjectRef, t trigger) int {
 		}
 		matched++
 		consumer := state.Consumer{Namespace: ref.GetNamespace(), ScaledObject: ref.GetName(), Bucket: b.Key}
-		var previous headroom.Previous
-		if last, ok := s.store.Ceiling(consumer); ok {
-			previous = headroom.Previous{Ceiling: last.Value, Known: true}
-		}
-		result := headroom.Compute(t.cfg, b.Observation(), previous, now)
-		s.record(consumer, result, previous, now)
-		total += result.Ceiling
+		total += s.evaluate(consumer, t.cfg, b.Observation(), now)
 	}
 	if matched == 0 {
-		return t.cfg.DefaultCeiling
+		consumer := state.Consumer{Namespace: ref.GetNamespace(), ScaledObject: ref.GetName(), Bucket: state.Key{Provider: t.provider, Model: t.model, Key: t.credential}}
+		return s.evaluate(consumer, t.cfg, headroom.Observation{}, now)
 	}
-	return total
+	return min(total, t.cfg.MaxReplicas)
 }
 
-func (s *Service) record(consumer state.Consumer, result headroom.Result, previous headroom.Previous, now time.Time) {
-	s.store.RecordCeiling(state.Ceiling{Consumer: consumer, Value: result.Ceiling, Reason: result.Reason, At: now})
-	if !previous.Known || previous.Ceiling != result.Ceiling {
+func (s *Service) evaluate(consumer state.Consumer, cfg headroom.Config, obs headroom.Observation, now time.Time) int {
+	var change *headroom.Result
+	var from int
+	ceiling := s.store.UpdateCeiling(consumer, func(previous state.Ceiling, known bool) state.Ceiling {
+		result := headroom.Compute(cfg, obs, headroom.Previous{Ceiling: previous.Value, Known: known, At: previous.ChangedAt}, now)
+		next := state.Ceiling{Value: result.Ceiling, ChangedAt: previous.ChangedAt, Seen: now}
+		if !known || result.Ceiling != previous.Value {
+			next.ChangedAt = now
+			change, from = &result, previous.Value
+		}
+		return next
+	})
+	if change != nil {
 		s.logger.Info("ceiling changed",
 			"namespace", consumer.Namespace, "scaledobject", consumer.ScaledObject,
 			"bucket", consumer.Bucket.Provider+"/"+consumer.Bucket.Model, "credential", consumer.Bucket.Key,
-			"from", previous.Ceiling, "to", result.Ceiling, "reason", string(result.Reason),
-			"allowed_rate", result.AllowedRate, "pod_rate", result.PodRate)
+			"from", from, "to", change.Ceiling, "reason", string(change.Reason),
+			"allowed_rate", change.AllowedRate, "pod_rate", change.PodRate)
 	}
+	return ceiling.Value
 }
