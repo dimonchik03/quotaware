@@ -1,0 +1,139 @@
+package plot_test
+
+import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/dimonchik03/quotaware/bench/plot"
+)
+
+var start = time.Date(2026, 11, 1, 18, 0, 0, 0, time.UTC)
+
+func matrixJSON(t *testing.T, values [][2]float64) []byte {
+	t.Helper()
+	samples := make([][]any, len(values))
+	for i, v := range values {
+		samples[i] = []any{v[0], strconvFloat(v[1])}
+	}
+	raw, err := json.Marshal(map[string]any{"status": "success", "data": map[string]any{"resultType": "matrix", "result": []map[string]any{{"metric": map[string]string{}, "values": samples}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
+}
+
+func strconvFloat(v float64) string {
+	return strconv.FormatFloat(v, 'f', -1, 64)
+}
+
+func vectorJSON(t *testing.T, value float64) []byte {
+	t.Helper()
+	raw, err := json.Marshal(map[string]any{"status": "success", "data": map[string]any{"resultType": "vector", "result": []map[string]any{{"metric": map[string]string{}, "value": []any{float64(start.Unix()), strconvFloat(value)}}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
+}
+
+func writeRun(t *testing.T, root, name string, replicas, limited, queue, multiplier [][2]float64, totals map[string]float64) {
+	t.Helper()
+	dir := filepath.Join(root, name)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write := func(file string, raw []byte) {
+		if err := os.WriteFile(filepath.Join(dir, file), raw, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("run.json", []byte(`{"start":`+strconvFloat(float64(start.Unix()))+`,"end":`+strconvFloat(float64(start.Add(4*time.Minute).Unix()))+`}`))
+	write("replicas.json", matrixJSON(t, replicas))
+	write("rate_limited_per_minute.json", matrixJSON(t, limited))
+	write("queue_length.json", matrixJSON(t, queue))
+	write("multiplier.json", matrixJSON(t, multiplier))
+	write("ceiling.json", matrixJSON(t, nil))
+	for metric, value := range totals {
+		write(metric+".json", vectorJSON(t, value))
+	}
+}
+
+func at(seconds float64) float64 {
+	return float64(start.Unix()) + seconds
+}
+
+func TestReport(t *testing.T) {
+	root := t.TempDir()
+	multiplier := [][2]float64{{at(0), 1}, {at(60), 1}, {at(120), 3}, {at(180), 0}, {at(240), 0}}
+	writeRun(t, root, "A",
+		[][2]float64{{at(0), 1}, {at(60), 4}, {at(120), 12}, {at(180), 12}, {at(240), 12}},
+		[][2]float64{{at(0), 0}, {at(60), 0}, {at(120), 300}, {at(180), 200}, {at(240), 0}},
+		[][2]float64{{at(0), 0}, {at(60), 10}, {at(120), 400}, {at(180), 300}, {at(240), 0}},
+		multiplier,
+		map[string]float64{"jobs_total": 900, "completed_total": 900, "failed_total": 0, "rate_limited_total": 500, "retries_total": 500, "latency_p50": 12, "latency_p95": 60, "backoff_seconds_total": 840})
+	writeRun(t, root, "B",
+		[][2]float64{{at(0), 1}, {at(60), 4}, {at(120), 8}, {at(180), 8}, {at(240), 8}},
+		[][2]float64{{at(0), 0}, {at(60), 0}, {at(120), 0}, {at(180), 0}, {at(240), 0}},
+		[][2]float64{{at(0), 0}, {at(60), 10}, {at(120), 500}, {at(180), 200}, {at(240), 0}},
+		multiplier,
+		map[string]float64{"jobs_total": 900, "completed_total": 900, "failed_total": 0, "rate_limited_total": 0, "retries_total": 0, "latency_p50": 15, "latency_p95": 40, "backoff_seconds_total": 0})
+	baseline, err := plot.LoadRun(filepath.Join(root, "A"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	capped, err := plot.LoadRun(filepath.Join(root, "B"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	report := plot.Build(baseline, capped, 2)
+
+	t.Run("loads series and totals from Prometheus responses", func(t *testing.T) {
+		if len(baseline.Series["replicas"]) != 5 || baseline.Totals["rate_limited_total"] != 500 {
+			t.Fatalf("run = %+v", baseline)
+		}
+	})
+
+	t.Run("derives the phases from the load multiplier", func(t *testing.T) {
+		if len(report.Phases) != 3 || report.Phases[1].Label != "3x quota" || report.Phases[2].Label != "idle" {
+			t.Fatalf("phases = %+v", report.Phases)
+		}
+	})
+
+	t.Run("summarises both runs in a table", func(t *testing.T) {
+		table := report.Markdown()
+		for _, want := range []string{"| 429 responses | 500 | 0 |", "| Peak replicas | 12 | 8 |", "| Idle pod-seconds (in backoff) | 420 | 0 |", "| Job latency p95 | 60.0 s | 40.0 s |", "| Time to drain the burst | 60 s | 60 s |", "| Time to react after the first 429 | never scaled down | no 429 observed |"} {
+			if !strings.Contains(table, want) {
+				t.Fatalf("table lacks %q:\n%s", want, table)
+			}
+		}
+	})
+
+	t.Run("integrates pod-seconds under the replica curve", func(t *testing.T) {
+		if !strings.Contains(report.Markdown(), "| Pod-seconds | 2070 | 1470 |") {
+			t.Fatalf("table:\n%s", report.Markdown())
+		}
+	})
+
+	t.Run("writes three charts and the summary", func(t *testing.T) {
+		out := t.TempDir()
+
+		if err := report.Write(out); err != nil {
+			t.Fatal(err)
+		}
+
+		for _, name := range []string{"replicas.svg", "rate_limits.svg", "queue.svg", "summary.md"} {
+			raw, err := os.ReadFile(filepath.Join(out, name))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.HasSuffix(name, ".svg") && (!strings.HasPrefix(string(raw), "<svg") || !strings.Contains(string(raw), "<path")) {
+				t.Fatalf("%s is not a chart with lines", name)
+			}
+		}
+	})
+}
