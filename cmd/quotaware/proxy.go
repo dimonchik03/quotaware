@@ -6,7 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
@@ -17,6 +17,11 @@ import (
 	"github.com/dimonchik03/quotaware/internal/metrics"
 	"github.com/dimonchik03/quotaware/internal/proxy"
 	"github.com/dimonchik03/quotaware/internal/state"
+)
+
+const (
+	evictEvery = time.Minute
+	evictAfter = 10 * time.Minute
 )
 
 type proxyOptions struct {
@@ -39,6 +44,9 @@ func parseProxyFlags(args []string, stderr io.Writer) (proxyOptions, error) {
 	flags.Int64Var(&options.proxy.MaxCaptureBytes, "max-capture-bytes", options.proxy.MaxCaptureBytes, "largest response body inspected for usage")
 	if err := flags.Parse(args); err != nil {
 		return proxyOptions{}, err
+	}
+	if options.listen == options.admin {
+		return proxyOptions{}, errors.New("listen and admin addresses must differ")
 	}
 	var err error
 	if options.proxy.OpenAI, err = parseOrigin(*openAI); err != nil {
@@ -74,6 +82,8 @@ func runProxy(args []string, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "quotaware proxy: %v\n", err)
 		return 2
 	}
+	logger := slog.New(slog.NewTextHandler(stderr, nil))
+	options.proxy.Logger = logger
 	store, err := state.New(options.alpha)
 	if err != nil {
 		fmt.Fprintf(stderr, "quotaware proxy: %v\n", err)
@@ -92,13 +102,26 @@ func runProxy(args []string, stderr io.Writer) int {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	logger := log.New(stderr, "", log.LstdFlags)
-	logger.Printf("proxy listening on %s, admin on %s, openai=%s anthropic=%s", options.listen, options.admin, options.proxy.OpenAI, options.proxy.Anthropic)
+	go evictIdleBuckets(ctx, store)
+	logger.Info("proxy listening", "listen", options.listen, "admin", options.admin, "openai", options.proxy.OpenAI.String(), "anthropic", options.proxy.Anthropic.String())
 	if err := serve(ctx, map[string]http.Handler{options.listen: handler, options.admin: admin}); err != nil {
 		fmt.Fprintf(stderr, "quotaware proxy: %v\n", err)
 		return 1
 	}
 	return 0
+}
+
+func evictIdleBuckets(ctx context.Context, store *state.Store) {
+	ticker := time.NewTicker(evictEvery)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case now := <-ticker.C:
+			store.Evict(now, evictAfter)
+		}
+	}
 }
 
 func serve(ctx context.Context, handlers map[string]http.Handler) error {
@@ -121,7 +144,7 @@ func serve(ctx context.Context, handlers map[string]http.Handler) error {
 	shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	for _, server := range servers {
-		_ = server.Shutdown(shutdown)
+		failure = errors.Join(failure, server.Shutdown(shutdown))
 	}
 	return failure
 }

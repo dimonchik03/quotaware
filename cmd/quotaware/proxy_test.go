@@ -37,6 +37,14 @@ func TestProxyFlags(t *testing.T) {
 		}
 	})
 
+	t.Run("rejects the same address for the proxy and the admin port", func(t *testing.T) {
+		_, err := parseProxyFlags([]string{"-listen", ":8080", "-admin", ":8080"}, &bytes.Buffer{})
+
+		if err == nil || !strings.Contains(err.Error(), "differ") {
+			t.Fatalf("err = %v, want a complaint about identical addresses", err)
+		}
+	})
+
 	t.Run("exits with 2 on an invalid alpha", func(t *testing.T) {
 		var stderr bytes.Buffer
 

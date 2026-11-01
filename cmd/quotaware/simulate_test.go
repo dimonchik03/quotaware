@@ -49,6 +49,20 @@ func TestSimulate(t *testing.T) {
 		}
 	})
 
+	t.Run("applies an optional project token window as a second constraint", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		input := `{"at":"2026-11-01T18:00:00Z","requests":{"limit":1000,"remaining":900,"reset_at":"2026-11-01T18:00:30Z"},"tokens":{"limit":600000,"remaining":500000,"reset_at":"2026-11-01T18:00:30Z"},"project_tokens":{"limit":600000,"remaining":240000,"reset_at":"2026-11-01T18:00:30Z"},"tokens_per_call":1000,"latency_ms":2000}` + "\n"
+
+		code := run([]string{"simulate", "-concurrency", "4", "-max", "40"}, strings.NewReader(input), &stdout, &stderr)
+
+		if code != 0 {
+			t.Fatalf("exit code = %d, stderr = %q", code, stderr.String())
+		}
+		if !strings.Contains(stdout.String(), "2026-11-01T18:00:00Z\t3\theadroom\t6.80\t2.00") {
+			t.Fatalf("stdout = %q, want the project window to bound the ceiling at 3", stdout.String())
+		}
+	})
+
 	t.Run("names the line that cannot be decoded and exits with 1", func(t *testing.T) {
 		var stdout, stderr bytes.Buffer
 		input := `{"at":"2026-11-01T18:00:00Z"}` + "\n" + `not json` + "\n"
