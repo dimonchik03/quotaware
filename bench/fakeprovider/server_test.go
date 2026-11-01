@@ -60,6 +60,17 @@ func decode(t *testing.T, body string) map[string]any {
 	return payload
 }
 
+func eventOfType(t *testing.T, events []map[string]any, kind string) map[string]any {
+	t.Helper()
+	for _, event := range events {
+		if event["type"] == kind {
+			return event
+		}
+	}
+	t.Fatalf("no %s event in %v", kind, events)
+	return nil
+}
+
 func sseData(t *testing.T, body string) []map[string]any {
 	t.Helper()
 	var events []map[string]any
@@ -119,6 +130,22 @@ func TestChatCompletions(t *testing.T) {
 		}
 		if decode(t, response.Body.String())["error"].(map[string]any)["code"] != "rate_limit_exceeded" {
 			t.Fatalf("body = %s, want an OpenAI rate limit error", response.Body.String())
+		}
+	})
+
+	t.Run("returns 429 on tokens when a call would exceed the window's token limit", func(t *testing.T) {
+		cfg := config()
+		cfg.TokensPerMinute = 30
+		s, _ := newServer(t, cfg)
+		post(t, s, "/v1/chat/completions", chat)
+
+		response := post(t, s, "/v1/chat/completions", chat)
+
+		if response.Code != http.StatusTooManyRequests {
+			t.Fatalf("status = %d, want 429 once the token window is spent", response.Code)
+		}
+		if response.Header().Get("x-ratelimit-remaining-requests") != "2" {
+			t.Fatalf("remaining requests = %q, want 2 because the request window still has room", response.Header().Get("x-ratelimit-remaining-requests"))
 		}
 	})
 
@@ -200,6 +227,22 @@ func TestMessages(t *testing.T) {
 		}
 	})
 
+	t.Run("returns 429 with the token refill time when the bucket lacks tokens", func(t *testing.T) {
+		cfg := config()
+		cfg.TokensPerMinute = 40
+		s, _ := newServer(t, cfg)
+		post(t, s, "/v1/messages", msg)
+
+		response := post(t, s, "/v1/messages", msg)
+
+		if response.Code != http.StatusTooManyRequests {
+			t.Fatalf("status = %d, want 429 once the token bucket is drained", response.Code)
+		}
+		if response.Header().Get("retry-after") == "" || response.Header().Get("retry-after") == "0" {
+			t.Fatalf("retry-after = %q, want the seconds until enough tokens refill", response.Header().Get("retry-after"))
+		}
+	})
+
 	t.Run("reports retry-after as the seconds until one request refills", func(t *testing.T) {
 		s, _ := newServer(t, config())
 		for range 3 {
@@ -225,15 +268,9 @@ func TestMessages(t *testing.T) {
 		if !strings.Contains(body, "event: message_start") || !strings.Contains(body, "event: message_stop") {
 			t.Fatalf("stream = %q, want message_start and message_stop", body)
 		}
-		events := sseData(t, body)
-		var deltaUsage map[string]any
-		for _, event := range events {
-			if event["type"] == "message_delta" {
-				deltaUsage = event["usage"].(map[string]any)
-			}
-		}
-		if deltaUsage == nil || deltaUsage["output_tokens"].(float64) != 5 {
-			t.Fatalf("message_delta usage = %v, want 5 output tokens", deltaUsage)
+		delta := eventOfType(t, sseData(t, body), "message_delta")
+		if delta["usage"].(map[string]any)["output_tokens"].(float64) != 5 {
+			t.Fatalf("message_delta = %v, want 5 output tokens", delta)
 		}
 	})
 }
@@ -266,6 +303,19 @@ func TestServer(t *testing.T) {
 
 		if response.Code != http.StatusTooManyRequests {
 			t.Fatalf("status = %d, want 429 for the eleventh request in ten seconds", response.Code)
+		}
+		if response.Header().Get("x-ratelimit-remaining-requests") != "50" {
+			t.Fatalf("remaining = %q, want 50: an acceleration rejection must not consume the window", response.Header().Get("x-ratelimit-remaining-requests"))
+		}
+	})
+
+	t.Run("rejects an oversized body with 413", func(t *testing.T) {
+		s, _ := newServer(t, config())
+
+		response := post(t, s, "/v1/chat/completions", `{"model":"gpt-4.1-mini","messages":[{"content":"`+strings.Repeat("x", 9<<20)+`"}]}`)
+
+		if response.Code != http.StatusRequestEntityTooLarge {
+			t.Fatalf("status = %d, want 413", response.Code)
 		}
 	})
 

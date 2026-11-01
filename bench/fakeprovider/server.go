@@ -115,13 +115,13 @@ type call struct {
 }
 
 func (s *Server) chatCompletions(w http.ResponseWriter, r *http.Request) {
-	c, ok := s.admit(w, r, func(model string, now time.Time, tokens int) decision {
+	c, ok := s.admit(w, r, func(model string) quotaSource {
 		window, found := s.windows[model]
 		if !found {
-			window = &fixedWindow{}
+			window = &fixedWindow{epoch: s.epoch}
 			s.windows[model] = window
 		}
-		return window.take(s.cfg, s.epoch, now, tokens)
+		return window
 	})
 	if !ok {
 		return
@@ -141,13 +141,13 @@ func (s *Server) chatCompletions(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) messages(w http.ResponseWriter, r *http.Request) {
-	c, ok := s.admit(w, r, func(model string, now time.Time, tokens int) decision {
+	c, ok := s.admit(w, r, func(model string) quotaSource {
 		bucket, found := s.buckets[model]
 		if !found {
 			bucket = &tokenBucket{}
 			s.buckets[model] = bucket
 		}
-		return bucket.take(s.cfg, now, tokens)
+		return bucket
 	})
 	if !ok {
 		return
@@ -166,12 +166,16 @@ func (s *Server) messages(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, message(c))
 }
 
-type limiter func(model string, now time.Time, tokens int) decision
+type sourceLookup func(model string) quotaSource
 
-func (s *Server) admit(w http.ResponseWriter, r *http.Request, take limiter) (call, bool) {
-	body, err := io.ReadAll(io.LimitReader(r.Body, maxRequestBytes))
+func (s *Server) admit(w http.ResponseWriter, r *http.Request, lookup sourceLookup) (call, bool) {
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxRequestBytes+1))
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "unreadable body"})
+		return call{}, false
+	}
+	if len(body) > maxRequestBytes {
+		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]any{"error": "request body too large"})
 		return call{}, false
 	}
 	var req request
@@ -189,6 +193,7 @@ func (s *Server) admit(w http.ResponseWriter, r *http.Request, take limiter) (ca
 	defer s.mu.Unlock()
 	now := s.now()
 	c := call{request: req, input: input, output: output, now: now}
+	source := lookup(req.Model)
 	if s.cfg.Acceleration {
 		tracker, found := s.bursts[req.Model]
 		if !found {
@@ -196,14 +201,13 @@ func (s *Server) admit(w http.ResponseWriter, r *http.Request, take limiter) (ca
 			s.bursts[req.Model] = tracker
 		}
 		if tracker.exceeds(s.cfg, now) {
-			c.decision = take(req.Model, now, 0)
-			c.decision.allowed = false
+			c.decision = source.peek(s.cfg, now)
 			c.decision.retryAfter = time.Second
 			return c, true
 		}
 		tracker.record(now)
 	}
-	c.decision = take(req.Model, now, input+output)
+	c.decision = source.take(s.cfg, now, input+output)
 	if c.decision.allowed {
 		s.sequence++
 		c.id = s.sequence

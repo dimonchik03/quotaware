@@ -18,20 +18,33 @@ type decision struct {
 	tokens     quota
 }
 
+type quotaSource interface {
+	take(cfg Config, now time.Time, tokens int) decision
+	peek(cfg Config, now time.Time) decision
+}
+
 type fixedWindow struct {
+	epoch    time.Time
 	start    time.Time
 	requests int
 	tokens   int
 }
 
-func (w *fixedWindow) take(cfg Config, epoch, now time.Time, tokens int) decision {
-	elapsed := now.Sub(epoch)
-	start := epoch.Add(elapsed.Truncate(time.Minute))
+func (w *fixedWindow) take(cfg Config, now time.Time, tokens int) decision {
+	return w.decide(cfg, now, tokens, true)
+}
+
+func (w *fixedWindow) peek(cfg Config, now time.Time) decision {
+	return w.decide(cfg, now, 0, false)
+}
+
+func (w *fixedWindow) decide(cfg Config, now time.Time, tokens int, consume bool) decision {
+	start := w.epoch.Add(now.Sub(w.epoch).Truncate(time.Minute))
 	if !w.start.Equal(start) {
 		w.start, w.requests, w.tokens = start, 0, 0
 	}
 	resetIn := w.start.Add(time.Minute).Sub(now)
-	allowed := w.requests < cfg.RequestsPerMinute && w.tokens+tokens <= cfg.TokensPerMinute
+	allowed := consume && w.requests < cfg.RequestsPerMinute && w.tokens+tokens <= cfg.TokensPerMinute
 	if allowed {
 		w.requests++
 		w.tokens += tokens
@@ -51,6 +64,14 @@ type tokenBucket struct {
 }
 
 func (b *tokenBucket) take(cfg Config, now time.Time, tokens int) decision {
+	return b.decide(cfg, now, tokens, true)
+}
+
+func (b *tokenBucket) peek(cfg Config, now time.Time) decision {
+	return b.decide(cfg, now, 0, false)
+}
+
+func (b *tokenBucket) decide(cfg Config, now time.Time, tokens int, consume bool) decision {
 	requestRate := float64(cfg.RequestsPerMinute) / 60
 	tokenRate := float64(cfg.TokensPerMinute) / 60
 	if b.last.IsZero() {
@@ -64,6 +85,8 @@ func (b *tokenBucket) take(cfg Config, now time.Time, tokens int) decision {
 	need := float64(tokens)
 	var retryAfter time.Duration
 	switch {
+	case !consume:
+		retryAfter = wholeSeconds(secondsToDuration((1 - b.requests) / requestRate))
 	case b.requests < 1:
 		retryAfter = wholeSeconds(secondsToDuration((1 - b.requests) / requestRate))
 	case b.tokens < need:
@@ -73,7 +96,7 @@ func (b *tokenBucket) take(cfg Config, now time.Time, tokens int) decision {
 		b.tokens -= need
 	}
 	return decision{
-		allowed:    retryAfter == 0,
+		allowed:    consume && retryAfter == 0,
 		retryAfter: retryAfter,
 		requests: quota{
 			limit:     cfg.RequestsPerMinute,

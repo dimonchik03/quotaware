@@ -153,13 +153,13 @@ func (s *stream) event(name string, payload any) {
 func (s *stream) data(payload any) {
 	encoded, err := json.Marshal(payload)
 	if err != nil {
-		return
+		panic(err)
 	}
 	s.raw("data: " + string(encoded) + "\n\n")
 }
 
 func (s *stream) raw(text string) {
-	_, _ = fmt.Fprint(s.w, text)
+	fmt.Fprint(s.w, text)
 	if s.flusher != nil {
 		s.flusher.Flush()
 	}

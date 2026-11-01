@@ -48,14 +48,19 @@ func run(args []string) int {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	stopped := make(chan error, 1)
 	go func() {
 		<-ctx.Done()
 		shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		_ = server.Shutdown(shutdown)
+		stopped <- server.Shutdown(shutdown)
 	}()
 	log.Printf("fakeprovider listening on %s (rpm=%d tpm=%d latency=%s seed=%d)", *listen, cfg.RequestsPerMinute, cfg.TokensPerMinute, cfg.Latency, cfg.Seed)
-	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	err := server.ListenAndServe()
+	if errors.Is(err, http.ErrServerClosed) {
+		err = <-stopped
+	}
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "fakeprovider: %v\n", err)
 		return 1
 	}
