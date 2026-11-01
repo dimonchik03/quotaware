@@ -90,14 +90,15 @@ three requests per minute:
     $ curl -s localhost:19100/metrics | grep -E "^quotaware_(remaining|tokens_per_call|429|retry)"
     quotaware_429_total{key="05eeabac53a7",model="gpt-4.1-mini",provider="openai"} 1
     quotaware_remaining_requests{key="05eeabac53a7",model="gpt-4.1-mini",provider="openai"} 0
-    quotaware_remaining_tokens{key="05eeabac53a7",model="gpt-4.1-mini",provider="openai",scope="organization"} 49499
+    quotaware_remaining_tokens{key="05eeabac53a7",model="gpt-4.1-mini",provider="openai",window="tokens"} 49499
     quotaware_retry_after_seconds{key="05eeabac53a7",model="gpt-4.1-mini",provider="openai"} 60
     quotaware_tokens_per_call{key="05eeabac53a7",model="gpt-4.1-mini",provider="openai"} 167
 
 What the proxy records per bucket: the limit, remaining and reset of every window
 the provider reports, a smoothed tokens-per-call and latency over successful calls,
-calls in flight, 429s with their `retry-after`, and how often headers or usage were
-missing. Tokens per call count what the provider charges against the quota: prompt
+calls in flight, 429s with their `retry-after`, upstream failures, streams the client
+abandoned, and how often headers were missing or malformed or usage was absent.
+Buckets that see no traffic for ten minutes are dropped. Tokens per call count what the provider charges against the quota: prompt
 plus completion tokens for OpenAI, uncached input plus cache writes plus output for
 Anthropic. Usage comes from the response body, so OpenAI streams only report it when
 the client sets `stream_options.include_usage`; a stream without it is counted in
@@ -118,9 +119,9 @@ Not a gateway, not a rate limiter, not a cost dashboard. See `docs/SPEC.md`.
 
 ## Status
 
-v0.1 in progress. Milestones 1 and 2 (header parsers, headroom algorithm,
-`simulate`, the proxy with its metrics and the fake provider) are done; the KEDA
-scaler and the benchmark follow. Specification in `docs/SPEC.md`,
+v0.1 in progress. Header parsers, the headroom algorithm, `simulate`, the proxy
+with its metrics and the fake provider are done. The KEDA scaler, the
+`quotaware_ceiling` series, the Grafana dashboard and the benchmark follow. Specification in `docs/SPEC.md`,
 decisions in `docs/adr`.
 
 ## License

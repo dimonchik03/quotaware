@@ -55,7 +55,8 @@ Per response it records, keyed by bucket `(provider, model, api-key hash)`:
 - rate-limit headers (see the provider matrix below);
 - token usage from the response body (`usage` object; for streams, the final
   `message_delta` on Anthropic and the usage chunk on OpenAI when
-  `stream_options.include_usage` is set; otherwise fall back to header deltas);
+  `stream_options.include_usage` is set; otherwise the call is counted as usage
+  missing, never estimated);
 - wall-clock latency and in-flight count.
 
 Phase 2 collectors that remove the extra hop: a Go `http.RoundTripper` wrapper and a
@@ -174,11 +175,16 @@ quotaware reads the queue depth itself (Redis list in v0.1) and returns
 
 ### 6. Metrics
 
-Prometheus on `/metrics`, labelled by bucket: `quotaware_remaining_tokens`,
-`quotaware_remaining_requests`, `quotaware_reset_seconds`, `quotaware_tokens_per_call`,
-`quotaware_latency_seconds`, `quotaware_ceiling`, `quotaware_inflight`,
-`quotaware_429_total`, `quotaware_retry_after_seconds`,
-`quotaware_headers_missing_total`. A Grafana dashboard JSON ships in `deploy/grafana/`.
+Prometheus on `/metrics`, labelled by `provider`, `model` and `key` (a hash of the
+credential): `quotaware_limit_requests`, `quotaware_remaining_requests`,
+`quotaware_limit_tokens` and `quotaware_remaining_tokens` (with a `window` label for
+the organization, project, input and output token windows), `quotaware_reset_seconds`
+per window, `quotaware_tokens_per_call`, `quotaware_latency_seconds`,
+`quotaware_inflight`, `quotaware_retry_after_seconds`, `quotaware_ceiling`, and the
+counters `quotaware_responses_total`, `quotaware_429_total`, `quotaware_aborted_total`,
+`quotaware_upstream_errors_total`, `quotaware_headers_missing_total`,
+`quotaware_headers_malformed_total` and `quotaware_usage_missing_total`.
+A Grafana dashboard JSON ships in `deploy/grafana/`.
 
 ## Provider header matrix
 

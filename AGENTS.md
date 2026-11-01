@@ -52,8 +52,8 @@ Never run two heavy commands (tests, lint, kind) at the same time on this machin
     cmd/quotaware/      entry point and subcommands: proxy, scaler, all, simulate
     internal/headroom/  domain: the ceiling algorithm, pure functions
     internal/aimd/      domain: congestion-control fallback, pure functions
-    internal/state/     application: per-bucket state, EWMA, staleness
-    internal/headers/   adapter: provider header parsers with fixtures
+    internal/state/     application: per-bucket state, EWMA, eviction
+    internal/headers/   application: provider header parsers, pure functions over http.Header
     internal/proxy/     adapter: transparent reverse proxy and usage extraction
     internal/scaler/    adapter: KEDA ExternalScaler over gRPC
     internal/metrics/   adapter: Prometheus registry
