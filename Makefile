@@ -1,4 +1,4 @@
-.PHONY: build test race lint fmt e2e demo demo-down
+.PHONY: build test race lint fmt e2e demo demo-down bench bench-smoke
 
 build:
 	go build ./...
@@ -24,3 +24,9 @@ demo:
 
 demo-down:
 	bench/kind/down.sh
+
+bench:
+	bench/bench.sh
+
+bench-smoke:
+	BENCH_PHASES=half:30s:0.5,full:30s:1,burst:45s:3,idle:60s:0 BENCH_RESULTS=bench/results/smoke bench/bench.sh
