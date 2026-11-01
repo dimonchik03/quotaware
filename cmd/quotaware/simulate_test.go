@@ -63,6 +63,20 @@ func TestSimulate(t *testing.T) {
 		}
 	})
 
+	t.Run("rejects an observation with an unknown field", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		input := `{"at":"2026-11-01T18:00:00Z","token_per_call":1000}` + "\n"
+
+		code := run([]string{"simulate"}, strings.NewReader(input), &stdout, &stderr)
+
+		if code != 1 {
+			t.Fatalf("exit code = %d, want 1", code)
+		}
+		if !strings.Contains(stderr.String(), `"token_per_call"`) {
+			t.Fatalf("stderr = %q, want it to name the unknown field", stderr.String())
+		}
+	})
+
 	t.Run("rejects an observation without a timestamp", func(t *testing.T) {
 		var stdout, stderr bytes.Buffer
 
@@ -73,6 +87,20 @@ func TestSimulate(t *testing.T) {
 		}
 		if !strings.Contains(stderr.String(), "missing at") {
 			t.Fatalf("stderr = %q, want it to report the missing timestamp", stderr.String())
+		}
+	})
+
+	t.Run("names the line that exceeds the size limit", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		input := `{"at":"2026-11-01T18:00:00Z"}` + "\n" + strings.Repeat("x", 2*1024*1024) + "\n"
+
+		code := run([]string{"simulate"}, strings.NewReader(input), &stdout, &stderr)
+
+		if code != 1 {
+			t.Fatalf("exit code = %d, want 1", code)
+		}
+		if !strings.Contains(stderr.String(), "line 2") {
+			t.Fatalf("stderr = %q, want it to name line 2", stderr.String())
 		}
 	})
 

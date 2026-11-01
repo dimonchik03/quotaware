@@ -30,17 +30,17 @@ type observationLine struct {
 	InFlight      int        `json:"in_flight"`
 }
 
-func (l observationLine) observation() headroom.Observation {
-	observedAt := l.At
-	if l.ObservedAt != nil {
-		observedAt = *l.ObservedAt
+func (line observationLine) observation() headroom.Observation {
+	observedAt := line.At
+	if line.ObservedAt != nil {
+		observedAt = *line.ObservedAt
 	}
 	return headroom.Observation{
-		Requests:      headroom.Quota(l.Requests),
-		Tokens:        headroom.Quota(l.Tokens),
-		TokensPerCall: l.TokensPerCall,
-		Latency:       time.Duration(l.LatencyMS * float64(time.Millisecond)),
-		InFlight:      l.InFlight,
+		Requests:      headroom.Quota(line.Requests),
+		Tokens:        headroom.Quota(line.Tokens),
+		TokensPerCall: line.TokensPerCall,
+		Latency:       time.Duration(line.LatencyMS * float64(time.Millisecond)),
+		InFlight:      line.InFlight,
 		ObservedAt:    observedAt,
 	}
 }
@@ -98,23 +98,38 @@ func simulate(cfg headroom.Config, in io.Reader, out io.Writer) error {
 	scanner := bufio.NewScanner(in)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	fmt.Fprintln(out, "at\tceiling\treason\tallowed_rate\tpod_rate")
-	previous := 0
-	for number := 1; scanner.Scan(); number++ {
+	var previous headroom.Previous
+	number := 0
+	for scanner.Scan() {
+		number++
 		raw := bytes.TrimSpace(scanner.Bytes())
 		if len(raw) == 0 {
 			continue
 		}
-		var line observationLine
-		if err := json.Unmarshal(raw, &line); err != nil {
+		line, err := decodeObservation(raw)
+		if err != nil {
 			return fmt.Errorf("line %d: %w", number, err)
-		}
-		if line.At.IsZero() {
-			return fmt.Errorf("line %d: missing at", number)
 		}
 		result := headroom.Compute(cfg, line.observation(), previous, line.At)
 		fmt.Fprintf(out, "%s\t%d\t%s\t%.2f\t%.2f\n",
 			line.At.Format(time.RFC3339), result.Ceiling, result.Reason, result.AllowedRate, result.PodRate)
-		previous = result.Ceiling
+		previous = headroom.Previous{Ceiling: result.Ceiling, Known: true}
 	}
-	return scanner.Err()
+	if err := scanner.Err(); err != nil {
+		return fmt.Errorf("line %d: %w", number+1, err)
+	}
+	return nil
+}
+
+func decodeObservation(raw []byte) (observationLine, error) {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	var line observationLine
+	if err := decoder.Decode(&line); err != nil {
+		return observationLine{}, err
+	}
+	if line.At.IsZero() {
+		return observationLine{}, errors.New("missing at")
+	}
+	return line, nil
 }
