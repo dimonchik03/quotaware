@@ -15,6 +15,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/dimonchik03/quotaware/internal/aimd"
 	"github.com/dimonchik03/quotaware/internal/headroom"
 	"github.com/dimonchik03/quotaware/internal/scaler/externalscaler"
 	"github.com/dimonchik03/quotaware/internal/state"
@@ -31,11 +32,14 @@ type QueueFactory func(address string) QueueDepth
 
 type Config struct {
 	Defaults     headroom.Config
+	AIMD         aimd.Config
 	PushInterval time.Duration
 }
 
 func DefaultConfig() Config {
-	return Config{Defaults: headroom.DefaultConfig(), PushInterval: 5 * time.Second}
+	fallback := aimd.DefaultConfig()
+	fallback.Window = state.WindowLength
+	return Config{Defaults: headroom.DefaultConfig(), AIMD: fallback, PushInterval: 5 * time.Second}
 }
 
 type Service struct {
@@ -64,6 +68,9 @@ func New(cfg Config, store *state.Store, queues QueueFactory, now func() time.Ti
 	if err := cfg.Defaults.Validate(); err != nil {
 		return nil, fmt.Errorf("defaults: %w", err)
 	}
+	if err := cfg.AIMD.Validate(); err != nil {
+		return nil, fmt.Errorf("aimd defaults: %w", err)
+	}
 	return &Service{cfg: cfg, store: store, queues: queues, now: now, logger: logger, queueByAddr: map[string]QueueDepth{}}, nil
 }
 
@@ -87,6 +94,7 @@ type trigger struct {
 	model      string
 	credential string
 	cfg        headroom.Config
+	aimd       aimd.Config
 	queue      *queueTrigger
 }
 
@@ -107,11 +115,34 @@ func (s *Service) parse(ref *externalscaler.ScaledObjectRef) (trigger, error) {
 	if err != nil {
 		return trigger{}, err
 	}
+	fallback, err := s.parseAIMD(metadata, cfg)
+	if err != nil {
+		return trigger{}, err
+	}
 	queue, err := s.parseQueue(metadata)
 	if err != nil {
 		return trigger{}, err
 	}
-	return trigger{provider: provider, model: model, credential: metadata["credential"], cfg: cfg, queue: queue}, nil
+	return trigger{provider: provider, model: model, credential: metadata["credential"], cfg: cfg, aimd: fallback, queue: queue}, nil
+}
+
+func (s *Service) parseAIMD(metadata map[string]string, cfg headroom.Config) (aimd.Config, error) {
+	aimdConfig := s.cfg.AIMD
+	aimdConfig.Interval, aimdConfig.Window, aimdConfig.Min, aimdConfig.Max = cfg.StepInterval, state.WindowLength, cfg.MinReplicas, cfg.MaxReplicas
+	aimdConfig.Start = min(max(cfg.DefaultCeiling, cfg.MinReplicas), cfg.MaxReplicas)
+	floats := []floatField{{"aimdThreshold", &aimdConfig.Threshold}, {"aimdDecrease", &aimdConfig.Decrease}}
+	for _, field := range floats {
+		if err := parseFloat(metadata, field.name, field.target); err != nil {
+			return aimd.Config{}, err
+		}
+	}
+	if err := parseInt(metadata, "aimdIncrease", &aimdConfig.Increase); err != nil {
+		return aimd.Config{}, err
+	}
+	if err := aimdConfig.Validate(); err != nil {
+		return aimd.Config{}, status.Error(codes.InvalidArgument, "aimd: "+err.Error())
+	}
+	return aimdConfig, nil
 }
 
 type intField struct {
@@ -351,30 +382,40 @@ func (s *Service) ceiling(ref *externalscaler.ScaledObjectRef, t trigger) int {
 	now := s.now()
 	total := 0
 	matched := 0
-	for _, b := range s.store.Buckets() {
+	for _, b := range s.store.Buckets(now) {
 		if b.Key.Provider != t.provider || b.Key.Model != t.model || (t.credential != "" && b.Key.Key != t.credential) {
 			continue
 		}
 		matched++
 		consumer := state.Consumer{Namespace: ref.GetNamespace(), ScaledObject: ref.GetName(), Bucket: b.Key}
-		total += s.evaluate(consumer, t.cfg, b.Observation(), now)
+		total += s.evaluate(consumer, t, b.Observation(), b.Recent, now)
 	}
 	if matched == 0 {
 		consumer := state.Consumer{Namespace: ref.GetNamespace(), ScaledObject: ref.GetName(), Bucket: state.Key{Provider: t.provider, Model: t.model, Key: t.credential}}
-		return s.evaluate(consumer, t.cfg, headroom.Observation{}, now)
+		return s.evaluate(consumer, t, headroom.Observation{}, state.Recent{}, now)
 	}
 	return min(total, t.cfg.MaxReplicas)
 }
 
-func (s *Service) evaluate(consumer state.Consumer, cfg headroom.Config, obs headroom.Observation, now time.Time) int {
-	var change *headroom.Result
+type decision struct {
+	value       int
+	bound       int
+	mode        state.Mode
+	reason      string
+	holdUntil   time.Time
+	allowedRate float64
+	podRate     float64
+}
+
+func (s *Service) evaluate(consumer state.Consumer, t trigger, obs headroom.Observation, recent state.Recent, now time.Time) int {
+	var change *decision
 	var from int
 	ceiling := s.store.UpdateCeiling(consumer, func(previous state.Ceiling, known bool) state.Ceiling {
-		result := headroom.Compute(cfg, obs, headroom.Previous{Ceiling: previous.Value, Known: known, At: previous.ChangedAt}, now)
-		next := state.Ceiling{Value: result.Ceiling, ChangedAt: previous.ChangedAt, Seen: now}
-		if !known || result.Ceiling != previous.Value {
+		d := decide(t, obs, recent, previous, known, now)
+		next := state.Ceiling{Value: d.value, Bound: d.bound, Mode: d.mode, ChangedAt: previous.ChangedAt, Seen: now, HoldUntil: d.holdUntil}
+		if !known || d.value != previous.Value {
 			next.ChangedAt = now
-			change, from = &result, previous.Value
+			change, from = &d, previous.Value
 		}
 		return next
 	})
@@ -382,8 +423,28 @@ func (s *Service) evaluate(consumer state.Consumer, cfg headroom.Config, obs hea
 		s.logger.Info("ceiling changed",
 			"namespace", consumer.Namespace, "scaledobject", consumer.ScaledObject,
 			"bucket", consumer.Bucket.Provider+"/"+consumer.Bucket.Model, "credential", consumer.Bucket.Key,
-			"from", from, "to", change.Ceiling, "reason", string(change.Reason),
-			"allowed_rate", change.AllowedRate, "pod_rate", change.PodRate)
+			"from", from, "to", change.value, "mode", string(change.mode), "reason", change.reason,
+			"allowed_rate", change.allowedRate, "pod_rate", change.podRate)
 	}
 	return ceiling.Value
+}
+
+func decide(t trigger, obs headroom.Observation, recent state.Recent, previous state.Ceiling, known bool, now time.Time) decision {
+	signal := aimd.Signal{Responses: recent.Responses, RateLimited: recent.RateLimited, RetryAfter: recent.RetryAfter}
+	aimdState := aimd.State{Ceiling: previous.Bound, Known: known && previous.Mode == state.ModeAIMD, ChangedAt: previous.ChangedAt, HoldUntil: previous.HoldUntil}
+	drainFloor := headroom.DrainFloor(t.cfg, obs)
+	usable := (obs.Requests.Known() || obs.Tokens.Known()) && !obs.ObservedAt.IsZero() && now.Sub(obs.ObservedAt) <= t.cfg.StaleHard
+	if !usable {
+		step := aimd.Step(t.aimd, aimdState, signal, now)
+		return decision{value: max(step.Ceiling, drainFloor), bound: step.Ceiling, mode: state.ModeAIMD, reason: "aimd_" + string(step.Action), holdUntil: step.HoldUntil}
+	}
+	result := headroom.Compute(t.cfg, obs, headroom.Previous{Ceiling: previous.Bound, Known: known, At: previous.ChangedAt}, now)
+	d := decision{value: result.Ceiling, bound: result.Bound, mode: state.ModeHeadroom, reason: string(result.Reason), allowedRate: result.AllowedRate, podRate: result.PodRate}
+	guardState := aimd.State{Ceiling: previous.Bound, Known: known, HoldUntil: previous.HoldUntil}
+	if guarded, held, until := aimd.Guard(t.aimd, result.Bound, guardState, signal, now); held {
+		d.value, d.bound = max(guarded, drainFloor), guarded
+		d.reason = "aimd_guard"
+		d.holdUntil = until
+	}
+	return d
 }

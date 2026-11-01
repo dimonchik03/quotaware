@@ -101,6 +101,7 @@ const (
 
 type Result struct {
 	Ceiling     int
+	Bound       int
 	Reason      Reason
 	AllowedRate float64
 	PodRate     float64
@@ -151,12 +152,17 @@ func defaultResult(cfg Config) Result {
 }
 
 func guard(cfg Config, obs Observation, result Result) Result {
-	drainFloor := ceilDiv(obs.InFlight, cfg.Concurrency)
+	result.Bound = result.Ceiling
+	drainFloor := DrainFloor(cfg, obs)
 	if drainFloor > result.Ceiling {
-		result.Ceiling = min(drainFloor, cfg.MaxReplicas)
+		result.Ceiling = drainFloor
 		result.Reason = ReasonDrain
 	}
 	return result
+}
+
+func DrainFloor(cfg Config, obs Observation) int {
+	return min(ceilDiv(obs.InFlight, cfg.Concurrency), cfg.MaxReplicas)
 }
 
 func podRate(cfg Config, obs Observation) float64 {

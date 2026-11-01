@@ -29,6 +29,7 @@ type Collector struct {
 	latencySeconds    *prometheus.Desc
 	inflight          *prometheus.Desc
 	retryAfterSeconds *prometheus.Desc
+	rateLimitedRatio  *prometheus.Desc
 	responses         *prometheus.Desc
 	rateLimited       *prometheus.Desc
 	aborted           *prometheus.Desc
@@ -55,6 +56,7 @@ func NewCollector(store *state.Store, now func() time.Time) *Collector {
 		latencySeconds:    describe("latency_seconds", "Smoothed wall-clock latency of successful calls."),
 		inflight:          describe("inflight", "Calls currently open through the proxy."),
 		retryAfterSeconds: describe("retry_after_seconds", "Retry-After of the last 429."),
+		rateLimitedRatio:  describe("rate_limited_ratio", "Share of responses in the last minute that were 429."),
 		responses:         describe("responses_total", "Responses observed from the provider."),
 		rateLimited:       describe("429_total", "Responses with status 429."),
 		aborted:           describe("aborted_total", "Responses the client stopped reading before the end."),
@@ -85,7 +87,7 @@ type window struct {
 
 func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 	now := c.now()
-	for _, b := range c.store.Buckets() {
+	for _, b := range c.store.Buckets(now) {
 		labels := []string{b.Key.Provider, b.Key.Model, b.Key.Key}
 		gauge := func(desc *prometheus.Desc, value float64, extra ...string) {
 			ch <- prometheus.MustNewConstMetric(desc, prometheus.GaugeValue, value, append(append([]string{}, labels...), extra...)...)
@@ -115,6 +117,7 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 		gauge(c.latencySeconds, b.Latency.Seconds())
 		gauge(c.inflight, float64(b.InFlight))
 		gauge(c.retryAfterSeconds, b.RetryAfter.Seconds())
+		gauge(c.rateLimitedRatio, ratio(b.Recent))
 		counter(c.responses, b.Responses)
 		counter(c.rateLimited, b.RateLimited)
 		counter(c.aborted, b.Aborted)
@@ -133,10 +136,17 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 func (c *Collector) descs() []*prometheus.Desc {
 	return []*prometheus.Desc{
 		c.limitRequests, c.remainingRequests, c.limitTokens, c.remainingTokens, c.resetSeconds,
-		c.tokensPerCall, c.latencySeconds, c.inflight, c.retryAfterSeconds,
+		c.tokensPerCall, c.latencySeconds, c.inflight, c.retryAfterSeconds, c.rateLimitedRatio,
 		c.responses, c.rateLimited, c.aborted, c.upstreamErrors, c.headersMissing, c.headersMalformed, c.usageMissing,
 		c.ceiling,
 	}
+}
+
+func ratio(recent state.Recent) float64 {
+	if recent.Responses == 0 {
+		return 0
+	}
+	return float64(recent.RateLimited) / float64(recent.Responses)
 }
 
 func secondsUntil(q headroom.Quota, now time.Time) float64 {

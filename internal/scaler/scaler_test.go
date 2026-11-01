@@ -113,6 +113,12 @@ func (f *fixture) observe(key state.Key, remainingRequests, remainingTokens floa
 	})
 }
 
+func (f *fixture) respond(key state.Key, status int, headersStatus state.HeadersStatus, retryAfter time.Duration) {
+	at := f.clock.Now()
+	f.store.Begin(key, at)
+	f.store.End(key, state.Sample{Status: status, Complete: true, Headers: headersStatus, RetryAfter: retryAfter, Latency: time.Second, At: at})
+}
+
 func ref(metadata map[string]string) *externalscaler.ScaledObjectRef {
 	return &externalscaler.ScaledObjectRef{Name: "llm-workers", Namespace: "jobs", ScalerMetadata: metadata}
 }
@@ -155,6 +161,7 @@ func TestNew(t *testing.T) {
 		{"rejects a nil clock", store, nil, scaler.DefaultConfig()},
 		{"rejects a zero push interval", store, time.Now, scaler.Config{Defaults: headroom.DefaultConfig()}},
 		{"rejects invalid defaults", store, time.Now, scaler.Config{PushInterval: time.Second}},
+		{"rejects invalid aimd defaults", store, time.Now, scaler.Config{Defaults: headroom.DefaultConfig(), PushInterval: time.Second}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -380,6 +387,182 @@ func TestGetMetrics(t *testing.T) {
 
 		if code(err) != codes.Unavailable {
 			t.Fatalf("code = %v, want Unavailable", code(err))
+		}
+	})
+}
+
+func TestAIMD(t *testing.T) {
+	t.Run("grows additively from the default when the provider sends no headers", func(t *testing.T) {
+		f := newFixture(t)
+		metadata := capMetadata()
+		metadata["defaultCeiling"] = "2"
+		for range 5 {
+			f.respond(bucketA, http.StatusOK, state.HeadersMissing, 0)
+		}
+
+		first := metric(t, f, metadata)
+		f.clock.Advance(20 * time.Second)
+		for range 5 {
+			f.respond(bucketA, http.StatusOK, state.HeadersMissing, 0)
+		}
+		second := metric(t, f, metadata)
+
+		if first != 2 || second != 3 {
+			t.Fatalf("ceilings = %d then %d, want the default and one additive increase", first, second)
+		}
+	})
+
+	t.Run("halves on 429s without headers and holds for the retry-after", func(t *testing.T) {
+		f := newFixture(t)
+		metadata := capMetadata()
+		metadata["defaultCeiling"] = "8"
+		f.respond(bucketA, http.StatusOK, state.HeadersMissing, 0)
+		metric(t, f, metadata)
+		f.clock.Advance(20 * time.Second)
+		for range 4 {
+			f.respond(bucketA, http.StatusTooManyRequests, state.HeadersMissing, 90*time.Second)
+		}
+
+		halved := metric(t, f, metadata)
+		f.clock.Advance(70 * time.Second)
+		for range 4 {
+			f.respond(bucketA, http.StatusOK, state.HeadersMissing, 0)
+		}
+		held := metric(t, f, metadata)
+		f.clock.Advance(30 * time.Second)
+		for range 4 {
+			f.respond(bucketA, http.StatusOK, state.HeadersMissing, 0)
+		}
+		resumed := metric(t, f, metadata)
+
+		if halved != 4 || held != 4 || resumed != 5 {
+			t.Fatalf("ceilings = %d, %d, %d, want 8 halved to 4, held through the retry-after, then one increase", halved, held, resumed)
+		}
+	})
+
+	t.Run("does not halve again after the hold when the burst stopped", func(t *testing.T) {
+		f := newFixture(t)
+		metadata := capMetadata()
+		metadata["defaultCeiling"] = "8"
+		f.respond(bucketA, http.StatusOK, state.HeadersMissing, 0)
+		metric(t, f, metadata)
+		f.clock.Advance(20 * time.Second)
+		for range 4 {
+			f.respond(bucketA, http.StatusTooManyRequests, state.HeadersMissing, 0)
+		}
+		metric(t, f, metadata)
+		f.clock.Advance(61 * time.Second)
+
+		if got := metric(t, f, metadata); got != 4 {
+			t.Fatalf("ceiling = %d, want the halved value kept once the old 429s left the window", got)
+		}
+	})
+
+	t.Run("reads the aimd knobs from the metadata", func(t *testing.T) {
+		f := newFixture(t)
+		metadata := capMetadata()
+		metadata["defaultCeiling"], metadata["aimdThreshold"], metadata["aimdIncrease"] = "8", "0.9", "3"
+		f.respond(bucketA, http.StatusOK, state.HeadersMissing, 0)
+		metric(t, f, metadata)
+		f.clock.Advance(20 * time.Second)
+		f.respond(bucketA, http.StatusTooManyRequests, state.HeadersMissing, 0)
+		f.respond(bucketA, http.StatusOK, state.HeadersMissing, 0)
+
+		if got := metric(t, f, metadata); got != 11 {
+			t.Fatalf("ceiling = %d, want 8 + 3 because half of the responses is below a 0.9 threshold", got)
+		}
+	})
+
+	t.Run("falls back to the default ceiling when the headers are older than staleHard", func(t *testing.T) {
+		f := newFixture(t)
+		metadata := capMetadata()
+		metadata["defaultCeiling"] = "2"
+		f.observe(bucketA, 900, 500000)
+		if got := metric(t, f, metadata); got != 4 {
+			t.Fatalf("ceiling = %d, want 4 from the headers", got)
+		}
+		f.clock.Advance(11 * time.Minute)
+		f.respond(bucketA, http.StatusOK, state.HeadersMissing, 0)
+
+		if got := metric(t, f, metadata); got != 2 {
+			t.Fatalf("ceiling = %d, want the default once the quota is stale", got)
+		}
+	})
+
+	t.Run("guards a header ceiling while 429s exceed the threshold", func(t *testing.T) {
+		f := newFixture(t)
+		f.observe(bucketA, 900, 500000)
+		if got := metric(t, f, capMetadata()); got != 4 {
+			t.Fatalf("ceiling = %d, want 4 from the headers", got)
+		}
+		f.clock.Advance(20 * time.Second)
+		f.observe(bucketA, 900, 500000)
+		for range 3 {
+			f.respond(bucketA, http.StatusTooManyRequests, state.HeadersPresent, 30*time.Second)
+		}
+
+		if got := metric(t, f, capMetadata()); got != 2 {
+			t.Fatalf("ceiling = %d, want the header ceiling halved by the guard", got)
+		}
+	})
+
+	t.Run("keeps the guarded value while the drain floor is above it", func(t *testing.T) {
+		f := newFixture(t)
+		f.observe(bucketA, 900, 500000)
+		metric(t, f, capMetadata())
+		f.clock.Advance(20 * time.Second)
+		f.observe(bucketA, 900, 500000)
+		for range 3 {
+			f.respond(bucketA, http.StatusTooManyRequests, state.HeadersPresent, 0)
+		}
+		for range 40 {
+			f.store.Begin(bucketA, f.clock.Now())
+		}
+
+		inflated := metric(t, f, capMetadata())
+		f.clock.Advance(20 * time.Second)
+		f.observe(bucketA, 900, 500000)
+		stillHeld := metric(t, f, capMetadata())
+
+		if inflated != 10 || stillHeld != 10 {
+			t.Fatalf("ceilings = %d then %d, want the drain floor of 10 reported while the guarded bound of 2 stays recorded", inflated, stillHeld)
+		}
+		if ceiling, _ := f.store.Ceiling(state.Consumer{Namespace: "jobs", ScaledObject: "llm-workers", Bucket: bucketA}); ceiling.Bound != 2 {
+			t.Fatalf("bound = %d, want the halved value kept apart from the reported value", ceiling.Bound)
+		}
+	})
+
+	t.Run("recovers from a guard by at most maxStepUp per interval", func(t *testing.T) {
+		f := newFixture(t)
+		metadata := capMetadata()
+		metadata["maxStepUp"] = "1"
+		f.observe(bucketA, 900, 500000)
+		metric(t, f, metadata)
+		f.clock.Advance(20 * time.Second)
+		f.observe(bucketA, 900, 500000)
+		for range 3 {
+			f.respond(bucketA, http.StatusTooManyRequests, state.HeadersPresent, 0)
+		}
+		if got := metric(t, f, metadata); got != 2 {
+			t.Fatalf("ceiling = %d, want the guard to halve 4 to 2", got)
+		}
+		f.clock.Advance(61 * time.Second)
+		f.observe(bucketA, 900, 500000)
+
+		if got := metric(t, f, metadata); got != 3 {
+			t.Fatalf("ceiling = %d, want one step up from the guarded value after the hold", got)
+		}
+	})
+
+	t.Run("rejects an invalid aimd knob", func(t *testing.T) {
+		f := newFixture(t)
+		metadata := capMetadata()
+		metadata["aimdDecrease"] = "1.5"
+
+		_, err := f.service.GetMetricSpec(context.Background(), ref(metadata))
+
+		if code(err) != codes.InvalidArgument {
+			t.Fatalf("code = %v, want InvalidArgument", code(err))
 		}
 	})
 }
