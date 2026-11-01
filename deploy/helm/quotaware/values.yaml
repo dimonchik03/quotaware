@@ -22,10 +22,8 @@ resources:
   limits:
     memory: 256Mi
 
-podAnnotations:
-  prometheus.io/scrape: "true"
-  prometheus.io/port: "9100"
-  prometheus.io/path: /metrics
+prometheusAnnotations: true
+podAnnotations: {}
 
 nodeSelector: {}
 tolerations: []

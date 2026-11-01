@@ -8,10 +8,9 @@ spec:
   minReplicaCount: 1
   maxReplicaCount: 40
   pollingInterval: 15
-  cooldownPeriod: 60
   advanced:
     scalingModifiers:
-      formula: "demand < ceiling ? demand : ceiling"
+      formula: "demand / 10 < ceiling ? demand / 10 : ceiling"
       target: "1"
       metricType: AverageValue
   triggers:

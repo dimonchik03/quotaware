@@ -15,9 +15,16 @@ spec:
     metadata:
       labels:
         {{- include "quotaware.selectorLabels" . | nindent 8 }}
-      {{- with .Values.podAnnotations }}
+      {{- if or .Values.prometheusAnnotations .Values.podAnnotations }}
       annotations:
+        {{- if .Values.prometheusAnnotations }}
+        prometheus.io/scrape: "true"
+        prometheus.io/port: {{ .Values.ports.admin | quote }}
+        prometheus.io/path: /metrics
+        {{- end }}
+        {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
+        {{- end }}
       {{- end }}
     spec:
       containers:
@@ -42,6 +49,11 @@ spec:
               containerPort: {{ .Values.ports.grpc }}
             - name: admin
               containerPort: {{ .Values.ports.admin }}
+          startupProbe:
+            tcpSocket:
+              port: grpc
+            periodSeconds: 1
+            failureThreshold: 30
           readinessProbe:
             httpGet:
               path: /healthz
