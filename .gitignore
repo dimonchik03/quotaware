@@ -16,3 +16,5 @@ coverage.out
 /quotaware
 bench/kind/.kubeconfig
 bench/results/smoke/
+__pycache__/
+.pytest_cache/
