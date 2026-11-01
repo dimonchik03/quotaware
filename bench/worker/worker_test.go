@@ -18,8 +18,6 @@ import (
 	"github.com/dimonchik03/quotaware/bench/worker"
 )
 
-var now = time.Date(2026, 11, 1, 18, 0, 0, 0, time.UTC)
-
 type fakeQueue struct {
 	mu    sync.Mutex
 	items []string
