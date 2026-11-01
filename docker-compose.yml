@@ -1,0 +1,22 @@
+services:
+  fakeprovider:
+    build:
+      context: .
+      args:
+        CMD: ./bench/cmd/fakeprovider
+    command: ["-listen", ":8081", "-rpm", "30", "-tpm", "50000", "-latency", "100ms", "-jitter", "20ms", "-seed", "1"]
+
+  proxy:
+    build:
+      context: .
+    command:
+      - proxy
+      - -listen=:8080
+      - -admin=:9100
+      - -openai-upstream=http://fakeprovider:8081
+      - -anthropic-upstream=http://fakeprovider:8081
+    ports:
+      - "18080:8080"
+      - "19100:9100"
+    depends_on:
+      - fakeprovider
