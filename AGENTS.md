@@ -42,6 +42,7 @@ Detailed rules live in `.claude/rules`. The short version:
 - Race check before a pull request: `go test -race -p 2 ./...`
 - Lint: `golangci-lint run`
 - Format: `gofmt -l -w .` (the Claude Code hook applies it on every edited Go file)
+- End to end through Docker Compose: `make e2e` (builds both images, runs the scenario in `e2e/`, tears down)
 - Demo and benchmark: `make demo`, `make bench` (available from milestones 3 and 4)
 
 Never run two heavy commands (tests, lint, kind) at the same time on this machine.
@@ -57,7 +58,8 @@ Never run two heavy commands (tests, lint, kind) at the same time on this machin
     internal/scaler/    adapter: KEDA ExternalScaler over gRPC
     internal/metrics/   adapter: Prometheus registry
     deploy/             Helm chart, ScaledObject examples, Grafana dashboard
-    bench/              fake provider, producer, worker, kind and Prometheus configs, plots, results
+    bench/              fakeprovider, producer and worker libraries, binaries under bench/cmd, kind and Prometheus configs, plots, results
+    e2e/                Docker Compose scenario against the built images, behind the e2e build tag
     docs/               SPEC.md, design.md, adr/, benchmark.md
 
 Dependencies point inward: domain imports nothing from the repository, application
