@@ -98,8 +98,8 @@ Guards:
 
 - Hysteresis: raise the ceiling by at most `max_step_up` pods per polling interval
   (default 2); lower it immediately.
-- Drain guard: never report a ceiling below `ceil(in_flight / k)`, so a scale-down does
-  not kill pods mid-call.
+- Drain guard: never report a ceiling below `ceil(in_flight / k)`, capped at
+  `max_replicas`, so a scale-down does not kill pods mid-call.
 - Staleness: observations older than `stale_after` (default 120 s) freeze the last
   ceiling; older than `stale_hard` (default 10 min) fall back to `default_ceiling`.
 - `share`: fraction of the organization quota this workload may use (default 1.0).

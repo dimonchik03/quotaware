@@ -27,7 +27,7 @@ every response; nothing wires them to the autoscaler.
 `quotaware simulate` replays a JSONL file of observations through the headroom
 algorithm and prints the replica ceiling it would report for each one:
 
-    go run ./cmd/quotaware simulate -concurrency 4 -max 40 -input cmd/quotaware/testdata/observations.jsonl
+    go run ./cmd/quotaware simulate -concurrency 4 -max 40 -input cmd/quotaware/testdata/observations.jsonl | column -t
 
     at                    ceiling  reason    allowed_rate  pod_rate
     2026-11-01T18:00:00Z  4        headroom  8.36          2.00
@@ -37,12 +37,21 @@ algorithm and prints the replica ceiling it would report for each one:
     2026-11-01T18:01:05Z  4        headroom  8.50          2.00
     2026-11-01T18:04:00Z  4        frozen    0.00          0.00
 
-Each input line is one observation of a bucket: limits, remaining and reset for
-requests and tokens, tokens per call, latency and calls in flight. The reason column
-says which rule produced the number: the headroom formula, a `max-step-up` cap on
-raises, the drain guard that keeps pods alive for calls in flight, a frozen ceiling
-for stale observations, or the default when nothing usable was observed. Run with
-`-h` for every knob.
+Each input line is one JSON object describing a bucket at a point in time:
+
+    {"at":"2026-11-01T18:00:00Z","requests":{"limit":1000,"remaining":990,"reset_at":"2026-11-01T18:01:00Z"},"tokens":{"limit":600000,"remaining":590000,"reset_at":"2026-11-01T18:01:00Z"},"tokens_per_call":1000,"latency_ms":2000,"in_flight":4}
+
+`at` is the evaluation time. `observed_at` is optional and defaults to `at`; set it
+earlier to replay a stale bucket. `requests` and `tokens` carry the provider's
+limit, remaining and reset for the window; leave one out when the provider does
+not report it. `tokens_per_call` and `latency_ms` are the smoothed averages the
+proxy would hold, `in_flight` the calls currently open. Unknown keys are rejected.
+
+Output is tab-separated. The reason column says which rule produced the number:
+the headroom formula, a clamp to `-min` or `-max`, the `-max-step-up` cap on
+raises, the drain guard that keeps pods alive for calls in flight, a frozen
+ceiling for stale observations, or the default when nothing usable was observed.
+Run with `-h` for every knob.
 
 ## Planned usage
 
