@@ -1,0 +1,66 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "quotaware.fullname" . }}
+  labels:
+    {{- include "quotaware.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "quotaware.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "quotaware.selectorLabels" . | nindent 8 }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      containers:
+        - name: quotaware
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - all
+            - -listen=:{{ .Values.ports.proxy }}
+            - -grpc=:{{ .Values.ports.grpc }}
+            - -admin=:{{ .Values.ports.admin }}
+            - -openai-upstream={{ .Values.upstreams.openai }}
+            - -anthropic-upstream={{ .Values.upstreams.anthropic }}
+            - -ewma-alpha={{ .Values.ewmaAlpha }}
+            {{- range .Values.extraArgs }}
+            - {{ . | quote }}
+            {{- end }}
+          ports:
+            - name: proxy
+              containerPort: {{ .Values.ports.proxy }}
+            - name: grpc
+              containerPort: {{ .Values.ports.grpc }}
+            - name: admin
+              containerPort: {{ .Values.ports.admin }}
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: admin
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: admin
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

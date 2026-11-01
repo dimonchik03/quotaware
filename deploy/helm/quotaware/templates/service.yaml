@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "quotaware.fullname" . }}
+  labels:
+    {{- include "quotaware.labels" . | nindent 4 }}
+spec:
+  selector:
+    {{- include "quotaware.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: proxy
+      port: {{ .Values.ports.proxy }}
+      targetPort: proxy
+    - name: grpc
+      port: {{ .Values.ports.grpc }}
+      targetPort: grpc
+    - name: admin
+      port: {{ .Values.ports.admin }}
+      targetPort: admin
