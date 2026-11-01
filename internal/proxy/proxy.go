@@ -3,8 +3,6 @@ package proxy
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -17,6 +15,7 @@ import (
 
 	"github.com/dimonchik03/quotaware/internal/headers"
 	"github.com/dimonchik03/quotaware/internal/state"
+	"github.com/dimonchik03/quotaware/internal/usage"
 )
 
 type Config struct {
@@ -100,7 +99,7 @@ func (p *Proxy) route(provider headers.Provider, upstream *url.URL) http.Handler
 			return
 		}
 		c := &call{
-			key:      state.Key{Provider: string(provider), Model: model, Key: credentialHash(r.Header)},
+			key:      state.Key{Provider: string(provider), Model: model, Key: usage.CredentialHash(r.Header)},
 			provider: provider,
 			started:  p.now(),
 		}
@@ -117,7 +116,7 @@ func (p *Proxy) observe(response *http.Response) error {
 		return nil
 	}
 	now := p.now()
-	quotas, headersStatus := p.parseLimits(c, response.Header, now)
+	quotas, headersStatus := parseLimits(p.cfg.Logger, c.provider, c.key.Model, response.Header, now)
 	retryAfter, err := headers.RetryAfter(response.Header, now)
 	if err != nil {
 		p.cfg.Logger.Warn("retry-after malformed", "provider", c.provider, "model", c.key.Model, "error", err.Error())
@@ -126,35 +125,12 @@ func (p *Proxy) observe(response *http.Response) error {
 	status := response.StatusCode
 	contentType := response.Header.Get("Content-Type")
 	encoding := response.Header.Get("Content-Encoding")
-	response.Body = &capture{
-		ReadCloser: response.Body,
-		limit:      p.cfg.MaxCaptureBytes,
-		done: func(body []byte, complete bool) {
-			c.once.Do(func() {
-				p.store.End(c.key, p.sample(c, status, headersStatus, quotas, retryAfter, contentType, encoding, body, complete))
-			})
-		},
-	}
+	response.Body = usage.NewCapture(response.Body, p.cfg.MaxCaptureBytes, func(body []byte, complete bool) {
+		c.once.Do(func() {
+			p.store.End(c.key, p.sample(c, status, headersStatus, quotas, retryAfter, contentType, encoding, body, complete))
+		})
+	})
 	return nil
-}
-
-func (p *Proxy) parseLimits(c *call, h http.Header, now time.Time) (state.Quotas, state.HeadersStatus) {
-	limits, err := headers.Parse(c.provider, h, now)
-	switch {
-	case err == nil:
-		return state.Quotas{
-			Requests:      limits.Requests.Quota(),
-			Tokens:        limits.Tokens.Quota(),
-			ProjectTokens: limits.ProjectTokens.Quota(),
-			InputTokens:   limits.InputTokens.Quota(),
-			OutputTokens:  limits.OutputTokens.Quota(),
-		}, state.HeadersPresent
-	case errors.Is(err, headers.ErrMissing):
-		return state.Quotas{}, state.HeadersMissing
-	default:
-		p.cfg.Logger.Warn("rate-limit headers malformed", "provider", c.provider, "model", c.key.Model, "error", err.Error())
-		return state.Quotas{}, state.HeadersMalformed
-	}
 }
 
 func (p *Proxy) sample(c *call, status int, headersStatus state.HeadersStatus, quotas state.Quotas, retryAfter time.Duration, contentType, encoding string, body []byte, complete bool) state.Sample {
@@ -169,8 +145,8 @@ func (p *Proxy) sample(c *call, status int, headersStatus state.HeadersStatus, q
 		At:         now,
 	}
 	if complete && status >= 200 && status < 300 {
-		if decoded, ok := decompress(encoding, body, p.cfg.MaxCaptureBytes); ok {
-			s.Usage, s.HasUsage = extractUsage(c.provider, contentType, decoded)
+		if decoded, ok := usage.Decompress(encoding, body, p.cfg.MaxCaptureBytes); ok {
+			s.Usage, s.HasUsage = usage.Extract(c.provider, contentType, decoded)
 		}
 	}
 	return s
@@ -210,63 +186,10 @@ func modelOf(body []byte, limit int) (string, error) {
 	return request.Model, nil
 }
 
-func credentialHash(h http.Header) string {
-	credential := h.Get("Authorization")
-	if credential == "" {
-		credential = h.Get("x-api-key")
-	}
-	if credential == "" {
-		return "anonymous"
-	}
-	sum := sha256.Sum256([]byte(credential))
-	return hex.EncodeToString(sum[:])[:12]
-}
-
 func writeError(w http.ResponseWriter, status int, message string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"error": map[string]any{"message": message, "type": "quotaware_proxy_error"},
-	})
-}
-
-type capture struct {
-	io.ReadCloser
-	limit    int64
-	buffer   bytes.Buffer
-	overflow bool
-	done     func(body []byte, complete bool)
-	once     sync.Once
-}
-
-func (c *capture) Read(p []byte) (int, error) {
-	n, err := c.ReadCloser.Read(p)
-	if n > 0 && !c.overflow {
-		if int64(c.buffer.Len()+n) > c.limit {
-			c.overflow = true
-			c.buffer.Reset()
-		} else {
-			c.buffer.Write(p[:n])
-		}
-	}
-	if errors.Is(err, io.EOF) {
-		c.finish(true)
-	}
-	return n, err
-}
-
-func (c *capture) Close() error {
-	err := c.ReadCloser.Close()
-	c.finish(false)
-	return err
-}
-
-func (c *capture) finish(complete bool) {
-	c.once.Do(func() {
-		body := c.buffer.Bytes()
-		if c.overflow {
-			body = nil
-		}
-		c.done(body, complete)
 	})
 }
