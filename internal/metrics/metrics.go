@@ -25,33 +25,39 @@ type Collector struct {
 	tokensPerCall     *prometheus.Desc
 	latencySeconds    *prometheus.Desc
 	inflight          *prometheus.Desc
+	retryAfterSeconds *prometheus.Desc
 	responses         *prometheus.Desc
 	rateLimited       *prometheus.Desc
-	retryAfterSeconds *prometheus.Desc
+	aborted           *prometheus.Desc
+	upstreamErrors    *prometheus.Desc
 	headersMissing    *prometheus.Desc
+	headersMalformed  *prometheus.Desc
 	usageMissing      *prometheus.Desc
 }
 
 func NewCollector(store *state.Store, now func() time.Time) *Collector {
-	gauge := func(name, help string, extra ...string) *prometheus.Desc {
+	describe := func(name, help string, extra ...string) *prometheus.Desc {
 		return prometheus.NewDesc("quotaware_"+name, help, append(append([]string{}, bucketLabels...), extra...), nil)
 	}
 	return &Collector{
 		store:             store,
 		now:               now,
-		limitRequests:     gauge("limit_requests", "Request limit of the window as reported by the provider."),
-		remainingRequests: gauge("remaining_requests", "Requests remaining in the current window."),
-		limitTokens:       gauge("limit_tokens", "Token limit of the window as reported by the provider.", "scope"),
-		remainingTokens:   gauge("remaining_tokens", "Tokens remaining in the current window.", "scope"),
-		resetSeconds:      gauge("reset_seconds", "Seconds until the window resets.", "window"),
-		tokensPerCall:     gauge("tokens_per_call", "Smoothed tokens consumed per successful call."),
-		latencySeconds:    gauge("latency_seconds", "Smoothed wall-clock latency of successful calls."),
-		inflight:          gauge("inflight", "Calls currently open through the proxy."),
-		responses:         gauge("responses_total", "Responses observed from the provider."),
-		rateLimited:       gauge("429_total", "Responses with status 429."),
-		retryAfterSeconds: gauge("retry_after_seconds", "Retry-After of the last 429."),
-		headersMissing:    gauge("headers_missing_total", "Responses that should carry rate-limit headers but did not."),
-		usageMissing:      gauge("usage_missing_total", "Successful responses without a usable usage object."),
+		limitRequests:     describe("limit_requests", "Request limit of the window as reported by the provider."),
+		remainingRequests: describe("remaining_requests", "Requests remaining in the current window."),
+		limitTokens:       describe("limit_tokens", "Token limit of the window as reported by the provider.", "window"),
+		remainingTokens:   describe("remaining_tokens", "Tokens remaining in the current window.", "window"),
+		resetSeconds:      describe("reset_seconds", "Seconds until the window resets.", "window"),
+		tokensPerCall:     describe("tokens_per_call", "Smoothed tokens consumed per successful call."),
+		latencySeconds:    describe("latency_seconds", "Smoothed wall-clock latency of successful calls."),
+		inflight:          describe("inflight", "Calls currently open through the proxy."),
+		retryAfterSeconds: describe("retry_after_seconds", "Retry-After of the last 429."),
+		responses:         describe("responses_total", "Responses observed from the provider."),
+		rateLimited:       describe("429_total", "Responses with status 429."),
+		aborted:           describe("aborted_total", "Responses the client stopped reading before the end."),
+		upstreamErrors:    describe("upstream_errors_total", "Calls that never produced a provider response."),
+		headersMissing:    describe("headers_missing_total", "Responses that should carry rate-limit headers but did not."),
+		headersMalformed:  describe("headers_malformed_total", "Responses whose rate-limit headers could not be parsed."),
+		usageMissing:      describe("usage_missing_total", "Successful responses without a usable usage object."),
 	}
 }
 
@@ -67,6 +73,11 @@ func (c *Collector) Describe(ch chan<- *prometheus.Desc) {
 	}
 }
 
+type window struct {
+	name  string
+	quota headroom.Quota
+}
+
 func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 	now := c.now()
 	for _, b := range c.store.Buckets() {
@@ -74,37 +85,46 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 		gauge := func(desc *prometheus.Desc, value float64, extra ...string) {
 			ch <- prometheus.MustNewConstMetric(desc, prometheus.GaugeValue, value, append(append([]string{}, labels...), extra...)...)
 		}
-		counter := func(desc *prometheus.Desc, value float64) {
-			ch <- prometheus.MustNewConstMetric(desc, prometheus.CounterValue, value, labels...)
+		counter := func(desc *prometheus.Desc, value int64) {
+			ch <- prometheus.MustNewConstMetric(desc, prometheus.CounterValue, float64(value), labels...)
 		}
-		if b.Requests.Known() {
-			gauge(c.limitRequests, b.Requests.Limit)
-			gauge(c.remainingRequests, b.Requests.Remaining)
-			gauge(c.resetSeconds, secondsUntil(b.Requests, now), "requests")
+		if b.Quotas.Requests.Known() {
+			gauge(c.limitRequests, b.Quotas.Requests.Limit)
+			gauge(c.remainingRequests, b.Quotas.Requests.Remaining)
+			gauge(c.resetSeconds, secondsUntil(b.Quotas.Requests, now), "requests")
 		}
-		for scope, tokens := range map[string]headroom.Quota{"organization": b.Tokens, "project": b.ProjectTokens} {
-			if tokens.Known() {
-				gauge(c.limitTokens, tokens.Limit, scope)
-				gauge(c.remainingTokens, tokens.Remaining, scope)
-				gauge(c.resetSeconds, secondsUntil(tokens, now), "tokens_"+scope)
+		tokenWindows := []window{
+			{"tokens", b.Quotas.Tokens},
+			{"project_tokens", b.Quotas.ProjectTokens},
+			{"input_tokens", b.Quotas.InputTokens},
+			{"output_tokens", b.Quotas.OutputTokens},
+		}
+		for _, tokens := range tokenWindows {
+			if tokens.quota.Known() {
+				gauge(c.limitTokens, tokens.quota.Limit, tokens.name)
+				gauge(c.remainingTokens, tokens.quota.Remaining, tokens.name)
+				gauge(c.resetSeconds, secondsUntil(tokens.quota, now), tokens.name)
 			}
 		}
 		gauge(c.tokensPerCall, b.TokensPerCall)
 		gauge(c.latencySeconds, b.Latency.Seconds())
 		gauge(c.inflight, float64(b.InFlight))
 		gauge(c.retryAfterSeconds, b.RetryAfter.Seconds())
-		counter(c.responses, float64(b.Responses))
-		counter(c.rateLimited, float64(b.RateLimited))
-		counter(c.headersMissing, float64(b.HeadersMissing))
-		counter(c.usageMissing, float64(b.UsageMissing))
+		counter(c.responses, b.Responses)
+		counter(c.rateLimited, b.RateLimited)
+		counter(c.aborted, b.Aborted)
+		counter(c.upstreamErrors, b.UpstreamErrors)
+		counter(c.headersMissing, b.HeadersMissing)
+		counter(c.headersMalformed, b.HeadersMalformed)
+		counter(c.usageMissing, b.UsageMissing)
 	}
 }
 
 func (c *Collector) descs() []*prometheus.Desc {
 	return []*prometheus.Desc{
 		c.limitRequests, c.remainingRequests, c.limitTokens, c.remainingTokens, c.resetSeconds,
-		c.tokensPerCall, c.latencySeconds, c.inflight, c.responses, c.rateLimited,
-		c.retryAfterSeconds, c.headersMissing, c.usageMissing,
+		c.tokensPerCall, c.latencySeconds, c.inflight, c.retryAfterSeconds,
+		c.responses, c.rateLimited, c.aborted, c.upstreamErrors, c.headersMissing, c.headersMalformed, c.usageMissing,
 	}
 }
 
