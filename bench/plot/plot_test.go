@@ -40,7 +40,7 @@ func vectorJSON(t *testing.T, value float64) []byte {
 	return raw
 }
 
-func writeRun(t *testing.T, root, name string, replicas, limited, queue, multiplier [][2]float64, totals map[string]float64) {
+func writeRun(t *testing.T, root, name string, replicas, limited, queue, multiplier, ceiling [][2]float64, totals map[string]float64) {
 	t.Helper()
 	dir := filepath.Join(root, name)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -56,7 +56,7 @@ func writeRun(t *testing.T, root, name string, replicas, limited, queue, multipl
 	write("rate_limited_per_minute.json", matrixJSON(t, limited))
 	write("queue_length.json", matrixJSON(t, queue))
 	write("multiplier.json", matrixJSON(t, multiplier))
-	write("ceiling.json", matrixJSON(t, nil))
+	write("ceiling.json", matrixJSON(t, ceiling))
 	for metric, value := range totals {
 		write(metric+".json", vectorJSON(t, value))
 	}
@@ -74,12 +74,14 @@ func TestReport(t *testing.T) {
 		[][2]float64{{at(0), 0}, {at(60), 0}, {at(120), 300}, {at(180), 200}, {at(240), 0}},
 		[][2]float64{{at(0), 0}, {at(60), 10}, {at(120), 400}, {at(180), 300}, {at(240), 0}},
 		multiplier,
+		nil,
 		map[string]float64{"jobs_total": 900, "completed_total": 900, "failed_total": 0, "rate_limited_total": 500, "retries_total": 500, "latency_p50": 12, "latency_p95": 60, "backoff_seconds_total": 840})
 	writeRun(t, root, "B",
 		[][2]float64{{at(0), 1}, {at(60), 4}, {at(120), 8}, {at(180), 8}, {at(240), 8}},
 		[][2]float64{{at(0), 0}, {at(60), 0}, {at(120), 0}, {at(180), 0}, {at(240), 0}},
 		[][2]float64{{at(0), 0}, {at(60), 10}, {at(120), 500}, {at(180), 200}, {at(240), 0}},
 		multiplier,
+		[][2]float64{{at(0), 1}, {at(60), 8}, {at(120), 8}, {at(180), 8}, {at(240), 8}},
 		map[string]float64{"jobs_total": 900, "completed_total": 900, "failed_total": 0, "rate_limited_total": 0, "retries_total": 0, "latency_p50": 15, "latency_p95": 40, "backoff_seconds_total": 0})
 	baseline, err := plot.LoadRun(filepath.Join(root, "A"))
 	if err != nil {
@@ -106,7 +108,7 @@ func TestReport(t *testing.T) {
 
 	t.Run("summarises both runs in a table", func(t *testing.T) {
 		table := report.Markdown()
-		for _, want := range []string{"| 429 responses | 500 | 0 |", "| Peak replicas | 12 | 8 |", "| Idle pod-seconds (in backoff) | 420 | 0 |", "| Job latency p95 | 60.0 s | 40.0 s |", "| Time to drain the burst | 60 s | 60 s |", "| Time to react after the first 429 | never scaled down | no 429 observed |"} {
+		for _, want := range []string{"| 429 responses | 500 | 0 |", "| Peak replicas | 12 | 8 |", "| Idle pod-seconds (in backoff) | 420 | 0 |", "| Job latency p95 | 60.0 s | 40.0 s |", "| Time to drain the burst | 60 s | 60 s |", "| Time to react after the first 429 | n/a (no ceiling) | no 429 observed |"} {
 			if !strings.Contains(table, want) {
 				t.Fatalf("table lacks %q:\n%s", want, table)
 			}

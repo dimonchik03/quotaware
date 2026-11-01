@@ -18,9 +18,11 @@ import (
 var start = time.Date(2026, 11, 1, 18, 0, 0, 0, time.UTC)
 
 type fakeQueue struct {
-	items   []string
-	cleared int
-	failing error
+	items    []string
+	pushed   []string
+	cleared  int
+	failing  error
+	drainPer int
 }
 
 func (q *fakeQueue) Push(_ context.Context, _ string, payloads ...string) error {
@@ -28,11 +30,16 @@ func (q *fakeQueue) Push(_ context.Context, _ string, payloads ...string) error 
 		return q.failing
 	}
 	q.items = append(q.items, payloads...)
+	q.pushed = append(q.pushed, payloads...)
 	return nil
 }
 
 func (q *fakeQueue) Len(context.Context, string) (int64, error) {
-	return int64(len(q.items)), nil
+	length := int64(len(q.items))
+	if q.drainPer > 0 {
+		q.items = q.items[min(q.drainPer, len(q.items)):]
+	}
+	return length, nil
 }
 
 func (q *fakeQueue) Clear(context.Context, string) error {
@@ -54,15 +61,21 @@ func (c *clock) sleep(_ context.Context, d time.Duration) bool {
 	return true
 }
 
-func run(t *testing.T, cfg producer.Config, queue *fakeQueue) *producer.Metrics {
-	t.Helper()
+func runProducer(cfg producer.Config, queue *fakeQueue) (*producer.Metrics, error) {
 	c := &clock{now: start}
 	metrics := producer.NewMetrics(prometheus.NewRegistry())
 	p, err := producer.New(cfg, queue, metrics, c.Now, c.sleep, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
-		t.Fatal(err)
+		return nil, err
 	}
-	if err := p.Run(context.Background()); err != nil {
+	return metrics, p.Run(context.Background())
+}
+
+func run(t *testing.T, cfg producer.Config, queue *fakeQueue) *producer.Metrics {
+	t.Helper()
+	queue.drainPer = max(queue.drainPer, 40)
+	metrics, err := runProducer(cfg, queue)
+	if err != nil {
 		t.Fatal(err)
 	}
 	return metrics
@@ -77,20 +90,33 @@ func config() producer.Config {
 		{Name: "idle", Duration: 5 * time.Second, Multiplier: 0},
 	}
 	cfg.Tick = 100 * time.Millisecond
+	cfg.DrainTimeout = time.Minute
 	return cfg
 }
 
 func TestProducer(t *testing.T) {
 	t.Run("pushes the quota multiple per phase and nothing while idle", func(t *testing.T) {
 		queue := &fakeQueue{}
+		cfg := config()
+		cfg.DrainTimeout = 0
 
-		metrics := run(t, config(), queue)
+		metrics, err := runProducer(cfg, queue)
 
-		if len(queue.items) != 350 || testutil.ToFloat64(metrics.Jobs) != 350 {
-			t.Fatalf("jobs = %d, want 50 from the half phase and 300 from the burst", len(queue.items))
+		if err == nil || testutil.ToFloat64(metrics.Jobs) != 350 || len(queue.pushed) != 350 {
+			t.Fatalf("jobs = %d err = %v, want 350 pushed and a drain timeout with nobody consuming", len(queue.pushed), err)
 		}
 		if queue.cleared != 1 {
 			t.Fatalf("cleared = %d, want the list cleared once before the run", queue.cleared)
+		}
+	})
+
+	t.Run("returns once the queue has drained after the schedule", func(t *testing.T) {
+		queue := &fakeQueue{drainPer: 40}
+
+		metrics := run(t, config(), queue)
+
+		if len(queue.items) != 0 || testutil.ToFloat64(metrics.QueueLength) != 0 {
+			t.Fatalf("queue = %d items, gauge = %v, want both at zero", len(queue.items), testutil.ToFloat64(metrics.QueueLength))
 		}
 	})
 
@@ -100,10 +126,10 @@ func TestProducer(t *testing.T) {
 		run(t, config(), queue)
 
 		var first, last producer.Job
-		if err := json.Unmarshal([]byte(queue.items[0]), &first); err != nil {
+		if err := json.Unmarshal([]byte(queue.pushed[0]), &first); err != nil {
 			t.Fatal(err)
 		}
-		if err := json.Unmarshal([]byte(queue.items[len(queue.items)-1]), &last); err != nil {
+		if err := json.Unmarshal([]byte(queue.pushed[len(queue.pushed)-1]), &last); err != nil {
 			t.Fatal(err)
 		}
 		if first.ID != 0 || last.ID != 349 || first.EnqueuedAt.Before(start) || !last.EnqueuedAt.After(first.EnqueuedAt) {
@@ -117,9 +143,9 @@ func TestProducer(t *testing.T) {
 		run(t, config(), a)
 		run(t, config(), b)
 
-		for i := range a.items {
-			if a.items[i] != b.items[i] {
-				t.Fatalf("item %d differs: %s vs %s", i, a.items[i], b.items[i])
+		for i := range a.pushed {
+			if a.pushed[i] != b.pushed[i] {
+				t.Fatalf("item %d differs: %s vs %s", i, a.pushed[i], b.pushed[i])
 			}
 		}
 	})
@@ -132,7 +158,7 @@ func TestProducer(t *testing.T) {
 		run(t, cfg, queue)
 
 		sizes := map[int]bool{}
-		for _, item := range queue.items {
+		for _, item := range queue.pushed {
 			var job producer.Job
 			if err := json.Unmarshal([]byte(item), &job); err != nil {
 				t.Fatal(err)

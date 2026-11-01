@@ -91,6 +91,9 @@ func drainTime(run Run, bands []Band) string {
 }
 
 func reactionTime(run Run) string {
+	if len(run.Series["ceiling"]) == 0 {
+		return "n/a (no ceiling)"
+	}
 	first, ok := run.Series["rate_limited_per_minute"].FirstAbove(0, run.Start)
 	if !ok {
 		return "no 429 observed"

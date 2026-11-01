@@ -29,6 +29,7 @@ type Config struct {
 	PromptTokens   int
 	PromptJitter   int
 	Tick           time.Duration
+	DrainTimeout   time.Duration
 }
 
 func DefaultPhases() []Phase {
@@ -41,7 +42,7 @@ func DefaultPhases() []Phase {
 }
 
 func DefaultConfig() Config {
-	return Config{List: "jobs", QuotaPerSecond: 10, Phases: DefaultPhases(), Seed: 1, PromptTokens: 200, PromptJitter: 50, Tick: 100 * time.Millisecond}
+	return Config{List: "jobs", QuotaPerSecond: 10, Phases: DefaultPhases(), Seed: 1, PromptTokens: 200, PromptJitter: 50, Tick: 100 * time.Millisecond, DrainTimeout: 15 * time.Minute}
 }
 
 func (c Config) Validate() error {
@@ -56,6 +57,8 @@ func (c Config) Validate() error {
 		return errors.New("prompt tokens must be positive and the jitter smaller than them")
 	case c.Tick <= 0:
 		return errors.New("tick must be positive")
+	case c.DrainTimeout < 0:
+		return errors.New("drain timeout must not be negative")
 	}
 	for _, phase := range c.Phases {
 		if phase.Name == "" || phase.Duration <= 0 || phase.Multiplier < 0 {
@@ -171,7 +174,29 @@ func (p *Producer) Run(ctx context.Context) error {
 	}
 	p.metrics.Phase.Reset()
 	p.metrics.Multiplier.Set(0)
-	return nil
+	return p.drain(ctx)
+}
+
+func (p *Producer) drain(ctx context.Context) error {
+	p.metrics.Phase.WithLabelValues("drain").Set(1)
+	defer p.metrics.Phase.Reset()
+	deadline := p.now().Add(p.cfg.DrainTimeout)
+	for {
+		length, err := p.queue.Len(ctx, p.cfg.List)
+		if err != nil {
+			return fmt.Errorf("len %s: %w", p.cfg.List, err)
+		}
+		p.metrics.QueueLength.Set(float64(length))
+		if length == 0 {
+			return nil
+		}
+		if !p.now().Before(deadline) {
+			return fmt.Errorf("queue %s still holds %d jobs after %s", p.cfg.List, length, p.cfg.DrainTimeout)
+		}
+		if !p.sleep(ctx, p.cfg.Tick) {
+			return ctx.Err()
+		}
+	}
 }
 
 func (p *Producer) push(ctx context.Context, random *rand.Rand, first, count int64) error {

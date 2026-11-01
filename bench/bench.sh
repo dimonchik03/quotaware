@@ -35,12 +35,20 @@ phase_seconds() {
 }
 schedule_seconds=$(phase_seconds "$phases")
 
+forward_pid=""
+stop_forward() {
+  if [ -n "$forward_pid" ]; then
+    kill "$forward_pid" 2>/dev/null || true
+    wait "$forward_pid" 2>/dev/null || true
+    forward_pid=""
+  fi
+}
+trap stop_forward EXIT
+
 export_series() {
   local dir=$1 start=$2 end=$3 window=$4
-  local forward_pid
   kubectl -n "$namespace" port-forward svc/prometheus "$local_port:9090" >/dev/null 2>&1 &
   forward_pid=$!
-  trap 'kill $forward_pid 2>/dev/null || true' RETURN
   for i in $(seq 1 30); do
     curl -sf "http://localhost:$local_port/-/ready" >/dev/null && break
     sleep 1
@@ -63,14 +71,15 @@ export_series() {
   range ceiling 'sum(quotaware_ceiling)'
   range latency_p95_over_time 'histogram_quantile(0.95, sum(rate(worker_job_latency_seconds_bucket[2m])) by (le))'
   instant jobs_total 'max_over_time(producer_jobs_total['"$window"'s])'
-  instant completed_total 'sum(increase(worker_jobs_completed_total['"$window"'s]))'
-  instant failed_total 'sum(increase(worker_jobs_failed_total['"$window"'s]))'
-  instant rate_limited_total 'sum(increase(worker_calls_total{status="429"}['"$window"'s]))'
-  instant retries_total 'sum(increase(worker_retries_total['"$window"'s]))'
-  instant backoff_seconds_total 'sum(increase(worker_backoff_seconds_total['"$window"'s]))'
-  instant latency_p50 'histogram_quantile(0.5, sum(increase(worker_job_latency_seconds_bucket['"$window"'s])) by (le))'
-  instant latency_p95 'histogram_quantile(0.95, sum(increase(worker_job_latency_seconds_bucket['"$window"'s])) by (le))'
+  instant completed_total 'sum(max_over_time(worker_jobs_completed_total['"$window"'s]))'
+  instant failed_total 'sum(max_over_time(worker_jobs_failed_total['"$window"'s]))'
+  instant rate_limited_total 'sum(max_over_time(worker_calls_total{status="429"}['"$window"'s]))'
+  instant retries_total 'sum(max_over_time(worker_retries_total['"$window"'s]))'
+  instant backoff_seconds_total 'sum(max_over_time(worker_backoff_seconds_total['"$window"'s]))'
+  instant latency_p50 'histogram_quantile(0.5, sum(max_over_time(worker_job_latency_seconds_bucket['"$window"'s])) by (le))'
+  instant latency_p95 'histogram_quantile(0.95, sum(max_over_time(worker_job_latency_seconds_bucket['"$window"'s])) by (le))'
   printf '{"start":%s,"end":%s}\n' "$start" "$end" > "$dir/run.json"
+  stop_forward
 }
 
 run_variant() {
@@ -91,12 +100,7 @@ run_variant() {
   local start end
   start=$(date -u +%s)
   sed "s/BENCH_PHASES/$phases/" bench/manifests/producer.yaml | kubectl apply -f - >/dev/null
-  kubectl -n "$namespace" wait --for=condition=complete job/producer --timeout "$(( schedule_seconds + 300 ))s" >/dev/null
-  for i in $(seq 1 60); do
-    [ "$(kubectl -n "$namespace" exec deploy/redis -- redis-cli llen jobs)" = "0" ] && break
-    sleep 10
-  done
-  sleep 30
+  kubectl -n "$namespace" wait --for=condition=complete job/producer --timeout "$(( schedule_seconds + 1200 ))s" >/dev/null
   end=$(date -u +%s)
   log "run $name finished after $(( end - start ))s, exporting series"
   export_series "$dir" "$start" "$end" "$(( end - start ))"
