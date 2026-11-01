@@ -1,0 +1,11 @@
+HTTP/1.1 429 Too Many Requests
+Content-Type: application/json
+retry-after: 20
+x-ratelimit-limit-requests: 60
+x-ratelimit-limit-tokens: 150000
+x-ratelimit-remaining-requests: 0
+x-ratelimit-remaining-tokens: 143210
+x-ratelimit-reset-requests: 20s
+x-ratelimit-reset-tokens: 2.7s
+Content-Length: 0
+
