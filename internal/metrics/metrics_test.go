@@ -46,6 +46,12 @@ func populated(t *testing.T) *state.Store {
 	s.End(key, state.Sample{Status: http.StatusTooManyRequests, Complete: true, Headers: state.HeadersPresent, Quotas: quotas, RetryAfter: 20 * time.Second, At: now})
 	s.Begin(key, now)
 	s.Fail(key, now)
+	s.RecordCeiling(state.Ceiling{
+		Consumer: state.Consumer{Namespace: "jobs", ScaledObject: "llm-workers", Bucket: key},
+		Value:    4,
+		Reason:   headroom.ReasonHeadroom,
+		At:       now,
+	})
 	return s
 }
 
@@ -56,6 +62,9 @@ func TestCollector(t *testing.T) {
 # HELP quotaware_429_total Responses with status 429.
 # TYPE quotaware_429_total counter
 quotaware_429_total{key="ab12",model="gpt-4.1-mini",provider="openai"} 1
+# HELP quotaware_ceiling Replica ceiling last reported to KEDA for a scaled object and bucket.
+# TYPE quotaware_ceiling gauge
+quotaware_ceiling{key="ab12",model="gpt-4.1-mini",namespace="jobs",provider="openai",scaledobject="llm-workers"} 4
 # HELP quotaware_inflight Calls currently open through the proxy.
 # TYPE quotaware_inflight gauge
 quotaware_inflight{key="ab12",model="gpt-4.1-mini",provider="openai"} 1
@@ -95,7 +104,7 @@ quotaware_upstream_errors_total{key="ab12",model="gpt-4.1-mini",provider="openai
 quotaware_usage_missing_total{key="ab12",model="gpt-4.1-mini",provider="openai"} 0
 `
 		if err := testutil.CollectAndCompare(collector, strings.NewReader(expected),
-			"quotaware_429_total", "quotaware_inflight", "quotaware_limit_requests", "quotaware_limit_tokens",
+			"quotaware_429_total", "quotaware_ceiling", "quotaware_inflight", "quotaware_limit_requests", "quotaware_limit_tokens",
 			"quotaware_remaining_requests", "quotaware_remaining_tokens", "quotaware_reset_seconds",
 			"quotaware_responses_total", "quotaware_retry_after_seconds", "quotaware_tokens_per_call",
 			"quotaware_upstream_errors_total", "quotaware_usage_missing_total"); err != nil {
