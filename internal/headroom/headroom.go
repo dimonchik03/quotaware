@@ -19,6 +19,7 @@ func (q Quota) Known() bool {
 type Observation struct {
 	Requests      Quota
 	Tokens        Quota
+	ProjectTokens Quota
 	TokensPerCall float64
 	Latency       time.Duration
 	InFlight      int
@@ -171,8 +172,10 @@ func steadyRate(cfg Config, obs Observation) (float64, bool) {
 	if obs.Requests.Known() {
 		rate = min(rate, obs.Requests.Limit/window)
 	}
-	if obs.Tokens.Known() && obs.TokensPerCall > 0 {
-		rate = min(rate, obs.Tokens.Limit/obs.TokensPerCall/window)
+	for _, tokens := range []Quota{obs.Tokens, obs.ProjectTokens} {
+		if tokens.Known() && obs.TokensPerCall > 0 {
+			rate = min(rate, tokens.Limit/obs.TokensPerCall/window)
+		}
 	}
 	return rate, !math.IsInf(rate, 1)
 }
@@ -182,8 +185,10 @@ func instantRate(obs Observation, now time.Time) (float64, bool) {
 	if requestRate, ok := quotaRate(obs.Requests, 1, now); ok {
 		rate = min(rate, requestRate)
 	}
-	if tokenRate, ok := quotaRate(obs.Tokens, obs.TokensPerCall, now); ok {
-		rate = min(rate, tokenRate)
+	for _, tokens := range []Quota{obs.Tokens, obs.ProjectTokens} {
+		if tokenRate, ok := quotaRate(tokens, obs.TokensPerCall, now); ok {
+			rate = min(rate, tokenRate)
+		}
 	}
 	return rate, !math.IsInf(rate, 1)
 }

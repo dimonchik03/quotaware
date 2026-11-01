@@ -25,6 +25,7 @@ type observationLine struct {
 	ObservedAt    *time.Time `json:"observed_at"`
 	Requests      quotaLine  `json:"requests"`
 	Tokens        quotaLine  `json:"tokens"`
+	ProjectTokens quotaLine  `json:"project_tokens"`
 	TokensPerCall float64    `json:"tokens_per_call"`
 	LatencyMS     float64    `json:"latency_ms"`
 	InFlight      int        `json:"in_flight"`
@@ -38,6 +39,7 @@ func (line observationLine) observation() headroom.Observation {
 	return headroom.Observation{
 		Requests:      headroom.Quota(line.Requests),
 		Tokens:        headroom.Quota(line.Tokens),
+		ProjectTokens: headroom.Quota(line.ProjectTokens),
 		TokensPerCall: line.TokensPerCall,
 		Latency:       time.Duration(line.LatencyMS * float64(time.Millisecond)),
 		InFlight:      line.InFlight,
