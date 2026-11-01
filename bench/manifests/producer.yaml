@@ -1,0 +1,25 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: producer
+  namespace: quotaware-demo
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app: producer
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: producer
+          image: quotaware-producer:dev
+          imagePullPolicy: Never
+          args:
+            - -redis=redis:6379
+            - -quota-per-second=10
+            - -seed=1
+            - -phases=BENCH_PHASES
+            - -metrics=:9102
+          ports:
+            - containerPort: 9102

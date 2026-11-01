@@ -1,0 +1,46 @@
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: llm-workers
+  namespace: quotaware-demo
+spec:
+  scaleTargetRef:
+    name: llm-workers
+  minReplicaCount: 1
+  maxReplicaCount: 30
+  pollingInterval: 10
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleDown:
+          stabilizationWindowSeconds: 0
+          policies:
+            - type: Percent
+              value: 100
+              periodSeconds: 10
+        scaleUp:
+          stabilizationWindowSeconds: 0
+          policies:
+            - type: Pods
+              value: 30
+              periodSeconds: 10
+    scalingModifiers:
+      formula: "demand / 10 < ceiling ? demand / 10 : ceiling"
+      target: "1"
+      metricType: AverageValue
+  triggers:
+    - type: redis
+      name: demand
+      metadata:
+        address: redis.quotaware-demo.svc:6379
+        listName: jobs
+        listLength: "10"
+    - type: external
+      name: ceiling
+      metadata:
+        scalerAddress: quotaware.quotaware-demo.svc:9090
+        bucket: openai/gpt-4.1-mini
+        credential: WORKERS_CREDENTIAL
+        concurrency: "2"
+        maxReplicas: "30"
+        maxStepUp: "4"
