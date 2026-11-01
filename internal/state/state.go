@@ -91,17 +91,68 @@ func (b Bucket) Observation() headroom.Observation {
 	}
 }
 
+type Consumer struct {
+	Namespace    string
+	ScaledObject string
+	Bucket       Key
+}
+
+type Ceiling struct {
+	Consumer Consumer
+	Value    int
+	Reason   headroom.Reason
+	At       time.Time
+}
+
 type Store struct {
-	alpha   float64
-	mu      sync.Mutex
-	buckets map[Key]*Bucket
+	alpha    float64
+	mu       sync.Mutex
+	buckets  map[Key]*Bucket
+	ceilings map[Consumer]Ceiling
 }
 
 func New(alpha float64) (*Store, error) {
 	if alpha <= 0 || alpha > 1 {
 		return nil, errors.New("alpha must be within (0, 1]")
 	}
-	return &Store{alpha: alpha, buckets: map[Key]*Bucket{}}, nil
+	return &Store{alpha: alpha, buckets: map[Key]*Bucket{}, ceilings: map[Consumer]Ceiling{}}, nil
+}
+
+func (s *Store) RecordCeiling(c Ceiling) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ceilings[c.Consumer] = c
+}
+
+func (s *Store) Ceiling(consumer Consumer) (Ceiling, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	c, ok := s.ceilings[consumer]
+	return c, ok
+}
+
+func (s *Store) Ceilings() []Ceiling {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	all := make([]Ceiling, 0, len(s.ceilings))
+	for _, c := range s.ceilings {
+		all = append(all, c)
+	}
+	sort.Slice(all, func(i, j int) bool {
+		return all[i].Consumer.less(all[j].Consumer)
+	})
+	return all
+}
+
+func (c Consumer) less(other Consumer) bool {
+	switch {
+	case c.Namespace != other.Namespace:
+		return c.Namespace < other.Namespace
+	case c.ScaledObject != other.ScaledObject:
+		return c.ScaledObject < other.ScaledObject
+	default:
+		return c.Bucket.less(other.Bucket)
+	}
 }
 
 func (s *Store) Begin(key Key, now time.Time) {
@@ -166,6 +217,11 @@ func (s *Store) Evict(now time.Time, idleFor time.Duration) int {
 		if b.InFlight == 0 && now.Sub(b.LastSeen) > idleFor {
 			delete(s.buckets, key)
 			evicted++
+		}
+	}
+	for consumer := range s.ceilings {
+		if _, ok := s.buckets[consumer.Bucket]; !ok {
+			delete(s.ceilings, consumer)
 		}
 	}
 	return evicted

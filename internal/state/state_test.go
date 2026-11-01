@@ -255,6 +255,25 @@ func TestStore(t *testing.T) {
 		}
 	})
 
+	t.Run("ceilings are recorded per consumer and dropped with their bucket", func(t *testing.T) {
+		s := store(t, 0.5)
+		s.Begin(key, now)
+		s.End(key, success(10, time.Second))
+		consumer := state.Consumer{Namespace: "jobs", ScaledObject: "llm-workers", Bucket: key}
+		s.RecordCeiling(state.Ceiling{Consumer: consumer, Value: 4, Reason: headroom.ReasonHeadroom, At: now})
+
+		recorded, ok := s.Ceiling(consumer)
+		if !ok || recorded.Value != 4 || len(s.Ceilings()) != 1 {
+			t.Fatalf("ceiling = %+v ok = %v, want the recorded value listed once", recorded, ok)
+		}
+
+		s.Evict(now.Add(time.Hour), time.Minute)
+
+		if _, ok := s.Ceiling(consumer); ok || len(s.Ceilings()) != 0 {
+			t.Fatal("ceiling survived the eviction of its bucket")
+		}
+	})
+
 	t.Run("buckets are listed in a stable order", func(t *testing.T) {
 		s := store(t, 0.5)
 		s.Begin(state.Key{Provider: "openai", Model: "gpt-4.1", Key: "b"}, now)
