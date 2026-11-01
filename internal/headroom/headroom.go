@@ -67,8 +67,8 @@ func (c Config) Validate() error {
 		return errors.New("min replicas must not be negative")
 	case c.MaxReplicas <= 0 || c.MaxReplicas < c.MinReplicas:
 		return errors.New("max replicas must be positive and at least min replicas")
-	case c.MaxStepUp < 0:
-		return errors.New("max step up must not be negative")
+	case c.MaxStepUp <= 0:
+		return errors.New("max step up must be positive")
 	case c.StaleAfter <= 0 || c.StaleHard < c.StaleAfter:
 		return errors.New("stale_after must be positive and stale_hard at least stale_after")
 	case c.DefaultCeiling < 0:
@@ -77,10 +77,16 @@ func (c Config) Validate() error {
 	return nil
 }
 
+type Previous struct {
+	Ceiling int
+	Known   bool
+}
+
 type Reason string
 
 const (
 	ReasonHeadroom Reason = "headroom"
+	ReasonClamped  Reason = "clamped"
 	ReasonStepUp   Reason = "step_up"
 	ReasonDrain    Reason = "drain"
 	ReasonFrozen   Reason = "frozen"
@@ -94,41 +100,48 @@ type Result struct {
 	PodRate     float64
 }
 
-func Compute(cfg Config, obs Observation, previous int, now time.Time) Result {
+func Compute(cfg Config, obs Observation, previous Previous, now time.Time) Result {
 	age := now.Sub(obs.ObservedAt)
 	switch {
 	case obs.ObservedAt.IsZero() || age > cfg.StaleHard:
-		return guard(cfg, obs, Result{Ceiling: cfg.DefaultCeiling, Reason: ReasonDefault})
-	case age > cfg.StaleAfter && previous > 0:
-		return guard(cfg, obs, Result{Ceiling: previous, Reason: ReasonFrozen})
+		return guard(cfg, obs, defaultResult(cfg))
+	case age > cfg.StaleAfter && previous.Known:
+		return guard(cfg, obs, Result{Ceiling: previous.Ceiling, Reason: ReasonFrozen})
 	case age > cfg.StaleAfter:
-		return guard(cfg, obs, Result{Ceiling: cfg.DefaultCeiling, Reason: ReasonDefault})
+		return guard(cfg, obs, defaultResult(cfg))
 	}
 
 	perPod := podRate(cfg, obs)
 	allowed, ok := allowedRate(cfg, obs, now)
 	if perPod <= 0 || !ok {
-		return guard(cfg, obs, Result{Ceiling: cfg.DefaultCeiling, Reason: ReasonDefault})
+		return guard(cfg, obs, defaultResult(cfg))
 	}
 
+	raw := math.Floor(allowed / perPod)
 	result := Result{
-		Ceiling:     int(math.Floor(allowed / perPod)),
+		Ceiling:     int(math.Max(math.Min(raw, float64(cfg.MaxReplicas)), float64(cfg.MinReplicas))),
 		Reason:      ReasonHeadroom,
 		AllowedRate: allowed,
 		PodRate:     perPod,
 	}
-	result.Ceiling = min(max(result.Ceiling, cfg.MinReplicas), cfg.MaxReplicas)
-	if previous > 0 && result.Ceiling > previous+cfg.MaxStepUp {
-		result.Ceiling = previous + cfg.MaxStepUp
+	if float64(result.Ceiling) != raw {
+		result.Reason = ReasonClamped
+	}
+	if previous.Known && result.Ceiling > previous.Ceiling+cfg.MaxStepUp {
+		result.Ceiling = max(previous.Ceiling+cfg.MaxStepUp, cfg.MinReplicas)
 		result.Reason = ReasonStepUp
 	}
 	return guard(cfg, obs, result)
 }
 
+func defaultResult(cfg Config) Result {
+	return Result{Ceiling: cfg.DefaultCeiling, Reason: ReasonDefault}
+}
+
 func guard(cfg Config, obs Observation, result Result) Result {
-	floor := ceilDiv(obs.InFlight, cfg.Concurrency)
-	if floor > result.Ceiling {
-		result.Ceiling = min(floor, cfg.MaxReplicas)
+	drainFloor := ceilDiv(obs.InFlight, cfg.Concurrency)
+	if drainFloor > result.Ceiling {
+		result.Ceiling = min(drainFloor, cfg.MaxReplicas)
 		result.Reason = ReasonDrain
 	}
 	return result
@@ -166,11 +179,11 @@ func steadyRate(cfg Config, obs Observation) (float64, bool) {
 
 func instantRate(obs Observation, now time.Time) (float64, bool) {
 	rate := math.Inf(1)
-	if r, ok := quotaRate(obs.Requests, 1, now); ok {
-		rate = min(rate, r)
+	if requestRate, ok := quotaRate(obs.Requests, 1, now); ok {
+		rate = min(rate, requestRate)
 	}
-	if r, ok := quotaRate(obs.Tokens, obs.TokensPerCall, now); ok {
-		rate = min(rate, r)
+	if tokenRate, ok := quotaRate(obs.Tokens, obs.TokensPerCall, now); ok {
+		rate = min(rate, tokenRate)
 	}
 	return rate, !math.IsInf(rate, 1)
 }

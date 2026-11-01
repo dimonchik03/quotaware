@@ -34,6 +34,10 @@ func observation(remainingRequests, remainingTokens float64, resetAt time.Time) 
 	}
 }
 
+func known(ceiling int) headroom.Previous {
+	return headroom.Previous{Ceiling: ceiling, Known: true}
+}
+
 func TestCompute(t *testing.T) {
 	midWindow := now.Add(30 * time.Second)
 	endOfWindow := now.Add(time.Second)
@@ -42,7 +46,7 @@ func TestCompute(t *testing.T) {
 		name        string
 		config      headroom.Config
 		observation headroom.Observation
-		previous    int
+		previous    headroom.Previous
 		now         time.Time
 		wantCeiling int
 		wantReason  headroom.Reason
@@ -56,19 +60,19 @@ func TestCompute(t *testing.T) {
 			wantReason:  headroom.ReasonHeadroom,
 		},
 		{
-			name:        "at quota the ceiling drops to the minimum",
+			name:        "at quota the ceiling is clamped to min_replicas",
 			config:      config(),
 			observation: observation(0, 0, midWindow),
-			previous:    4,
+			previous:    known(4),
 			now:         now,
 			wantCeiling: 1,
-			wantReason:  headroom.ReasonHeadroom,
+			wantReason:  headroom.ReasonClamped,
 		},
 		{
 			name:        "a short time to reset does not inflate the ceiling at the end of a window",
 			config:      config(),
 			observation: observation(100, 50000, endOfWindow),
-			previous:    4,
+			previous:    known(4),
 			now:         now,
 			wantCeiling: 4,
 			wantReason:  headroom.ReasonHeadroom,
@@ -77,7 +81,7 @@ func TestCompute(t *testing.T) {
 			name:        "a window that already reset is judged by the steady-state rate alone",
 			config:      config(),
 			observation: observation(0, 0, now.Add(-5*time.Second)),
-			previous:    4,
+			previous:    known(4),
 			now:         now,
 			wantCeiling: 4,
 			wantReason:  headroom.ReasonHeadroom,
@@ -86,7 +90,7 @@ func TestCompute(t *testing.T) {
 			name:        "an observation older than stale_after freezes the previous ceiling",
 			config:      config(),
 			observation: observation(900, 500000, midWindow),
-			previous:    6,
+			previous:    known(6),
 			now:         now.Add(3 * time.Minute),
 			wantCeiling: 6,
 			wantReason:  headroom.ReasonFrozen,
@@ -103,7 +107,7 @@ func TestCompute(t *testing.T) {
 			name:        "an observation older than stale_hard falls back to the default ceiling",
 			config:      config(),
 			observation: observation(900, 500000, midWindow),
-			previous:    6,
+			previous:    known(6),
 			now:         now.Add(11 * time.Minute),
 			wantCeiling: 1,
 			wantReason:  headroom.ReasonDefault,
@@ -112,7 +116,7 @@ func TestCompute(t *testing.T) {
 			name:        "the drain guard never reports fewer pods than the calls in flight need",
 			config:      config(),
 			observation: withInFlight(observation(0, 0, midWindow), 10),
-			previous:    4,
+			previous:    known(4),
 			now:         now,
 			wantCeiling: 3,
 			wantReason:  headroom.ReasonDrain,
@@ -129,7 +133,34 @@ func TestCompute(t *testing.T) {
 			name:        "the ceiling rises by at most max_step_up per evaluation",
 			config:      config(),
 			observation: observation(900, 500000, midWindow),
-			previous:    1,
+			previous:    known(1),
+			now:         now,
+			wantCeiling: 3,
+			wantReason:  headroom.ReasonStepUp,
+		},
+		{
+			name:        "a raise that lands exactly on the step-up cap is not reported as capped",
+			config:      config(),
+			observation: observation(900, 500000, midWindow),
+			previous:    known(2),
+			now:         now,
+			wantCeiling: 4,
+			wantReason:  headroom.ReasonHeadroom,
+		},
+		{
+			name:        "after a ceiling of zero the step-up cap still applies",
+			config:      withMinReplicas(config(), 0),
+			observation: observation(900, 500000, midWindow),
+			previous:    known(0),
+			now:         now,
+			wantCeiling: 2,
+			wantReason:  headroom.ReasonStepUp,
+		},
+		{
+			name:        "the step-up cap never lands below min_replicas",
+			config:      withMinReplicas(config(), 3),
+			observation: observation(900, 500000, midWindow),
+			previous:    known(0),
 			now:         now,
 			wantCeiling: 3,
 			wantReason:  headroom.ReasonStepUp,
@@ -138,7 +169,7 @@ func TestCompute(t *testing.T) {
 			name:        "the ceiling lowers immediately",
 			config:      config(),
 			observation: observation(900, 500000, midWindow),
-			previous:    10,
+			previous:    known(10),
 			now:         now,
 			wantCeiling: 4,
 			wantReason:  headroom.ReasonHeadroom,
@@ -149,7 +180,15 @@ func TestCompute(t *testing.T) {
 			observation: withLimits(observation(99000, 59000000, midWindow), 100000, 60000000),
 			now:         now,
 			wantCeiling: 40,
-			wantReason:  headroom.ReasonHeadroom,
+			wantReason:  headroom.ReasonClamped,
+		},
+		{
+			name:        "an astronomically large quota clamps to max_replicas instead of overflowing",
+			config:      config(),
+			observation: withLimits(observation(1e30, 1e30, midWindow), 1e30, 1e30),
+			now:         now,
+			wantCeiling: 40,
+			wantReason:  headroom.ReasonClamped,
 		},
 		{
 			name:        "the token constraint is ignored until tokens per call are observed",
@@ -200,7 +239,7 @@ func TestCompute(t *testing.T) {
 }
 
 func TestComputeReportsTheRatesBehindTheCeiling(t *testing.T) {
-	result := headroom.Compute(config(), observation(900, 500000, now.Add(30*time.Second)), 0, now)
+	result := headroom.Compute(config(), observation(900, 500000, now.Add(30*time.Second)), headroom.Previous{}, now)
 
 	if result.PodRate != 2 {
 		t.Fatalf("pod rate = %v calls/s, want 2", result.PodRate)
@@ -216,12 +255,15 @@ func TestConfigValidate(t *testing.T) {
 		mutate func(*headroom.Config)
 	}{
 		{"rejects a non-positive concurrency", func(c *headroom.Config) { c.Concurrency = 0 }},
+		{"rejects a zero safety factor", func(c *headroom.Config) { c.Safety = 0 }},
 		{"rejects a safety factor above one", func(c *headroom.Config) { c.Safety = 1.5 }},
 		{"rejects a zero share", func(c *headroom.Config) { c.Share = 0 }},
 		{"rejects a zero window", func(c *headroom.Config) { c.Window = 0 }},
 		{"rejects negative min replicas", func(c *headroom.Config) { c.MinReplicas = -1 }},
-		{"rejects max replicas below min replicas", func(c *headroom.Config) { c.MaxReplicas = 0 }},
-		{"rejects a negative step up", func(c *headroom.Config) { c.MaxStepUp = -1 }},
+		{"rejects zero max replicas", func(c *headroom.Config) { c.MaxReplicas = 0 }},
+		{"rejects max replicas below min replicas", func(c *headroom.Config) { c.MinReplicas, c.MaxReplicas = 5, 3 }},
+		{"rejects a zero step up", func(c *headroom.Config) { c.MaxStepUp = 0 }},
+		{"rejects a zero stale_after", func(c *headroom.Config) { c.StaleAfter = 0 }},
 		{"rejects stale_hard below stale_after", func(c *headroom.Config) { c.StaleHard = time.Minute }},
 		{"rejects a negative default ceiling", func(c *headroom.Config) { c.DefaultCeiling = -1 }},
 	}
@@ -266,5 +308,10 @@ func withLimits(o headroom.Observation, requests, tokens float64) headroom.Obser
 
 func withShare(c headroom.Config, share float64) headroom.Config {
 	c.Share = share
+	return c
+}
+
+func withMinReplicas(c headroom.Config, minReplicas int) headroom.Config {
+	c.MinReplicas = minReplicas
 	return c
 }
