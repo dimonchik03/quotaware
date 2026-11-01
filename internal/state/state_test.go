@@ -255,22 +255,30 @@ func TestStore(t *testing.T) {
 		}
 	})
 
-	t.Run("ceilings are recorded per consumer and dropped with their bucket", func(t *testing.T) {
+	t.Run("ceilings are updated atomically per consumer and dropped once nobody polls them", func(t *testing.T) {
 		s := store(t, 0.5)
-		s.Begin(key, now)
-		s.End(key, success(10, time.Second))
 		consumer := state.Consumer{Namespace: "jobs", ScaledObject: "llm-workers", Bucket: key}
-		s.RecordCeiling(state.Ceiling{Consumer: consumer, Value: 4, Reason: headroom.ReasonHeadroom, At: now})
+		first := s.UpdateCeiling(consumer, func(previous state.Ceiling, known bool) state.Ceiling {
+			if known {
+				t.Fatal("a previous ceiling was reported before any update")
+			}
+			return state.Ceiling{Value: 4, ChangedAt: now, Seen: now}
+		})
+		second := s.UpdateCeiling(consumer, func(previous state.Ceiling, known bool) state.Ceiling {
+			if !known || previous.Value != 4 {
+				t.Fatalf("previous = %+v known = %v, want the first update", previous, known)
+			}
+			return state.Ceiling{Value: 6, ChangedAt: now.Add(time.Minute), Seen: now.Add(time.Minute)}
+		})
 
-		recorded, ok := s.Ceiling(consumer)
-		if !ok || recorded.Value != 4 || len(s.Ceilings()) != 1 {
-			t.Fatalf("ceiling = %+v ok = %v, want the recorded value listed once", recorded, ok)
+		if first.Value != 4 || second.Value != 6 || second.Consumer != consumer || len(s.Ceilings()) != 1 {
+			t.Fatalf("updates = %+v / %+v, want both applied to one consumer", first, second)
 		}
 
-		s.Evict(now.Add(time.Hour), time.Minute)
+		s.Evict(now.Add(12*time.Minute), 10*time.Minute)
 
 		if _, ok := s.Ceiling(consumer); ok || len(s.Ceilings()) != 0 {
-			t.Fatal("ceiling survived the eviction of its bucket")
+			t.Fatal("ceiling survived although its consumer stopped polling")
 		}
 	})
 

@@ -98,10 +98,10 @@ type Consumer struct {
 }
 
 type Ceiling struct {
-	Consumer Consumer
-	Value    int
-	Reason   headroom.Reason
-	At       time.Time
+	Consumer  Consumer
+	Value     int
+	ChangedAt time.Time
+	Seen      time.Time
 }
 
 type Store struct {
@@ -118,10 +118,14 @@ func New(alpha float64) (*Store, error) {
 	return &Store{alpha: alpha, buckets: map[Key]*Bucket{}, ceilings: map[Consumer]Ceiling{}}, nil
 }
 
-func (s *Store) RecordCeiling(c Ceiling) {
+func (s *Store) UpdateCeiling(consumer Consumer, update func(previous Ceiling, known bool) Ceiling) Ceiling {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.ceilings[c.Consumer] = c
+	previous, known := s.ceilings[consumer]
+	next := update(previous, known)
+	next.Consumer = consumer
+	s.ceilings[consumer] = next
+	return next
 }
 
 func (s *Store) Ceiling(consumer Consumer) (Ceiling, bool) {
@@ -219,8 +223,8 @@ func (s *Store) Evict(now time.Time, idleFor time.Duration) int {
 			evicted++
 		}
 	}
-	for consumer := range s.ceilings {
-		if _, ok := s.buckets[consumer.Bucket]; !ok {
+	for consumer, c := range s.ceilings {
+		if now.Sub(c.Seen) > idleFor {
 			delete(s.ceilings, consumer)
 		}
 	}

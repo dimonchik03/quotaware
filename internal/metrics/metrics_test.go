@@ -46,11 +46,8 @@ func populated(t *testing.T) *state.Store {
 	s.End(key, state.Sample{Status: http.StatusTooManyRequests, Complete: true, Headers: state.HeadersPresent, Quotas: quotas, RetryAfter: 20 * time.Second, At: now})
 	s.Begin(key, now)
 	s.Fail(key, now)
-	s.RecordCeiling(state.Ceiling{
-		Consumer: state.Consumer{Namespace: "jobs", ScaledObject: "llm-workers", Bucket: key},
-		Value:    4,
-		Reason:   headroom.ReasonHeadroom,
-		At:       now,
+	s.UpdateCeiling(state.Consumer{Namespace: "jobs", ScaledObject: "llm-workers", Bucket: key}, func(state.Ceiling, bool) state.Ceiling {
+		return state.Ceiling{Value: 4, ChangedAt: now, Seen: now}
 	})
 	return s
 }
