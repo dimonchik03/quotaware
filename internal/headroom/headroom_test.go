@@ -199,6 +199,14 @@ func TestCompute(t *testing.T) {
 			wantReason:  headroom.ReasonHeadroom,
 		},
 		{
+			name:        "a depleted project token window lowers the ceiling before the organization window does",
+			config:      config(),
+			observation: withProjectTokens(observation(900, 500000, midWindow), 600000, 240000, midWindow),
+			now:         now,
+			wantCeiling: 3,
+			wantReason:  headroom.ReasonHeadroom,
+		},
+		{
 			name:        "the token constraint is ignored until tokens per call are observed",
 			config:      config(),
 			observation: withTokensPerCall(observation(900, 500000, midWindow), 0),
