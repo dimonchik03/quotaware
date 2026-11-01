@@ -18,6 +18,7 @@ func config() headroom.Config {
 		MinReplicas:    1,
 		MaxReplicas:    40,
 		MaxStepUp:      2,
+		StepInterval:   15 * time.Second,
 		StaleAfter:     2 * time.Minute,
 		StaleHard:      10 * time.Minute,
 		DefaultCeiling: 1,
@@ -35,7 +36,12 @@ func observation(remainingRequests, remainingTokens float64, resetAt time.Time) 
 }
 
 func known(ceiling int) headroom.Previous {
-	return headroom.Previous{Ceiling: ceiling, Known: true}
+	return headroom.Previous{Ceiling: ceiling, Known: true, At: now.Add(-time.Minute)}
+}
+
+func changedAt(previous headroom.Previous, at time.Time) headroom.Previous {
+	previous.At = at
+	return previous
 }
 
 func TestCompute(t *testing.T) {
@@ -166,6 +172,33 @@ func TestCompute(t *testing.T) {
 			wantReason:  headroom.ReasonStepUp,
 		},
 		{
+			name:        "a raise within step_interval of the last change is held",
+			config:      config(),
+			observation: observation(900, 500000, midWindow),
+			previous:    changedAt(known(2), now.Add(-5*time.Second)),
+			now:         now,
+			wantCeiling: 2,
+			wantReason:  headroom.ReasonStepUp,
+		},
+		{
+			name:        "a raise after step_interval proceeds by at most max_step_up",
+			config:      config(),
+			observation: observation(900, 500000, midWindow),
+			previous:    changedAt(known(1), now.Add(-15*time.Second)),
+			now:         now,
+			wantCeiling: 3,
+			wantReason:  headroom.ReasonStepUp,
+		},
+		{
+			name:        "a drop within step_interval is not held back",
+			config:      config(),
+			observation: observation(0, 0, midWindow),
+			previous:    changedAt(known(4), now.Add(-5*time.Second)),
+			now:         now,
+			wantCeiling: 1,
+			wantReason:  headroom.ReasonClamped,
+		},
+		{
 			name:        "the ceiling lowers immediately",
 			config:      config(),
 			observation: observation(900, 500000, midWindow),
@@ -279,6 +312,7 @@ func TestConfigValidate(t *testing.T) {
 		{"rejects zero max replicas", func(c *headroom.Config) { c.MaxReplicas = 0 }},
 		{"rejects max replicas below min replicas", func(c *headroom.Config) { c.MinReplicas, c.MaxReplicas = 5, 3 }},
 		{"rejects a zero step up", func(c *headroom.Config) { c.MaxStepUp = 0 }},
+		{"rejects a zero step interval", func(c *headroom.Config) { c.StepInterval = 0 }},
 		{"rejects a zero stale_after", func(c *headroom.Config) { c.StaleAfter = 0 }},
 		{"rejects stale_hard below stale_after", func(c *headroom.Config) { c.StaleHard = time.Minute }},
 		{"rejects a negative default ceiling", func(c *headroom.Config) { c.DefaultCeiling = -1 }},

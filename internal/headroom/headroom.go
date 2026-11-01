@@ -34,6 +34,7 @@ type Config struct {
 	MinReplicas    int
 	MaxReplicas    int
 	MaxStepUp      int
+	StepInterval   time.Duration
 	StaleAfter     time.Duration
 	StaleHard      time.Duration
 	DefaultCeiling int
@@ -46,8 +47,9 @@ func DefaultConfig() Config {
 		Share:          1,
 		Window:         time.Minute,
 		MinReplicas:    1,
-		MaxReplicas:    10,
+		MaxReplicas:    100,
 		MaxStepUp:      2,
+		StepInterval:   15 * time.Second,
 		StaleAfter:     2 * time.Minute,
 		StaleHard:      10 * time.Minute,
 		DefaultCeiling: 1,
@@ -70,6 +72,8 @@ func (c Config) Validate() error {
 		return errors.New("max replicas must be positive and at least min replicas")
 	case c.MaxStepUp <= 0:
 		return errors.New("max step up must be positive")
+	case c.StepInterval <= 0:
+		return errors.New("step interval must be positive")
 	case c.StaleAfter <= 0 || c.StaleHard < c.StaleAfter:
 		return errors.New("stale_after must be positive and stale_hard at least stale_after")
 	case c.DefaultCeiling < 0:
@@ -81,6 +85,7 @@ func (c Config) Validate() error {
 type Previous struct {
 	Ceiling int
 	Known   bool
+	At      time.Time
 }
 
 type Reason string
@@ -128,9 +133,15 @@ func Compute(cfg Config, obs Observation, previous Previous, now time.Time) Resu
 	if float64(result.Ceiling) != raw {
 		result.Reason = ReasonClamped
 	}
-	if previous.Known && result.Ceiling > previous.Ceiling+cfg.MaxStepUp {
-		result.Ceiling = max(previous.Ceiling+cfg.MaxStepUp, cfg.MinReplicas)
-		result.Reason = ReasonStepUp
+	if previous.Known && result.Ceiling > previous.Ceiling {
+		switch {
+		case now.Sub(previous.At) < cfg.StepInterval:
+			result.Ceiling = max(previous.Ceiling, cfg.MinReplicas)
+			result.Reason = ReasonStepUp
+		case result.Ceiling > previous.Ceiling+cfg.MaxStepUp:
+			result.Ceiling = max(previous.Ceiling+cfg.MaxStepUp, cfg.MinReplicas)
+			result.Reason = ReasonStepUp
+		}
 	}
 	return guard(cfg, obs, result)
 }
