@@ -10,13 +10,15 @@ services:
     build:
       context: .
     command:
-      - proxy
+      - all
       - -listen=:8080
       - -admin=:9100
+      - -grpc=:9090
       - -openai-upstream=http://fakeprovider:8081
       - -anthropic-upstream=http://fakeprovider:8081
     ports:
       - "18080:8080"
+      - "19090:9090"
       - "19100:9100"
     depends_on:
       - fakeprovider
