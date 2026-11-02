@@ -1,6 +1,7 @@
 import hashlib
 import json
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import httpx
@@ -12,10 +13,12 @@ from quotaware_httpx import QuotawareHook, credential_hash, tokens
 class Sink(BaseHTTPRequestHandler):
     received = []
     status = 202
+    delay = 0.0
 
     def do_POST(self):
         length = int(self.headers.get("content-length", 0))
         Sink.received.append((dict(self.headers), json.loads(self.rfile.read(length))))
+        time.sleep(Sink.delay)
         self.send_response(Sink.status)
         self.end_headers()
 
@@ -27,6 +30,7 @@ class Sink(BaseHTTPRequestHandler):
 def sink():
     Sink.received = []
     Sink.status = 202
+    Sink.delay = 0.0
     server = HTTPServer(("127.0.0.1", 0), Sink)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -46,7 +50,7 @@ def fake_openai(request):
 
 
 def fake_stream(request):
-    return httpx.Response(200, headers={**RATE_LIMIT_HEADERS, "content-type": "text/event-stream"}, content=b"data: {}\n\ndata: [DONE]\n\n")
+    return httpx.Response(200, headers={**RATE_LIMIT_HEADERS, "content-type": "text/event-stream"}, stream=httpx.ByteStream(b"data: {}\n\ndata: [DONE]\n\n"))
 
 
 def fake_broken(request):
@@ -79,7 +83,34 @@ def test_posts_an_observation_for_a_chat_completion(sink):
     assert observation["credential"] == hashlib.sha256(b"Bearer sk-test").hexdigest()[:12]
 
 
-def test_records_a_stream_as_complete_without_usage(sink):
+def test_observes_a_stream_once_it_is_closed_and_measures_to_the_end(sink):
+    hook = QuotawareHook(sink, "openai")
+    client = client_with(hook, fake_stream)
+    with client.stream("POST", "/v1/chat/completions", json={"model": "gpt-4.1-mini", "messages": []}) as response:
+        time.sleep(0.05)
+        chunks = list(response.iter_bytes())
+        assert Sink.received == []
+    hook.close()
+
+    assert b"".join(chunks).endswith(b"[DONE]\n\n")
+    _, observation = Sink.received[0]
+    assert observation["complete"] is True
+    assert observation["usage"] is None
+    assert observation["latency_ms"] >= 50
+
+
+def test_marks_a_stream_the_caller_abandoned_as_incomplete(sink):
+    hook = QuotawareHook(sink, "openai")
+    client = client_with(hook, fake_stream)
+    with client.stream("POST", "/v1/chat/completions", json={"model": "gpt-4.1-mini", "messages": []}):
+        pass
+    hook.close()
+
+    _, observation = Sink.received[0]
+    assert observation["complete"] is False
+
+
+def test_a_stream_read_in_one_go_is_observed_as_complete(sink):
     hook = QuotawareHook(sink, "openai")
     chat(client_with(hook, fake_stream))
     hook.close()
@@ -117,14 +148,16 @@ def test_counts_rejected_deliveries(sink):
 
 
 def test_drops_when_the_queue_is_full(sink):
-    hook = QuotawareHook("http://127.0.0.1:9", "openai", queue_size=1)
+    Sink.delay = 0.5
+    hook = QuotawareHook(sink, "openai", queue_size=1)
     client = client_with(hook, fake_openai)
     for _ in range(5):
         chat(client)
     hook.close()
 
-    assert hook.dropped >= 1
-    assert hook.failed >= 1
+    assert hook.dropped >= 3
+    assert hook.dropped + len(Sink.received) == 5
+    assert hook.failed == 0
 
 
 def test_counts_tokens_per_provider_and_tolerates_nulls():
