@@ -38,6 +38,10 @@ type Collector struct {
 	headersMalformed  *prometheus.Desc
 	usageMissing      *prometheus.Desc
 	ceiling           *prometheus.Desc
+	buckets           *prometheus.Desc
+	consumers         *prometheus.Desc
+	bucketsRejected   *prometheus.Desc
+	consumersRejected *prometheus.Desc
 }
 
 func NewCollector(store *state.Store, now func() time.Time) *Collector {
@@ -65,6 +69,10 @@ func NewCollector(store *state.Store, now func() time.Time) *Collector {
 		headersMalformed:  describe("headers_malformed_total", "Responses whose rate-limit headers could not be parsed."),
 		usageMissing:      describe("usage_missing_total", "Successful responses without a usable usage object."),
 		ceiling:           prometheus.NewDesc("quotaware_ceiling", "Replica ceiling last reported to KEDA for a scaled object and bucket.", consumerLabels, nil),
+		buckets:           prometheus.NewDesc("quotaware_buckets", "Buckets currently tracked.", nil, nil),
+		consumers:         prometheus.NewDesc("quotaware_scaled_objects", "Scaled objects currently tracking a ceiling.", nil, nil),
+		bucketsRejected:   prometheus.NewDesc("quotaware_buckets_rejected_total", "Calls on new buckets refused because the bucket limit was reached.", nil, nil),
+		consumersRejected: prometheus.NewDesc("quotaware_scaled_objects_rejected_total", "Ceiling evaluations refused because the scaled object limit was reached.", nil, nil),
 	}
 }
 
@@ -131,6 +139,11 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 			ceiling.Consumer.Namespace, ceiling.Consumer.ScaledObject,
 			ceiling.Consumer.Bucket.Provider, ceiling.Consumer.Bucket.Model, ceiling.Consumer.Bucket.Key)
 	}
+	stats := c.store.Stats()
+	ch <- prometheus.MustNewConstMetric(c.buckets, prometheus.GaugeValue, float64(stats.Buckets))
+	ch <- prometheus.MustNewConstMetric(c.consumers, prometheus.GaugeValue, float64(stats.Consumers))
+	ch <- prometheus.MustNewConstMetric(c.bucketsRejected, prometheus.CounterValue, float64(stats.RejectedBuckets))
+	ch <- prometheus.MustNewConstMetric(c.consumersRejected, prometheus.CounterValue, float64(stats.RejectedConsumers))
 }
 
 func (c *Collector) descs() []*prometheus.Desc {
@@ -138,7 +151,7 @@ func (c *Collector) descs() []*prometheus.Desc {
 		c.limitRequests, c.remainingRequests, c.limitTokens, c.remainingTokens, c.resetSeconds,
 		c.tokensPerCall, c.latencySeconds, c.inflight, c.retryAfterSeconds, c.rateLimitedRatio,
 		c.responses, c.rateLimited, c.aborted, c.upstreamErrors, c.headersMissing, c.headersMalformed, c.usageMissing,
-		c.ceiling,
+		c.ceiling, c.buckets, c.consumers, c.bucketsRejected, c.consumersRejected,
 	}
 }
 

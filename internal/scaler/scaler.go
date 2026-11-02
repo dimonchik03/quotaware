@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -30,10 +31,13 @@ type QueueDepth interface {
 
 type QueueFactory func(address string) QueueDepth
 
+const maxRefLength = 253
+
 type Config struct {
-	Defaults     headroom.Config
-	AIMD         aimd.Config
-	PushInterval time.Duration
+	Defaults      headroom.Config
+	AIMD          aimd.Config
+	PushInterval  time.Duration
+	AllowedQueues []string
 }
 
 func DefaultConfig() Config {
@@ -105,6 +109,9 @@ type queueTrigger struct {
 }
 
 func (s *Service) parse(ref *externalscaler.ScaledObjectRef) (trigger, error) {
+	if ref.GetName() == "" || len(ref.GetName()) > maxRefLength || len(ref.GetNamespace()) > maxRefLength {
+		return trigger{}, status.Errorf(codes.InvalidArgument, "scaled object name is required and name and namespace must be at most %d characters", maxRefLength)
+	}
 	metadata := ref.GetScalerMetadata()
 	bucket := metadata["bucket"]
 	provider, model, ok := strings.Cut(bucket, "/")
@@ -129,7 +136,7 @@ func (s *Service) parse(ref *externalscaler.ScaledObjectRef) (trigger, error) {
 func (s *Service) parseAIMD(metadata map[string]string, cfg headroom.Config) (aimd.Config, error) {
 	aimdConfig := s.cfg.AIMD
 	aimdConfig.Interval, aimdConfig.Window, aimdConfig.Min, aimdConfig.Max = cfg.StepInterval, state.WindowLength, cfg.MinReplicas, cfg.MaxReplicas
-	aimdConfig.Start = min(max(cfg.DefaultCeiling, cfg.MinReplicas), cfg.MaxReplicas)
+	aimdConfig.Start = cfg.DefaultCeiling
 	floats := []floatField{{"aimdThreshold", &aimdConfig.Threshold}, {"aimdDecrease", &aimdConfig.Decrease}}
 	for _, field := range floats {
 		if err := parseFloat(metadata, field.name, field.target); err != nil {
@@ -212,6 +219,9 @@ func (s *Service) parseQueue(metadata map[string]string) (*queueTrigger, error) 
 	if q.address == "" || q.list == "" {
 		return nil, status.Error(codes.InvalidArgument, `metadata "redisAddress" and "listName" are both required for queue mode`)
 	}
+	if !slices.Contains(s.cfg.AllowedQueues, q.address) {
+		return nil, status.Errorf(codes.PermissionDenied, "redisAddress %q is not on this scaler's allow list", q.address)
+	}
 	if raw, present := metadata["listLength"]; present {
 		length, err := strconv.ParseInt(raw, 10, 64)
 		if err != nil || length <= 0 {
@@ -276,7 +286,10 @@ func (s *Service) GetMetrics(ctx context.Context, request *externalscaler.GetMet
 	if err != nil {
 		return nil, err
 	}
-	value := s.ceiling(ref, t)
+	value, err := s.ceiling(ref, t)
+	if err != nil {
+		return nil, err
+	}
 	if t.queue != nil {
 		demand, err := s.demand(ctx, t.queue)
 		if err != nil {
@@ -378,7 +391,7 @@ func (s *Service) queueDepth(ctx context.Context, q *queueTrigger) (int64, error
 	return depth, nil
 }
 
-func (s *Service) ceiling(ref *externalscaler.ScaledObjectRef, t trigger) int {
+func (s *Service) ceiling(ref *externalscaler.ScaledObjectRef, t trigger) (int, error) {
 	now := s.now()
 	total := 0
 	matched := 0
@@ -388,13 +401,17 @@ func (s *Service) ceiling(ref *externalscaler.ScaledObjectRef, t trigger) int {
 		}
 		matched++
 		consumer := state.Consumer{Namespace: ref.GetNamespace(), ScaledObject: ref.GetName(), Bucket: b.Key}
-		total += s.evaluate(consumer, t, b.Observation(), b.Recent, now)
+		value, err := s.evaluate(consumer, t, b.Observation(), b.Recent, now)
+		if err != nil {
+			return 0, err
+		}
+		total += value
 	}
 	if matched == 0 {
 		consumer := state.Consumer{Namespace: ref.GetNamespace(), ScaledObject: ref.GetName(), Bucket: state.Key{Provider: t.provider, Model: t.model, Key: t.credential}}
 		return s.evaluate(consumer, t, headroom.Observation{}, state.Recent{}, now)
 	}
-	return min(total, t.cfg.MaxReplicas)
+	return min(total, t.cfg.MaxReplicas), nil
 }
 
 type decision struct {
@@ -407,10 +424,10 @@ type decision struct {
 	podRate     float64
 }
 
-func (s *Service) evaluate(consumer state.Consumer, t trigger, obs headroom.Observation, recent state.Recent, now time.Time) int {
+func (s *Service) evaluate(consumer state.Consumer, t trigger, obs headroom.Observation, recent state.Recent, now time.Time) (int, error) {
 	var change *decision
 	var from int
-	ceiling := s.store.UpdateCeiling(consumer, func(previous state.Ceiling, known bool) state.Ceiling {
+	ceiling, err := s.store.UpdateCeiling(consumer, func(previous state.Ceiling, known bool) state.Ceiling {
 		d := decide(t, obs, recent, previous, known, now)
 		next := state.Ceiling{Value: d.value, Bound: d.bound, Mode: d.mode, ChangedAt: previous.ChangedAt, Seen: now, HoldUntil: d.holdUntil}
 		if !known || d.value != previous.Value {
@@ -419,6 +436,12 @@ func (s *Service) evaluate(consumer state.Consumer, t trigger, obs headroom.Obse
 		}
 		return next
 	})
+	switch {
+	case errors.Is(err, state.ErrTooManyConsumers):
+		return 0, status.Error(codes.ResourceExhausted, err.Error())
+	case err != nil:
+		return 0, status.Error(codes.Internal, err.Error())
+	}
 	if change != nil {
 		s.logger.Info("ceiling changed",
 			"namespace", consumer.Namespace, "scaledobject", consumer.ScaledObject,
@@ -426,7 +449,7 @@ func (s *Service) evaluate(consumer state.Consumer, t trigger, obs headroom.Obse
 			"from", from, "to", change.value, "mode", string(change.mode), "reason", change.reason,
 			"allowed_rate", change.allowedRate, "pod_rate", change.podRate)
 	}
-	return ceiling.Value
+	return ceiling.Value, nil
 }
 
 func decide(t trigger, obs headroom.Observation, recent state.Recent, previous state.Ceiling, known bool, now time.Time) decision {

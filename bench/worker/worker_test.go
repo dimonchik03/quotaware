@@ -51,18 +51,19 @@ func (q *fakeQueue) push(t *testing.T, job worker.Job) {
 }
 
 type fixture struct {
-	queue    *fakeQueue
-	metrics  *worker.Metrics
-	registry *prometheus.Registry
-	statuses []int
-	calls    atomic.Int64
-	server   *httptest.Server
+	queue      *fakeQueue
+	metrics    *worker.Metrics
+	registry   *prometheus.Registry
+	statuses   []int
+	retryAfter string
+	calls      atomic.Int64
+	server     *httptest.Server
 }
 
 func newFixture(t *testing.T, statuses ...int) *fixture {
 	t.Helper()
 	registry := prometheus.NewRegistry()
-	f := &fixture{queue: &fakeQueue{}, metrics: worker.NewMetrics(registry), registry: registry, statuses: statuses}
+	f := &fixture{queue: &fakeQueue{}, metrics: worker.NewMetrics(registry), registry: registry, statuses: statuses, retryAfter: "0"}
 	f.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		index := int(f.calls.Add(1)) - 1
 		status := http.StatusOK
@@ -73,7 +74,7 @@ func newFixture(t *testing.T, statuses ...int) *fixture {
 			status = http.StatusUnauthorized
 		}
 		if status == http.StatusTooManyRequests {
-			w.Header().Set("Retry-After", "0")
+			w.Header().Set("Retry-After", f.retryAfter)
 		}
 		w.WriteHeader(status)
 		_, _ = io.WriteString(w, `{"usage":{"prompt_tokens":1,"completion_tokens":1}}`)
@@ -146,6 +147,34 @@ func TestWorker(t *testing.T) {
 		}
 		if counter(f.metrics.Backoff) <= 0 {
 			t.Fatal("backoff seconds were not accumulated")
+		}
+	})
+
+	t.Run("never retries before the retry-after, whatever the jitter", func(t *testing.T) {
+		f := newFixture(t, http.StatusTooManyRequests, http.StatusOK)
+		f.retryAfter = "1"
+		f.queue.push(t, worker.Job{ID: 7, EnqueuedAt: time.Now(), PromptTokens: 20})
+		started := time.Now()
+
+		f.run(t, fastConfig(), func() bool { return counter(f.metrics.Completed) == 1 })
+
+		if elapsed := time.Since(started); elapsed < time.Second {
+			t.Fatalf("retried after %v, want at least the retry-after of 1s", elapsed)
+		}
+		if counter(f.metrics.Backoff) < 1 {
+			t.Fatalf("backoff = %v s, want at least the retry-after", counter(f.metrics.Backoff))
+		}
+	})
+
+	t.Run("counts a job abandoned on shutdown while it waits to retry", func(t *testing.T) {
+		f := newFixture(t, http.StatusTooManyRequests)
+		f.retryAfter = "60"
+		f.queue.push(t, worker.Job{ID: 8, EnqueuedAt: time.Now(), PromptTokens: 20})
+
+		f.run(t, fastConfig(), func() bool { return counter(f.metrics.Retries) == 1 })
+
+		if counter(f.metrics.Abandoned) != 1 || counter(f.metrics.Completed) != 0 || counter(f.metrics.Failed) != 0 {
+			t.Fatalf("abandoned = %v completed = %v failed = %v, want the job counted as abandoned only", counter(f.metrics.Abandoned), counter(f.metrics.Completed), counter(f.metrics.Failed))
 		}
 	})
 

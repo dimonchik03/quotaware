@@ -24,6 +24,7 @@ spec:
             - -model=gpt-4.1-mini
             - -concurrency=2
             - -metrics=:9101
+            - -linger=15s
           env:
             - name: API_KEY
               value: sk-bench

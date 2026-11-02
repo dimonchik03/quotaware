@@ -58,11 +58,18 @@ Per response it records, keyed by bucket `(provider, model, api-key hash)`:
   `message_delta` on Anthropic and the usage chunk on OpenAI when
   `stream_options.include_usage` is set; otherwise the call is counted as usage
   missing, never estimated);
-- wall-clock latency and in-flight count.
+- wall-clock latency and in-flight count;
+- how the body ended: completed, abandoned by the client, or broken by the upstream.
+  An abandoned body counts as an abort, a broken one as an upstream error, and a
+  client that leaves before the upstream answers is an abort, not an upstream error.
+
+The request body is read within `-read-body-timeout` (30 s, then 408) and handed to
+the transport as replayable, so a stale pooled connection is retried.
 
 Collectors that remove the extra hop: a Go `http.RoundTripper` wrapper and a Python
 `httpx` event hook that post the same observation to `POST /v1/observe` on the admin
-port, optionally behind a bearer token (ADR 0007).
+port behind a bearer token that is required unless `-observe-insecure` is passed
+(ADR 0007, ADR 0008).
 
 ### 2. State
 
@@ -108,6 +115,8 @@ Guards:
 - `share`: fraction of the organization quota this workload may use (default 1.0).
   Headers reflect org-wide usage, so two quotaware instances for two services would
   each claim the whole headroom. Documented limitation in v0.1.
+- `default_ceiling` must lie within `[min_replicas, max_replicas]`; a trigger that
+  says otherwise is rejected instead of clamped.
 
 AIMD fallback when headers are absent, unparseable or stale (Gemini, some gateways,
 Azure variants to be verified): classic congestion control. If the 429 ratio in the
@@ -144,7 +153,11 @@ key), `safety` (0.85), `share` (1), `maxStepUp` (2), `stepInterval` (15s),
 `aimdThreshold` (0.02), `aimdDecrease` (0.5), `aimdIncrease` (1).
 Ceilings are computed per ScaledObject and per bucket, summed across the credentials
 that match and clamped to `maxReplicas`. A cap trigger never reports `IsActive`;
-activation stays with the demand trigger.
+activation stays with the demand trigger. The scaler trusts nothing in the request
+beyond what it validates: ScaledObject names and namespaces are bounded to 253
+characters, at most `-max-scaled-objects` (1000) ScaledObjects are served and the
+rest get ResourceExhausted, and single-trigger mode only dials the Redis addresses
+listed with `-redis-address`; any other `redisAddress` is PermissionDenied (ADR 0008).
 
 ### 5. Combining with the existing queue trigger
 
@@ -173,11 +186,14 @@ credential): `quotaware_limit_requests`, `quotaware_remaining_requests`,
 `quotaware_limit_tokens` and `quotaware_remaining_tokens` (with a `window` label for
 the organization, project, input and output token windows), `quotaware_reset_seconds`
 per window, `quotaware_tokens_per_call`, `quotaware_latency_seconds`,
-`quotaware_inflight`, `quotaware_retry_after_seconds`, `quotaware_ceiling`, and the
-counters `quotaware_responses_total`, `quotaware_429_total`, `quotaware_aborted_total`,
-`quotaware_upstream_errors_total`, `quotaware_headers_missing_total`,
-`quotaware_headers_malformed_total` and `quotaware_usage_missing_total`.
-A Grafana dashboard JSON ships in `deploy/grafana/`.
+`quotaware_inflight`, `quotaware_retry_after_seconds`, `quotaware_rate_limited_ratio`,
+`quotaware_ceiling`, and the counters `quotaware_responses_total`,
+`quotaware_429_total`, `quotaware_aborted_total`, `quotaware_upstream_errors_total`,
+`quotaware_headers_missing_total`, `quotaware_headers_malformed_total` and
+`quotaware_usage_missing_total`. Unlabelled: `quotaware_buckets`,
+`quotaware_scaled_objects`, `quotaware_buckets_rejected_total` and
+`quotaware_scaled_objects_rejected_total`. A Grafana dashboard JSON ships in
+`deploy/grafana/`.
 
 ## Provider header matrix
 
@@ -188,14 +204,21 @@ A Grafana dashboard JSON ships in `deploy/grafana/`.
 | Gemini | unverified | n/a | AIMD-only until verified with a live request. |
 | Azure OpenAI | to verify | | |
 
-Parsers live in `internal/headers/` with fixture tests built from captured responses.
-An unknown or missing header never breaks scaling; it switches the bucket to AIMD mode
-and increments `quotaware_headers_missing_total`.
+Parsers live in `internal/headers/` with fixture tests over raw response heads.
+A malformed header never breaks scaling and never discards the rest of the response:
+an unparseable reset keeps its window without a reset, an unparseable limit or
+remaining leaves only that window unknown, and each one increments
+`quotaware_headers_malformed_total`. A response with no usable window switches the
+bucket to AIMD mode; one without any rate-limit header increments
+`quotaware_headers_missing_total`.
 
 ## Benchmark
 
 Runs on a laptop with `kind`, costs zero tokens, reproducible with `make bench`.
-Results, configs and seeds are committed under `bench/results/<date>/`.
+The exported series, the three SVG charts, the summary table and `run.json` (start,
+end, label, the commit the images were built from and whether the tree was dirty)
+are committed under `bench/results/<date>/`; the manifests and the fake provider's
+limits are the ones in `bench/` at that commit.
 
 Components under `bench/`:
 
@@ -205,23 +228,29 @@ Components under `bench/`:
   exhausted; optional acceleration 429 on steep ramps; configurable latency
   distribution (default 1.5 s with jitter); synthetic usage derived from request size
   plus a fixed output size; deterministic by seed.
-- `producer/`: pushes jobs into a Redis list following a phased schedule: 0.5x quota,
-  1.0x quota, a 3x burst for five minutes, then idle. Same seed for every run.
+- `producer/`: pushes jobs into a Redis list following a phased schedule: 0.5x quota
+  for three minutes, 1.0x for three, a 3x burst for four, then four minutes idle. The
+  job schedule and prompt sizes come from one seed, so every run sees the same jobs.
 - `worker/` (Go): `BLPOP`, `k` concurrent calls through the proxy, SDK-style retry on
-  429 honouring `retry-after` with jitter, graceful shutdown on SIGTERM.
+  429 (exponential backoff with jitter, never before `retry-after`), graceful shutdown
+  on SIGTERM that counts the jobs it had to abandon and lingers for the last scrape.
 - `kind/` and `prometheus/`: cluster config, KEDA via Helm, a plain Prometheus scrape
-  of kube-state-metrics, the worker and quotaware.
-- `plot/`: turns the Prometheus export into two PNG panels and a Markdown table.
+  of the workers, the producer and quotaware; replicas are counted as worker targets
+  that are up.
+- `plot/`: turns the Prometheus export into three SVG charts and a Markdown table,
+  one column per run.
 
-Two runs, identical except for the ScaledObject:
+Three runs, identical except for the ScaledObject:
 
 - A, baseline: Redis list trigger only (`listLength: 10`).
-- B, quotaware: the same trigger capped by the quotaware ceiling (Mode A).
+- B, quotaware: the same trigger capped by the quotaware ceiling (Mode A) at the
+  default safety factor 0.85.
+- C, quotaware at `safety: "1"`, so the ceiling is the full quota.
 
 Measured per run: replicas over time, 429 per minute, retries, jobs completed per
 minute, job latency p50 and p95, time to drain the burst, total pod-seconds, idle
-pod-seconds (pods in backoff with nothing completed), time to react after the first
-429 (with and without `external-push`).
+pod-seconds (seconds in backoff divided by the calls per pod), jobs abandoned on
+shutdown and jobs unaccounted for.
 
 Hypothesis, stated before running: under quota both runs look the same, and quotaware
 must not hurt there; at and above quota B shows fewer 429s, fewer pod-seconds and a
@@ -232,9 +261,9 @@ way. If B does not win, that is still the write-up, and a bug hunt.
 
     quotaware/
       cmd/quotaware/          main: proxy | all | simulate
-      internal/headroom/      the algorithm as pure functions; table-driven and property tests
+      internal/headroom/      the algorithm as pure functions; table-driven tests
       internal/aimd/          congestion-control fallback, pure
-      internal/state/         bucket state, EWMA, staleness; memory and redis backends
+      internal/state/         bucket state, EWMA, staleness, limits; in-memory backend
       internal/headers/       openai.go, anthropic.go, testdata/, *_test.go
       internal/usage/         usage extraction, body capture, credential hashing
       internal/proxy/         reverse proxy, SSE passthrough, the /v1/observe endpoint
@@ -245,7 +274,7 @@ way. If B does not win, that is still the write-up, and a bug hunt.
       deploy/                 Helm chart (Deployment, Service, ScaledObject examples), grafana/
       bench/                  fakeprovider/, producer/, worker/, kind/, prometheus/, plot/, results/
       docs/                   SPEC.md, design.md, adr/, benchmark.md, release.md
-      .github/workflows/      test and lint on PR; kind smoke run on demand
+      .github/workflows/      race tests, lint, tidy, chart checks, compose e2e and the Python tests on PR; release on tag
 
 Dependency direction, inward only: `headroom` and `aimd` are the domain and import
 nothing from the repository; `state` is the application layer and depends on the
@@ -267,7 +296,7 @@ Tooling: Go 1.26 (pinned in `go.mod`), `google.golang.org/grpc`,
    Mode B, kind demo script.
 4. Benchmark. Producer, worker, phased schedule, Prometheus export, plots, first
    committed results.
-5. Polish and release. README with the two charts, `docs/design.md`, AIMD mode,
+5. Polish and release. README with the charts, `docs/design.md`, AIMD mode,
    Python and Go collector hooks, v0.1.0.
 
 ## Architecture decisions to record in docs/adr (0002 onward)
@@ -279,6 +308,8 @@ Tooling: Go 1.26 (pinned in `go.mod`), `google.golang.org/grpc`,
 5. Count uncached input tokens for Anthropic; prompt caching as a scaling lever.
 6. AIMD fallback; TCP congestion control as the mental model.
 7. Drain guard: never scale below `in_flight / k`.
+8. Trust nothing on the network by default: observe token, queue allow list, bounded
+   store.
 
 ## Risks and open questions
 

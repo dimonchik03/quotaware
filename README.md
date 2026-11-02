@@ -15,31 +15,37 @@ every response; nothing wires them to the autoscaler.
 
 ## What it changes
 
-Same queue, same fake provider limited to 600 requests per minute, same seed. Run A
-scales on queue depth alone; run B caps the same trigger with the quotaware ceiling.
+Same queue, same fake provider limited to 600 requests per minute, same job
+schedule. Run A scales on queue depth alone; runs B and C cap the same trigger with
+the quotaware ceiling, at the default safety factor 0.85 and at 1.
 
-![worker replicas](bench/results/2026-11-01/replicas.svg)
+![worker replicas](bench/results/2026-11-02/replicas.svg)
 
-![429 responses per minute](bench/results/2026-11-01/rate_limits.svg)
+![429 responses per minute](bench/results/2026-11-02/rate_limits.svg)
 
-| Metric | A (queue trigger) | B (queue trigger + quotaware) |
-|---|---|---|
-| Jobs produced | 9900 | 9900 |
-| Jobs completed | 9848 | 9875 |
-| Jobs failed | 0 | 0 |
-| 429 responses | 1140 | 0 |
-| Retries | 1140 | 0 |
-| Peak 429 per minute | 111 | 0 |
-| Job latency p50 | 157.9 s | 263.4 s |
-| Job latency p95 | 454.8 s | 689.3 s |
-| Peak replicas | 30 | 8 |
-| Pod-seconds | 23700 | 9945 |
-| Idle pod-seconds (in backoff) | 13681 | 0 |
-| Time to drain the burst | 465 s | 720 s |
-| Time to react after the first 429 | n/a (no ceiling) | no 429 observed |
+| Metric | A (queue trigger) | B (queue trigger + quotaware, safety 0.85) | C (queue trigger + quotaware, safety 1) |
+|---|---|---|---|
+| Jobs produced | 9900 | 9900 | 9900 |
+| Jobs completed | 9900 | 9900 | 9900 |
+| Jobs failed | 0 | 0 | 0 |
+| Jobs abandoned on shutdown | 0 | 0 | 0 |
+| Jobs unaccounted for | 0 | 0 | 0 |
+| 429 responses | 720 | 0 | 15 |
+| Retries | 720 | 0 | 15 |
+| Peak 429 per minute | 76 | 0 | 2 |
+| Job latency p50 | 128.1 s | 263.6 s | 164.8 s |
+| Job latency p95 | 457.7 s | 689.5 s | 463.1 s |
+| Peak replicas | 30 | 8 | 10 |
+| Pod-seconds | 23580 | 10050 | 10125 |
+| Idle pod-seconds (in backoff) | 13300 | 0 | 8 |
+| Time to drain the burst | 450 s | 720 s | 495 s |
 
-`make bench` reproduces both runs on a laptop; `docs/benchmark.md` describes the
-setup, the hypothesis written before the first run and how each number is measured.
+Read it as a trade-off set by `safety`. At 0.85 quotaware ends every 429 and cuts
+the pod-seconds by more than half, but leaves 20 % of the quota unused, so under
+sustained overload jobs wait 50 % longer. At 1 it matches the baseline's latency
+within 2 % with 43 % of the pod-seconds and 2 % of the 429s. `make bench` reproduces
+all three runs on a laptop; `docs/benchmark.md` has the setup, the hypothesis
+written before the first run, the result against it and how each number is measured.
 
 ## How it works
 
@@ -91,7 +97,10 @@ records what it sees per `(provider, model, credential hash)`. Point your worker
     quotaware proxy -listen :8080 -admin :9100
 
 `-openai-upstream` and `-anthropic-upstream` default to the public APIs. The admin
-port serves `/metrics` and `/healthz`.
+port serves `/metrics`, `/healthz` and `/v1/observe`; the last one needs a token (see
+below). A client that stalls while sending a request body gets 408 after
+`-read-body-timeout` (30 s); the buffered body is handed to the transport as
+replayable, so a stale pooled connection is retried instead of answered with 502.
 
 To see it work without a provider account, `docker compose up --build` starts the
 proxy in front of `bench/fakeprovider`, a provider stand-in with real rate-limit
@@ -124,9 +133,12 @@ three requests per minute:
 
 What the proxy records per bucket: the limit, remaining and reset of every window
 the provider reports, a smoothed tokens-per-call and latency over successful calls,
-calls in flight, 429s with their `retry-after`, upstream failures, streams the client
-abandoned, and how often headers were missing or malformed or usage was absent.
-Buckets that see no traffic for ten minutes are dropped. Tokens per call count what the provider charges against the quota: prompt
+calls in flight, 429s with their `retry-after`, upstream failures (including a body
+that broke mid-stream), streams the client abandoned, and how often headers were
+missing or malformed or usage was absent. A malformed header spoils only its own
+window; the windows that parsed still count. Buckets that see no traffic for ten
+minutes are dropped, and at most `-max-buckets` (10000) are tracked: calls on new
+buckets beyond that are counted in `quotaware_buckets_rejected_total` and ignored. Tokens per call count what the provider charges against the quota: prompt
 plus completion tokens for OpenAI, uncached input plus cache writes plus output for
 Anthropic. Usage comes from the response body, so OpenAI streams only report it when
 the client sets `stream_options.include_usage`; a stream without it is counted in
@@ -139,7 +151,13 @@ The chart runs `quotaware all`: the proxy, the metrics endpoint and the KEDA
 external scaler in one pod, from the image `ghcr.io/dimonchik03/quotaware` that
 every release publishes for linux/amd64 and linux/arm64:
 
-    helm install quotaware deploy/helm/quotaware -n llm --create-namespace
+    helm install quotaware deploy/helm/quotaware -n llm --create-namespace \
+      --set observe.token="$(openssl rand -hex 16)"
+
+The chart refuses to render without `observe.token`, `observe.existingSecret` or an
+explicit `observe.insecure=true`. The proxy, gRPC and admin ports carry no
+authentication of their own: keep them inside the cluster and restrict them with a
+NetworkPolicy to the workers, KEDA and Prometheus.
 
 Point your workers at `http://quotaware.llm.svc:8080` and add the ceiling as a second
 trigger next to your queue trigger. KEDA takes the largest value across triggers, so
@@ -174,7 +192,11 @@ exhausted quota with `minReplicaCount: 0` scales to zero; keep `minReplicaCount`
 one or more when the workers must stay warm. If quotaware is unreachable the HPA
 keeps the current replica count. Full manifests for this mode and for the
 single-trigger mode (quotaware reads the Redis list itself and returns the minimum)
-are in `deploy/examples/`; the remaining knobs (`credential`, `safety`, `share`,
+are in `deploy/examples/`. Single-trigger mode only reads the Redis addresses listed
+in `redisAddresses` (the `-redis-address` flag); any other `redisAddress` in trigger
+metadata is answered with PermissionDenied. Each quotaware serves at most
+`-max-scaled-objects` (1000) ScaledObjects; the rest get ResourceExhausted. The
+remaining knobs (`credential`, `safety`, `share`,
 `maxStepUp`, `stepInterval`, `defaultCeiling`, `minReplicas`, `staleAfter`,
 `staleHard`, `window`) and their defaults are listed in `docs/SPEC.md`. A Grafana
 dashboard is in `deploy/grafana/`.
@@ -184,9 +206,10 @@ dashboard is in `deploy/grafana/`.
 Workers that cannot or should not route through the proxy can report what they
 see themselves. Both collectors post the same observation to `POST /v1/observe` on
 the admin port and never block or fail the call they observe: a full queue drops, a
-failed delivery is counted, an error inside the hook is counted. Start quotaware
-with `-observe-token` (or `QUOTAWARE_OBSERVE_TOKEN`) and give the collectors the
-same token whenever the admin port is reachable beyond the namespace.
+failed delivery is counted, an error inside the hook is counted. quotaware refuses
+to start without `-observe-token` (or `QUOTAWARE_OBSERVE_TOKEN`) unless
+`-observe-insecure` is passed, because anyone who can post an observation can move
+the ceiling; give the collectors the same token.
 
     import "github.com/dimonchik03/quotaware/collector"
 
@@ -200,9 +223,10 @@ same token whenever the admin port is reachable beyond the namespace.
     client = httpx.Client(base_url="https://api.openai.com", event_hooks=hook.hooks())
 
 The Python hook is one module in `collector/python/` with a `pyproject.toml`; copy
-the file or `pip install ./collector/python`. It reads usage from JSON responses and
-records streams without usage; collector traffic is not counted as in flight, so the
-drain guard only sees proxied calls (ADR 0007).
+the file or `pip install ./collector/python`. It reads usage from JSON responses;
+a stream is observed when it is closed, with the latency measured to the end and
+`complete` false if the caller abandoned it. Collector traffic is not counted as in
+flight, so the drain guard only sees proxied calls (ADR 0007).
 
 ## When the headers are missing
 
@@ -250,10 +274,11 @@ Not a gateway, not a rate limiter, not a cost dashboard. See `docs/SPEC.md`.
 ## Status
 
 v0.1.0 is released: binaries for Linux and macOS on the releases page, the image on
-`ghcr.io`, everything in `docs/SPEC.md` implemented and benchmarked. See
+`ghcr.io`, everything in `docs/SPEC.md` implemented and benchmarked. `main` adds the
+network defaults of ADR 0008, the store limits, a worker that never retries before
+`retry-after` and the three-run benchmark above, for the next release. See
 `docs/design.md` for how the pieces fit and `docs/release.md` for how a release is
-cut. Specification in `docs/SPEC.md`,
-decisions in `docs/adr`.
+cut. Specification in `docs/SPEC.md`, decisions in `docs/adr`.
 
 ## License
 

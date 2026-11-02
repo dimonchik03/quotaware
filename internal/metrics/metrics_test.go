@@ -46,13 +46,50 @@ func populated(t *testing.T) *state.Store {
 	s.End(key, state.Sample{Status: http.StatusTooManyRequests, Complete: true, Headers: state.HeadersPresent, Quotas: quotas, RetryAfter: 20 * time.Second, At: now})
 	s.Begin(key, now)
 	s.Fail(key, now)
-	s.UpdateCeiling(state.Consumer{Namespace: "jobs", ScaledObject: "llm-workers", Bucket: key}, func(state.Ceiling, bool) state.Ceiling {
+	_, err = s.UpdateCeiling(state.Consumer{Namespace: "jobs", ScaledObject: "llm-workers", Bucket: key}, func(state.Ceiling, bool) state.Ceiling {
 		return state.Ceiling{Value: 4, Bound: 4, Mode: state.ModeHeadroom, ChangedAt: now, Seen: now}
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	return s
 }
 
 func TestCollector(t *testing.T) {
+	t.Run("exposes how many buckets and scaled objects are tracked and how many were refused", func(t *testing.T) {
+		s, err := state.NewWithLimits(0.5, state.Limits{Buckets: 1, Consumers: 1})
+		if err != nil {
+			t.Fatal(err)
+		}
+		s.Begin(state.Key{Provider: "openai", Model: "a", Key: "k"}, now)
+		s.Begin(state.Key{Provider: "openai", Model: "b", Key: "k"}, now)
+		keep := func(state.Ceiling, bool) state.Ceiling { return state.Ceiling{Value: 1, Seen: now} }
+		if _, err := s.UpdateCeiling(state.Consumer{Namespace: "jobs", ScaledObject: "a"}, keep); err != nil {
+			t.Fatal(err)
+		}
+		_, _ = s.UpdateCeiling(state.Consumer{Namespace: "jobs", ScaledObject: "b"}, keep)
+		collector := metrics.NewCollector(s, func() time.Time { return now })
+		expected := `
+# HELP quotaware_buckets Buckets currently tracked.
+# TYPE quotaware_buckets gauge
+quotaware_buckets 1
+# HELP quotaware_buckets_rejected_total Calls on new buckets refused because the bucket limit was reached.
+# TYPE quotaware_buckets_rejected_total counter
+quotaware_buckets_rejected_total 1
+# HELP quotaware_scaled_objects Scaled objects currently tracking a ceiling.
+# TYPE quotaware_scaled_objects gauge
+quotaware_scaled_objects 1
+# HELP quotaware_scaled_objects_rejected_total Ceiling evaluations refused because the scaled object limit was reached.
+# TYPE quotaware_scaled_objects_rejected_total counter
+quotaware_scaled_objects_rejected_total 1
+`
+
+		if err := testutil.CollectAndCompare(collector, strings.NewReader(expected),
+			"quotaware_buckets", "quotaware_buckets_rejected_total", "quotaware_scaled_objects", "quotaware_scaled_objects_rejected_total"); err != nil {
+			t.Fatal(err)
+		}
+	})
+
 	t.Run("exposes every bucket metric with provider, model and key labels", func(t *testing.T) {
 		collector := metrics.NewCollector(populated(t), func() time.Time { return now })
 		expected := `

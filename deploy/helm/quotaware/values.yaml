@@ -13,6 +13,15 @@ ports:
   admin: 9100
 
 ewmaAlpha: 0.2
+maxBuckets: 10000
+redisAddresses: []
+
+observe:
+  token: ""
+  existingSecret: ""
+  secretKey: observe-token
+  insecure: false
+
 extraArgs: []
 
 resources:

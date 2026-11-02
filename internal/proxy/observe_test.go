@@ -95,7 +95,7 @@ func TestObserver(t *testing.T) {
 		}
 	})
 
-	t.Run("logs a malformed retry-after and keeps the observation", func(t *testing.T) {
+	t.Run("logs a malformed retry-after and keeps the observation and its quota", func(t *testing.T) {
 		o, store, logs := observerWithToken(t, "")
 
 		observe(o, `{"provider":"openai","model":"gpt-4.1-mini","credential":"ab12ab12ab12","status":429,"headers":{"retry-after":"soon","x-ratelimit-limit-requests":"60","x-ratelimit-remaining-requests":"0"},"complete":true}`)
@@ -103,6 +103,9 @@ func TestObserver(t *testing.T) {
 		b, _ := store.Bucket(state.Key{Provider: "openai", Model: "gpt-4.1-mini", Key: "ab12ab12ab12"}, start)
 		if b.RateLimited != 1 || !strings.Contains(logs.String(), "retry-after malformed") {
 			t.Fatalf("bucket = %+v logs = %q, want the 429 kept and the header logged", b, logs.String())
+		}
+		if b.HeadersMalformed != 0 || !b.Quotas.Requests.Known() || b.Quotas.Requests.Remaining != 0 {
+			t.Fatalf("bucket = %+v, want the rate-limit window applied although retry-after was unreadable", b)
 		}
 	})
 

@@ -76,8 +76,8 @@ func (c Config) Validate() error {
 		return errors.New("step interval must be positive")
 	case c.StaleAfter <= 0 || c.StaleHard < c.StaleAfter:
 		return errors.New("stale_after must be positive and stale_hard at least stale_after")
-	case c.DefaultCeiling < 0:
-		return errors.New("default ceiling must not be negative")
+	case c.DefaultCeiling < c.MinReplicas || c.DefaultCeiling > c.MaxReplicas:
+		return errors.New("default ceiling must be within [min replicas, max replicas]")
 	}
 	return nil
 }

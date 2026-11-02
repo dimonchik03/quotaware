@@ -75,6 +75,7 @@ type Queue interface {
 type Metrics struct {
 	Completed   prometheus.Counter
 	Failed      prometheus.Counter
+	Abandoned   prometheus.Counter
 	Calls       *prometheus.CounterVec
 	Retries     prometheus.Counter
 	Backoff     prometheus.Counter
@@ -87,6 +88,7 @@ func NewMetrics(registry prometheus.Registerer) *Metrics {
 	m := &Metrics{
 		Completed:   prometheus.NewCounter(prometheus.CounterOpts{Name: "worker_jobs_completed_total", Help: "Jobs finished with a successful provider call."}),
 		Failed:      prometheus.NewCounter(prometheus.CounterOpts{Name: "worker_jobs_failed_total", Help: "Jobs given up after the last attempt or with an unreadable payload."}),
+		Abandoned:   prometheus.NewCounter(prometheus.CounterOpts{Name: "worker_jobs_abandoned_total", Help: "Jobs popped from the queue but dropped because the worker was shutting down."}),
 		Calls:       prometheus.NewCounterVec(prometheus.CounterOpts{Name: "worker_calls_total", Help: "Provider calls by HTTP status, or error for transport failures."}, []string{"status"}),
 		Retries:     prometheus.NewCounter(prometheus.CounterOpts{Name: "worker_retries_total", Help: "Calls repeated after a 429, a 5xx or a transport failure."}),
 		Backoff:     prometheus.NewCounter(prometheus.CounterOpts{Name: "worker_backoff_seconds_total", Help: "Seconds spent waiting before a retry."}),
@@ -94,7 +96,7 @@ func NewMetrics(registry prometheus.Registerer) *Metrics {
 		JobLatency:  prometheus.NewHistogram(prometheus.HistogramOpts{Name: "worker_job_latency_seconds", Help: "Seconds from enqueue to completion.", Buckets: prometheus.ExponentialBuckets(0.5, 1.5, 24)}),
 		CallLatency: prometheus.NewHistogram(prometheus.HistogramOpts{Name: "worker_call_latency_seconds", Help: "Seconds per provider call attempt.", Buckets: prometheus.ExponentialBuckets(0.1, 1.5, 20)}),
 	}
-	registry.MustRegister(m.Completed, m.Failed, m.Calls, m.Retries, m.Backoff, m.InFlight, m.JobLatency, m.CallLatency)
+	registry.MustRegister(m.Completed, m.Failed, m.Abandoned, m.Calls, m.Retries, m.Backoff, m.InFlight, m.JobLatency, m.CallLatency)
 	return m
 }
 
@@ -146,6 +148,9 @@ func (w *Worker) loop(ctx context.Context) {
 	for ctx.Err() == nil {
 		payload, err := w.queue.Pop(ctx, w.cfg.List, w.cfg.PopTimeout)
 		if ctx.Err() != nil {
+			if payload != "" {
+				w.metrics.Abandoned.Inc()
+			}
 			return
 		}
 		if err != nil {
@@ -183,6 +188,7 @@ func (w *Worker) process(ctx context.Context, job Job) {
 		w.metrics.Retries.Inc()
 		w.metrics.Backoff.Add(wait.Seconds())
 		if !w.sleep(ctx, wait) {
+			w.metrics.Abandoned.Inc()
 			w.logger.Info("job abandoned on shutdown", "id", job.ID)
 			return
 		}
@@ -250,11 +256,9 @@ func retryAfter(h http.Header) time.Duration {
 func (w *Worker) backoff(attempt int, retryAfter time.Duration) time.Duration {
 	wait := time.Duration(float64(w.cfg.BaseBackoff) * math.Pow(2, float64(attempt-1)))
 	wait = min(wait, w.cfg.MaxBackoff)
-	if retryAfter > wait {
-		wait = retryAfter
-	}
 	jitter := 1 + (rand.Float64()*0.5 - 0.25)
-	return time.Duration(float64(wait) * jitter)
+	wait = time.Duration(float64(wait) * jitter)
+	return max(wait, retryAfter)
 }
 
 func prompt(tokens int) string {

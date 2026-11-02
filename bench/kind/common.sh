@@ -44,6 +44,7 @@ deploy_base() {
   helm upgrade --install quotaware deploy/helm/quotaware --namespace "$namespace" \
     --set image.repository=quotaware --set image.tag=dev --set image.pullPolicy=Never \
     --set upstreams.openai=http://fakeprovider:8081 --set upstreams.anthropic=http://fakeprovider:8081 \
+    --set observe.insecure=true \
     --wait --timeout 2m >/dev/null
   kubectl -n "$namespace" run grpc-probe --rm -i --restart=Never --image=busybox:1.36 --quiet -- \
     sh -c 'for i in $(seq 1 30); do nc -z quotaware 9090 && exit 0; sleep 1; done; echo "quotaware:9090 unreachable" >&2; exit 1' >/dev/null

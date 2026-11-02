@@ -1,3 +1,6 @@
+{{- if not (or .Values.observe.token .Values.observe.existingSecret .Values.observe.insecure) }}
+{{- fail "quotaware refuses unauthenticated observations: set observe.token, observe.existingSecret, or observe.insecure=true" }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -39,9 +42,24 @@ spec:
             - -openai-upstream={{ .Values.upstreams.openai }}
             - -anthropic-upstream={{ .Values.upstreams.anthropic }}
             - -ewma-alpha={{ .Values.ewmaAlpha }}
+            - -max-buckets={{ .Values.maxBuckets }}
+            {{- with .Values.redisAddresses }}
+            - -redis-address={{ join "," . }}
+            {{- end }}
+            {{- if .Values.observe.insecure }}
+            - -observe-insecure
+            {{- end }}
             {{- range .Values.extraArgs }}
             - {{ . | quote }}
             {{- end }}
+          {{- if or .Values.observe.token .Values.observe.existingSecret }}
+          env:
+            - name: QUOTAWARE_OBSERVE_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.observe.existingSecret | default (printf "%s-observe" (include "quotaware.fullname" .)) }}
+                  key: {{ .Values.observe.secretKey }}
+          {{- end }}
           ports:
             - name: proxy
               containerPort: {{ .Values.ports.proxy }}

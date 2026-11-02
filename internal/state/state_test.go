@@ -1,6 +1,7 @@
 package state_test
 
 import (
+	"errors"
 	"net/http"
 	"testing"
 	"time"
@@ -41,6 +42,15 @@ func success(usage float64, latency time.Duration) state.Sample {
 		Latency:  latency,
 		At:       now,
 	}
+}
+
+func updateCeiling(t *testing.T, s *state.Store, consumer state.Consumer, update func(state.Ceiling, bool) state.Ceiling) state.Ceiling {
+	t.Helper()
+	c, err := s.UpdateCeiling(consumer, update)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c
 }
 
 func bucket(t *testing.T, s *state.Store) state.Bucket {
@@ -212,6 +222,102 @@ func TestStore(t *testing.T) {
 		if b.HeadersMalformed != 1 || b.HeadersMissing != 0 {
 			t.Fatalf("bucket = %+v, want one malformed and no missing", b)
 		}
+		if b.ObservedAt.Equal(now) {
+			t.Fatalf("observed at = %v, want untouched when nothing usable was parsed", b.ObservedAt)
+		}
+	})
+
+	t.Run("malformed headers still apply the windows that parsed", func(t *testing.T) {
+		s := store(t, 0.5)
+		partial := success(1000, time.Second)
+		partial.Headers = state.HeadersMalformed
+		partial.Quotas = state.Quotas{Requests: headroom.Quota{Limit: 60, Remaining: 59}}
+
+		s.End(key, partial)
+
+		b := bucket(t, s)
+		if b.HeadersMalformed != 1 || b.Quotas.Requests.Remaining != 59 || !b.ObservedAt.Equal(now) {
+			t.Fatalf("bucket = %+v, want the malformed count and the parsed window applied", b)
+		}
+	})
+
+	t.Run("a body that failed on the upstream side counts as an upstream error, not an abort", func(t *testing.T) {
+		s := store(t, 0.5)
+		broken := success(1000, time.Second)
+		broken.Complete, broken.Failed = false, true
+
+		s.End(key, broken)
+
+		b := bucket(t, s)
+		if b.UpstreamErrors != 1 || b.Aborted != 0 || b.Latency != 0 {
+			t.Fatalf("bucket = %+v, want one upstream error and no abort or latency", b)
+		}
+	})
+
+	t.Run("an abort before any response releases the slot and counts", func(t *testing.T) {
+		s := store(t, 0.5)
+		s.Begin(key, now)
+
+		s.Abort(key, now)
+
+		b := bucket(t, s)
+		if b.InFlight != 0 || b.Aborted != 1 || b.Responses != 0 || b.UpstreamErrors != 0 {
+			t.Fatalf("bucket = %+v, want the slot released, one abort and no response", b)
+		}
+	})
+
+	t.Run("refuses a new bucket beyond the limit and counts the rejection", func(t *testing.T) {
+		s, err := state.NewWithLimits(0.5, state.Limits{Buckets: 1, Consumers: 1})
+		if err != nil {
+			t.Fatal(err)
+		}
+		other := state.Key{Provider: "openai", Model: "gpt-4.1", Key: "cd34"}
+
+		s.Begin(key, now)
+		s.Begin(other, now)
+		s.End(other, success(1000, time.Second))
+
+		if _, ok := s.Bucket(other, now); ok {
+			t.Fatal("bucket beyond the limit was created")
+		}
+		if stats := s.Stats(); stats.Buckets != 1 || stats.RejectedBuckets != 2 {
+			t.Fatalf("stats = %+v, want one bucket and two rejected touches", stats)
+		}
+		s.End(key, success(1000, time.Second))
+		if b := bucket(t, s); b.Responses != 1 || b.InFlight != 0 {
+			t.Fatalf("bucket = %+v, want the known bucket still updated at the limit", b)
+		}
+	})
+
+	t.Run("refuses a new scaled object beyond the limit", func(t *testing.T) {
+		s, err := state.NewWithLimits(0.5, state.Limits{Buckets: 1, Consumers: 1})
+		if err != nil {
+			t.Fatal(err)
+		}
+		keep := func(state.Ceiling, bool) state.Ceiling { return state.Ceiling{Value: 1, Seen: now} }
+		first := state.Consumer{Namespace: "jobs", ScaledObject: "a", Bucket: key}
+		second := state.Consumer{Namespace: "jobs", ScaledObject: "b", Bucket: key}
+
+		if _, err := s.UpdateCeiling(first, keep); err != nil {
+			t.Fatal(err)
+		}
+		_, err = s.UpdateCeiling(second, keep)
+
+		if !errors.Is(err, state.ErrTooManyConsumers) {
+			t.Fatalf("err = %v, want ErrTooManyConsumers", err)
+		}
+		if _, err := s.UpdateCeiling(first, keep); err != nil {
+			t.Fatalf("known scaled object rejected at the limit: %v", err)
+		}
+		if stats := s.Stats(); stats.Consumers != 1 || stats.RejectedConsumers != 1 {
+			t.Fatalf("stats = %+v, want one scaled object and one rejection", stats)
+		}
+	})
+
+	t.Run("rejects non-positive limits", func(t *testing.T) {
+		if _, err := state.NewWithLimits(0.5, state.Limits{Buckets: 0, Consumers: 1}); err == nil {
+			t.Fatal("expected an error for a zero bucket limit")
+		}
 	})
 
 	t.Run("a success without usage counts as usage missing", func(t *testing.T) {
@@ -297,13 +403,13 @@ func TestStore(t *testing.T) {
 	t.Run("ceilings are updated atomically per consumer and dropped once nobody polls them", func(t *testing.T) {
 		s := store(t, 0.5)
 		consumer := state.Consumer{Namespace: "jobs", ScaledObject: "llm-workers", Bucket: key}
-		first := s.UpdateCeiling(consumer, func(previous state.Ceiling, known bool) state.Ceiling {
+		first := updateCeiling(t, s, consumer, func(previous state.Ceiling, known bool) state.Ceiling {
 			if known {
 				t.Fatal("a previous ceiling was reported before any update")
 			}
 			return state.Ceiling{Value: 4, ChangedAt: now, Seen: now}
 		})
-		second := s.UpdateCeiling(consumer, func(previous state.Ceiling, known bool) state.Ceiling {
+		second := updateCeiling(t, s, consumer, func(previous state.Ceiling, known bool) state.Ceiling {
 			if !known || previous.Value != 4 {
 				t.Fatalf("previous = %+v known = %v, want the first update", previous, known)
 			}

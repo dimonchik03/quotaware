@@ -39,6 +39,27 @@ def rate_limit_headers(headers):
     return picked
 
 
+class ObservedStream(httpx.SyncByteStream):
+    def __init__(self, inner, on_close):
+        self._inner = inner
+        self._on_close = on_close
+        self._complete = False
+        self._closed = False
+
+    def __iter__(self):
+        for chunk in self._inner:
+            yield chunk
+        self._complete = True
+
+    def close(self):
+        try:
+            self._inner.close()
+        finally:
+            if not self._closed:
+                self._closed = True
+                self._on_close(self._complete)
+
+
 class QuotawareHook:
     def __init__(self, quotaware, provider, token=None, queue_size=256, timeout=5.0):
         if provider not in PATHS:
@@ -65,41 +86,45 @@ class QuotawareHook:
 
     def on_response(self, response):
         try:
-            observation = self._observe(response)
+            self._observe(response)
         except Exception:
             self.errors += 1
-            return
-        if observation is None:
-            return
-        try:
-            self._queue.put_nowait(observation)
-        except queue.Full:
-            self.dropped += 1
 
     def _observe(self, response):
         request = response.request
         if request.method != "POST" or not request.url.path.endswith(PATHS[self.provider]):
-            return None
+            return
         body = json.loads(request.content or b"{}")
         model = body.get("model") if isinstance(body, dict) else None
         if not model:
-            return None
+            return
         started = request.extensions.get("quotaware_started")
-        streaming = response.headers.get("content-type", "").startswith("text/event-stream")
-        usage = None
-        if not streaming and 200 <= response.status_code < 300:
-            response.read()
-            usage = tokens(self.provider, response.json())
-        return {
+        observation = {
             "provider": self.provider,
             "model": model,
             "credential": credential_hash(request.headers),
             "status": response.status_code,
             "headers": rate_limit_headers(response.headers),
-            "usage": usage,
-            "latency_ms": (time.monotonic() - started) * 1000 if started else 0.0,
-            "complete": True,
+            "usage": None,
         }
+        if response.headers.get("content-type", "").startswith("text/event-stream"):
+            response.stream = ObservedStream(response.stream, lambda complete: self._enqueue(observation, started, complete))
+            return
+        if 200 <= response.status_code < 300:
+            response.read()
+            observation["usage"] = tokens(self.provider, response.json())
+        self._enqueue(observation, started, True)
+
+    def _enqueue(self, observation, started, complete):
+        observation = {
+            **observation,
+            "latency_ms": (time.monotonic() - started) * 1000 if started else 0.0,
+            "complete": complete,
+        }
+        try:
+            self._queue.put_nowait(observation)
+        except queue.Full:
+            self.dropped += 1
 
     def _deliver(self):
         headers = {"Authorization": f"Bearer {self.token}"} if self.token else {}

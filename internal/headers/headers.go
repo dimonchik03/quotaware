@@ -39,7 +39,18 @@ type Limits struct {
 	ProjectTokens Window
 	InputTokens   Window
 	OutputTokens  Window
-	RetryAfter    time.Duration
+	Malformed     []*MalformedError
+}
+
+func (l Limits) Usable() bool {
+	return l.Requests.Known() || l.Tokens.Known()
+}
+
+func (l *Limits) collect(w Window, malformed *MalformedError) Window {
+	if malformed != nil {
+		l.Malformed = append(l.Malformed, malformed)
+	}
+	return w
 }
 
 var (
@@ -69,9 +80,9 @@ func (e *MalformedError) Unwrap() error {
 func Parse(provider Provider, h http.Header, now time.Time) (Limits, error) {
 	switch provider {
 	case OpenAI:
-		return parseOpenAI(h, now)
+		return complete(parseOpenAI(h, now))
 	case Anthropic:
-		return parseAnthropic(h, now)
+		return complete(parseAnthropic(h, now))
 	default:
 		return Limits{}, fmt.Errorf("%w: %q", ErrUnknownProvider, provider)
 	}
@@ -92,21 +103,16 @@ func RetryAfter(h http.Header, now time.Time) (time.Duration, error) {
 	return max(at.Sub(now), 0), nil
 }
 
-func complete(limits Limits, h http.Header, now time.Time) (Limits, error) {
-	if !limits.Requests.Known() && !limits.Tokens.Known() {
+func complete(limits Limits) (Limits, error) {
+	if !limits.Usable() && len(limits.Malformed) == 0 {
 		return Limits{}, ErrMissing
 	}
-	retryAfter, err := RetryAfter(h, now)
-	if err != nil {
-		return Limits{}, err
-	}
-	limits.RetryAfter = retryAfter
 	return limits, nil
 }
 
 type resetParser func(value string, now time.Time) (time.Time, error)
 
-func window(h http.Header, limitName, remainingName, resetName string, now time.Time, parseReset resetParser) (Window, error) {
+func window(h http.Header, limitName, remainingName, resetName string, now time.Time, parseReset resetParser) (Window, *MalformedError) {
 	limit, limitPresent, err := integerHeader(h, limitName)
 	if err != nil {
 		return Window{}, err
@@ -128,14 +134,15 @@ func window(h http.Header, limitName, remainingName, resetName string, now time.
 	if value == "" {
 		return parsed, nil
 	}
-	parsed.ResetAt, err = parseReset(value, now)
-	if err != nil {
-		return Window{}, &MalformedError{Header: resetName, Value: value, Err: err}
+	resetAt, resetErr := parseReset(value, now)
+	if resetErr != nil {
+		return parsed, &MalformedError{Header: resetName, Value: value, Err: resetErr}
 	}
+	parsed.ResetAt = resetAt
 	return parsed, nil
 }
 
-func integerHeader(h http.Header, name string) (int64, bool, error) {
+func integerHeader(h http.Header, name string) (int64, bool, *MalformedError) {
 	value := strings.TrimSpace(h.Get(name))
 	if value == "" {
 		return 0, false, nil

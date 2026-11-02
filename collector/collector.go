@@ -241,7 +241,8 @@ func (r roundTripper) RoundTrip(request *http.Request) (*http.Response, error) {
 	contentType := response.Header.Get("Content-Type")
 	encoding := response.Header.Get("Content-Encoding")
 	succeeded := response.StatusCode >= 200 && response.StatusCode < 300
-	response.Body = usage.NewCapture(response.Body, c.cfg.MaxCaptureBytes, func(captured []byte, complete bool) {
+	response.Body = usage.NewCapture(response.Body, c.cfg.MaxCaptureBytes, func(captured []byte, outcome usage.Outcome) {
+		complete := outcome == usage.Completed
 		observation.LatencyMS = float64(time.Since(started)) / float64(time.Millisecond)
 		observation.Complete = complete
 		if complete && succeeded {

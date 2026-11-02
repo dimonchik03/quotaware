@@ -11,25 +11,35 @@ import (
 
 type Report struct {
 	Baseline Run
-	Capped   Run
+	Capped   []Run
 	Phases   []Band
 	Rows     []Row
 }
 
 type Row struct {
-	Metric   string
-	Baseline string
-	Capped   string
+	Metric string
+	Values []string
 }
 
-func Build(baseline, capped Run, concurrency int) Report {
+var palette = []string{"#c0392b", "#2471a3", "#1e8449", "#7d3c98", "#b9770e"}
+
+func Build(baseline Run, capped []Run, concurrency int) Report {
 	report := Report{Baseline: baseline, Capped: capped, Phases: phases(baseline)}
+	runs := report.runs()
 	measure := func(metric string, f func(Run) string) {
-		report.Rows = append(report.Rows, Row{Metric: metric, Baseline: f(baseline), Capped: f(capped)})
+		row := Row{Metric: metric}
+		for _, run := range runs {
+			row.Values = append(row.Values, f(run))
+		}
+		report.Rows = append(report.Rows, row)
 	}
 	measure("Jobs produced", func(r Run) string { return count(r.Totals["jobs_total"]) })
 	measure("Jobs completed", func(r Run) string { return count(r.Totals["completed_total"]) })
 	measure("Jobs failed", func(r Run) string { return count(r.Totals["failed_total"]) })
+	measure("Jobs abandoned on shutdown", func(r Run) string { return count(r.Totals["abandoned_total"]) })
+	measure("Jobs unaccounted for", func(r Run) string {
+		return count(r.Totals["jobs_total"] - r.Totals["completed_total"] - r.Totals["failed_total"] - r.Totals["abandoned_total"])
+	})
 	measure("429 responses", func(r Run) string { return count(r.Totals["rate_limited_total"]) })
 	measure("Retries", func(r Run) string { return count(r.Totals["retries_total"]) })
 	measure("Peak 429 per minute", func(r Run) string { return fmt.Sprintf("%.0f", r.Series["rate_limited_per_minute"].Max()) })
@@ -41,8 +51,11 @@ func Build(baseline, capped Run, concurrency int) Report {
 		return fmt.Sprintf("%.0f", r.Totals["backoff_seconds_total"]/float64(max(concurrency, 1)))
 	})
 	measure("Time to drain the burst", func(r Run) string { return drainTime(r, phases(r)) })
-	measure("Time to react after the first 429", func(r Run) string { return reactionTime(r) })
 	return report
+}
+
+func (r Report) runs() []Run {
+	return append([]Run{r.Baseline}, r.Capped...)
 }
 
 func phases(run Run) []Band {
@@ -90,21 +103,6 @@ func drainTime(run Run, bands []Band) string {
 	return duration(drained.Sub(burstEnd))
 }
 
-func reactionTime(run Run) string {
-	if len(run.Series["ceiling"]) == 0 {
-		return "n/a (no ceiling)"
-	}
-	first, ok := run.Series["rate_limited_per_minute"].FirstAbove(0, run.Start)
-	if !ok {
-		return "no 429 observed"
-	}
-	drop, ok := run.Series["replicas"].FirstDropAfter(first)
-	if !ok {
-		return "never scaled down"
-	}
-	return duration(drop.Sub(first))
-}
-
 func count(v float64) string {
 	return fmt.Sprintf("%.0f", v)
 }
@@ -122,10 +120,21 @@ func duration(d time.Duration) string {
 
 func (r Report) Markdown() string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "| Metric | %s (queue trigger) | %s (queue trigger + quotaware) |\n", r.Baseline.Name, r.Capped.Name)
-	b.WriteString("|---|---|---|\n")
+	b.WriteString("| Metric |")
+	for _, run := range r.runs() {
+		fmt.Fprintf(&b, " %s |", run.Title())
+	}
+	b.WriteString("\n|---|")
+	for range r.runs() {
+		b.WriteString("---|")
+	}
+	b.WriteString("\n")
 	for _, row := range r.Rows {
-		fmt.Fprintf(&b, "| %s | %s | %s |\n", row.Metric, row.Baseline, row.Capped)
+		fmt.Fprintf(&b, "| %s |", row.Metric)
+		for _, value := range row.Values {
+			fmt.Fprintf(&b, " %s |", value)
+		}
+		b.WriteString("\n")
 	}
 	return b.String()
 }
@@ -143,19 +152,19 @@ func (r Report) Charts() map[string]string {
 	for i, band := range r.Phases {
 		bands[i] = Band{Label: band.Label, From: origin.Add(band.From.Sub(r.Baseline.Start)), To: origin.Add(band.To.Sub(r.Baseline.Start))}
 	}
-	replicas := Chart{Title: "Worker replicas", YLabel: "pods", Origin: origin, Bands: bands, Lines: []Line{
-		{Label: r.Baseline.Name + " replicas", Color: "#c0392b", Series: shifted(r.Baseline.Series["replicas"], r.Baseline.Start)},
-		{Label: r.Capped.Name + " replicas", Color: "#2471a3", Series: shifted(r.Capped.Series["replicas"], r.Capped.Start)},
-		{Label: r.Capped.Name + " ceiling", Color: "#2471a3", Dashed: true, Series: shifted(r.Capped.Series["ceiling"], r.Capped.Start)},
-	}}
-	limits := Chart{Title: "429 responses per minute", YLabel: "429 / min", Origin: origin, Bands: bands, Lines: []Line{
-		{Label: r.Baseline.Name, Color: "#c0392b", Series: shifted(r.Baseline.Series["rate_limited_per_minute"], r.Baseline.Start)},
-		{Label: r.Capped.Name, Color: "#2471a3", Series: shifted(r.Capped.Series["rate_limited_per_minute"], r.Capped.Start)},
-	}}
-	queue := Chart{Title: "Queue length", YLabel: "jobs", Origin: origin, Bands: bands, Lines: []Line{
-		{Label: r.Baseline.Name, Color: "#c0392b", Series: shifted(r.Baseline.Series["queue_length"], r.Baseline.Start)},
-		{Label: r.Capped.Name, Color: "#2471a3", Series: shifted(r.Capped.Series["queue_length"], r.Capped.Start)},
-	}}
+	var replicaLines, limitLines, queueLines []Line
+	for i, run := range r.runs() {
+		color := palette[i%len(palette)]
+		replicaLines = append(replicaLines, Line{Label: run.Name + " replicas", Color: color, Series: shifted(run.Series["replicas"], run.Start)})
+		if i > 0 {
+			replicaLines = append(replicaLines, Line{Label: run.Name + " ceiling", Color: color, Dashed: true, Series: shifted(run.Series["ceiling"], run.Start)})
+		}
+		limitLines = append(limitLines, Line{Label: run.Name, Color: color, Series: shifted(run.Series["rate_limited_per_minute"], run.Start)})
+		queueLines = append(queueLines, Line{Label: run.Name, Color: color, Series: shifted(run.Series["queue_length"], run.Start)})
+	}
+	replicas := Chart{Title: "Worker replicas", YLabel: "pods", Origin: origin, Bands: bands, Lines: replicaLines}
+	limits := Chart{Title: "429 responses per minute", YLabel: "429 / min", Origin: origin, Bands: bands, Lines: limitLines}
+	queue := Chart{Title: "Queue length", YLabel: "jobs", Origin: origin, Bands: bands, Lines: queueLines}
 	return map[string]string{"replicas.svg": replicas.SVG(), "rate_limits.svg": limits.SVG(), "queue.svg": queue.SVG()}
 }
 
