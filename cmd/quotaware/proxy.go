@@ -52,6 +52,7 @@ func parseObserverFlags(command string, args []string, stderr io.Writer, withSca
 	flags.StringVar(&options.observeToken, "observe-token", os.Getenv("QUOTAWARE_OBSERVE_TOKEN"), "bearer token collectors must present on /v1/observe (empty accepts anyone)")
 	flags.Int64Var(&options.proxy.MaxRequestBytes, "max-request-bytes", options.proxy.MaxRequestBytes, "largest request body accepted")
 	flags.Int64Var(&options.proxy.MaxCaptureBytes, "max-capture-bytes", options.proxy.MaxCaptureBytes, "largest response body inspected for usage")
+	flags.DurationVar(&options.proxy.ReadBodyTimeout, "read-body-timeout", options.proxy.ReadBodyTimeout, "how long a client may take to send a request body")
 	if withScaler {
 		flags.StringVar(&options.grpc, "grpc", ":9090", "address the KEDA external scaler listens on")
 		flags.DurationVar(&options.pushInterval, "push-interval", options.pushInterval, "how often StreamIsActive re-evaluates a queue trigger")
@@ -164,6 +165,10 @@ func runObserver(command string, args []string, stderr io.Writer, withScaler boo
 	return 0
 }
 
+func newServer(address string, handler http.Handler) *http.Server {
+	return &http.Server{Addr: address, Handler: handler, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 2 * time.Minute}
+}
+
 func evictIdleBuckets(ctx context.Context, store *state.Store) {
 	ticker := time.NewTicker(evictEvery)
 	defer ticker.Stop()
@@ -181,7 +186,7 @@ func serve(ctx context.Context, handlers map[string]http.Handler, rpc *grpc.Serv
 	servers := make([]*http.Server, 0, len(handlers))
 	failures := make(chan error, len(handlers)+1)
 	for address, handler := range handlers {
-		server := &http.Server{Addr: address, Handler: handler, ReadHeaderTimeout: 10 * time.Second}
+		server := newServer(address, handler)
 		servers = append(servers, server)
 		go func() {
 			if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {

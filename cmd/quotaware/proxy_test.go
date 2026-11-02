@@ -2,9 +2,22 @@ package main
 
 import (
 	"bytes"
+	"net/http"
 	"strings"
 	"testing"
+	"time"
 )
+
+func TestNewServerBoundsHeaderReadsAndIdleConnections(t *testing.T) {
+	server := newServer(":0", http.NotFoundHandler())
+
+	if server.ReadHeaderTimeout != 10*time.Second || server.IdleTimeout != 2*time.Minute {
+		t.Fatalf("timeouts = header %v idle %v, want 10s and 2m", server.ReadHeaderTimeout, server.IdleTimeout)
+	}
+	if server.WriteTimeout != 0 {
+		t.Fatalf("write timeout = %v, want none so streams are never cut", server.WriteTimeout)
+	}
+}
 
 func TestObserverFlags(t *testing.T) {
 	t.Run("accepts origins and fills the defaults", func(t *testing.T) {
@@ -18,6 +31,17 @@ func TestObserverFlags(t *testing.T) {
 		}
 		if options.listen != ":8080" || options.admin != ":9100" || options.alpha != 0.2 {
 			t.Fatalf("options = %+v, want the documented defaults", options)
+		}
+	})
+
+	t.Run("reads the body timeout flag", func(t *testing.T) {
+		options, err := parseObserverFlags("proxy", []string{"-read-body-timeout", "5s"}, &bytes.Buffer{}, false)
+
+		if err != nil {
+			t.Fatal(err)
+		}
+		if options.proxy.ReadBodyTimeout != 5*time.Second {
+			t.Fatalf("read body timeout = %v, want 5s", options.proxy.ReadBodyTimeout)
 		}
 	})
 
