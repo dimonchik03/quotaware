@@ -231,6 +231,31 @@ func TestStore(t *testing.T) {
 		}
 	})
 
+	t.Run("a body that failed on the upstream side counts as an upstream error, not an abort", func(t *testing.T) {
+		s := store(t, 0.5)
+		broken := success(1000, time.Second)
+		broken.Complete, broken.Failed = false, true
+
+		s.End(key, broken)
+
+		b := bucket(t, s)
+		if b.UpstreamErrors != 1 || b.Aborted != 0 || b.Latency != 0 {
+			t.Fatalf("bucket = %+v, want one upstream error and no abort or latency", b)
+		}
+	})
+
+	t.Run("an abort before any response releases the slot and counts", func(t *testing.T) {
+		s := store(t, 0.5)
+		s.Begin(key, now)
+
+		s.Abort(key, now)
+
+		b := bucket(t, s)
+		if b.InFlight != 0 || b.Aborted != 1 || b.Responses != 0 || b.UpstreamErrors != 0 {
+			t.Fatalf("bucket = %+v, want the slot released, one abort and no response", b)
+		}
+	})
+
 	t.Run("a success without usage counts as usage missing", func(t *testing.T) {
 		s := store(t, 0.5)
 		noUsage := success(0, time.Second)

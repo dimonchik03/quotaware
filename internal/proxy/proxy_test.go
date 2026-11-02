@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -40,11 +41,28 @@ func (c *clock) Advance(d time.Duration) {
 	c.now = c.now.Add(d)
 }
 
+type syncBuffer struct {
+	mu sync.Mutex
+	b  strings.Builder
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
+}
+
 type harness struct {
 	front *httptest.Server
 	store *state.Store
 	clock *clock
-	logs  *strings.Builder
+	logs  *syncBuffer
 }
 
 func newHarness(t *testing.T) *harness {
@@ -68,6 +86,15 @@ func newHarnessWithHandler(t *testing.T, c *clock, upstream http.Handler, captur
 
 func newHarnessWithUpstream(t *testing.T, c *clock, upstream string, captureLimit int64) *harness {
 	t.Helper()
+	return newHarnessWithOptions(t, c, upstream, func(cfg *proxy.Config) {
+		if captureLimit > 0 {
+			cfg.MaxCaptureBytes = captureLimit
+		}
+	})
+}
+
+func newHarnessWithOptions(t *testing.T, c *clock, upstream string, configure func(*proxy.Config)) *harness {
+	t.Helper()
 	target, err := url.Parse(upstream)
 	if err != nil {
 		t.Fatal(err)
@@ -76,14 +103,12 @@ func newHarnessWithUpstream(t *testing.T, c *clock, upstream string, captureLimi
 	if err != nil {
 		t.Fatal(err)
 	}
-	logs := &strings.Builder{}
+	logs := &syncBuffer{}
 	cfg := proxy.DefaultConfig()
 	cfg.OpenAI, cfg.Anthropic = target, target
 	cfg.MaxRequestBytes = 1024
 	cfg.Logger = slog.New(slog.NewTextHandler(logs, nil))
-	if captureLimit > 0 {
-		cfg.MaxCaptureBytes = captureLimit
-	}
+	configure(&cfg)
 	p, err := proxy.New(cfg, store, c.Now)
 	if err != nil {
 		t.Fatal(err)
@@ -147,6 +172,18 @@ func (h *harness) waitForIdle(t *testing.T, provider, model string) state.Bucket
 	}
 	t.Fatalf("bucket %s/%s never went idle: %+v", provider, model, h.bucket(t, provider, model))
 	return state.Bucket{}
+}
+
+func (h *harness) waitForLog(t *testing.T, text string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if strings.Contains(h.logs.String(), text) {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("logs = %q, want %q", h.logs.String(), text)
 }
 
 func rateLimitHeaders(h http.Header) {
@@ -435,6 +472,131 @@ func TestProxy(t *testing.T) {
 		}
 	})
 
+	t.Run("lets the transport replay the request body", func(t *testing.T) {
+		var replayed string
+		h := newHarnessWithOptions(t, &clock{now: start}, "http://upstream.invalid", func(cfg *proxy.Config) {
+			cfg.Transport = roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+				if r.GetBody == nil {
+					return nil, fmt.Errorf("request has no replayable body")
+				}
+				body, err := r.GetBody()
+				if err != nil {
+					return nil, err
+				}
+				raw, err := io.ReadAll(body)
+				if err != nil {
+					return nil, err
+				}
+				replayed = string(raw)
+				header := http.Header{"Content-Type": []string{"application/json"}}
+				rateLimitHeaders(header)
+				return &http.Response{StatusCode: http.StatusOK, Header: header, Body: io.NopCloser(strings.NewReader(`{"usage":{"prompt_tokens":1,"completion_tokens":1}}`)), Request: r}, nil
+			})
+		})
+
+		response, _ := h.post(t, "/v1/chat/completions", "sk-test", chat)
+
+		if response.StatusCode != http.StatusOK || replayed != chat {
+			t.Fatalf("status = %d replayed = %q, want 200 and the original body", response.StatusCode, replayed)
+		}
+	})
+
+	t.Run("answers 408 when the client stalls while sending the body", func(t *testing.T) {
+		h := newHarnessWithOptions(t, &clock{now: start}, "http://upstream.invalid", func(cfg *proxy.Config) {
+			cfg.ReadBodyTimeout = 200 * time.Millisecond
+		})
+		conn, err := net.Dial("tcp", strings.TrimPrefix(h.front.URL, "http://"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = conn.Close() }()
+
+		fmt.Fprint(conn, "POST /v1/chat/completions HTTP/1.1\r\nHost: quotaware\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n{\"model\":")
+		status, err := bufio.NewReader(conn).ReadString('\n')
+
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.HasPrefix(status, "HTTP/1.1 408") {
+			t.Fatalf("status line = %q, want 408", status)
+		}
+		if buckets := h.store.Buckets(h.clock.Now()); len(buckets) != 0 {
+			t.Fatalf("buckets = %d, want none for a request that never arrived", len(buckets))
+		}
+	})
+
+	t.Run("counts a client that gives up before the upstream answers as an abort, not an upstream error", func(t *testing.T) {
+		release := make(chan struct{})
+		h := newHarnessWithHandler(t, &clock{now: start}, http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+			_, _ = io.ReadAll(r.Body)
+			select {
+			case <-r.Context().Done():
+			case <-release:
+			}
+		}), 0)
+		t.Cleanup(func() { close(release) })
+		ctx, cancel := context.WithCancel(context.Background())
+		request, err := http.NewRequestWithContext(ctx, http.MethodPost, h.front.URL+"/v1/chat/completions", strings.NewReader(chat))
+		if err != nil {
+			t.Fatal(err)
+		}
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("Authorization", "Bearer sk-test")
+		go func() {
+			time.Sleep(50 * time.Millisecond)
+			cancel()
+		}()
+
+		if _, err := http.DefaultClient.Do(request); err == nil {
+			t.Fatal("expected the cancelled request to fail")
+		}
+
+		b := h.waitForIdle(t, "openai", "gpt-4.1-mini")
+		if b.Aborted != 1 || b.UpstreamErrors != 0 || b.Responses != 0 {
+			t.Fatalf("bucket = %+v, want one abort and no upstream error", b)
+		}
+		h.waitForLog(t, "client gave up before the upstream answered")
+		if strings.Contains(h.logs.String(), "upstream request failed") {
+			t.Fatalf("logs = %q, want no upstream failure for a client that left", h.logs.String())
+		}
+	})
+
+	t.Run("counts an upstream that breaks mid-body as an upstream error, not an abort", func(t *testing.T) {
+		h := newHarnessWithHandler(t, &clock{now: start}, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			rateLimitHeaders(w.Header())
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Content-Length", "100")
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprint(w, `{"usage":`)
+			w.(http.Flusher).Flush()
+			conn, _, err := w.(http.Hijacker).Hijack()
+			if err != nil {
+				return
+			}
+			_ = conn.Close()
+		}), 0)
+
+		request, err := http.NewRequest(http.MethodPost, h.front.URL+"/v1/chat/completions", strings.NewReader(chat))
+		if err != nil {
+			t.Fatal(err)
+		}
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("Authorization", "Bearer sk-test")
+		response, err := http.DefaultClient.Do(request)
+		if err == nil {
+			_, err = io.ReadAll(response.Body)
+			_ = response.Body.Close()
+		}
+
+		if err == nil {
+			t.Fatal("expected the truncated response to fail")
+		}
+		b := h.waitForIdle(t, "openai", "gpt-4.1-mini")
+		if b.UpstreamErrors != 1 || b.Aborted != 0 || b.Responses != 1 {
+			t.Fatalf("bucket = %+v, want one upstream error on a recorded response and no abort", b)
+		}
+	})
+
 	t.Run("answers 502, releases the slot and logs when the upstream is unreachable", func(t *testing.T) {
 		closed := httptest.NewServer(http.NotFoundHandler())
 		closed.Close()
@@ -461,3 +623,7 @@ func TestProxy(t *testing.T) {
 		}
 	})
 }
+
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }

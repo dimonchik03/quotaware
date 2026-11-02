@@ -56,6 +56,7 @@ func keep(current, update headroom.Quota) headroom.Quota {
 type Sample struct {
 	Status     int
 	Complete   bool
+	Failed     bool
 	Headers    HeadersStatus
 	Quotas     Quotas
 	HasUsage   bool
@@ -241,6 +242,15 @@ func (s *Store) Fail(key Key, now time.Time) {
 	b.LastSeen = latest(b.LastSeen, now)
 }
 
+func (s *Store) Abort(key Key, now time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	b := s.bucket(key)
+	b.InFlight = max(b.InFlight-1, 0)
+	b.Aborted++
+	b.LastSeen = latest(b.LastSeen, now)
+}
+
 func (s *Store) End(key Key, sample Sample) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -267,6 +277,10 @@ func (s *Store) End(key Key, sample Sample) {
 			b.Quotas = b.Quotas.merge(sample.Quotas)
 			b.ObservedAt = sample.At
 		}
+	}
+	if sample.Failed {
+		b.UpstreamErrors++
+		return
 	}
 	if !sample.Complete {
 		b.Aborted++
