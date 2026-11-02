@@ -15,31 +15,37 @@ every response; nothing wires them to the autoscaler.
 
 ## What it changes
 
-Same queue, same fake provider limited to 600 requests per minute, same seed. Run A
-scales on queue depth alone; run B caps the same trigger with the quotaware ceiling.
+Same queue, same fake provider limited to 600 requests per minute, same job
+schedule. Run A scales on queue depth alone; runs B and C cap the same trigger with
+the quotaware ceiling, at the default safety factor 0.85 and at 1.
 
-![worker replicas](bench/results/2026-11-01/replicas.svg)
+![worker replicas](bench/results/2026-11-02/replicas.svg)
 
-![429 responses per minute](bench/results/2026-11-01/rate_limits.svg)
+![429 responses per minute](bench/results/2026-11-02/rate_limits.svg)
 
-| Metric | A (queue trigger) | B (queue trigger + quotaware) |
-|---|---|---|
-| Jobs produced | 9900 | 9900 |
-| Jobs completed | 9848 | 9875 |
-| Jobs failed | 0 | 0 |
-| 429 responses | 1140 | 0 |
-| Retries | 1140 | 0 |
-| Peak 429 per minute | 111 | 0 |
-| Job latency p50 | 157.9 s | 263.4 s |
-| Job latency p95 | 454.8 s | 689.3 s |
-| Peak replicas | 30 | 8 |
-| Pod-seconds | 23700 | 9945 |
-| Idle pod-seconds (in backoff) | 13681 | 0 |
-| Time to drain the burst | 465 s | 720 s |
-| Time to react after the first 429 | n/a (no ceiling) | no 429 observed |
+| Metric | A (queue trigger) | B (queue trigger + quotaware, safety 0.85) | C (queue trigger + quotaware, safety 1) |
+|---|---|---|---|
+| Jobs produced | 9900 | 9900 | 9900 |
+| Jobs completed | 9900 | 9900 | 9900 |
+| Jobs failed | 0 | 0 | 0 |
+| Jobs abandoned on shutdown | 0 | 0 | 0 |
+| Jobs unaccounted for | 0 | 0 | 0 |
+| 429 responses | 720 | 0 | 15 |
+| Retries | 720 | 0 | 15 |
+| Peak 429 per minute | 76 | 0 | 2 |
+| Job latency p50 | 128.1 s | 263.6 s | 164.8 s |
+| Job latency p95 | 457.7 s | 689.5 s | 463.1 s |
+| Peak replicas | 30 | 8 | 10 |
+| Pod-seconds | 23580 | 10050 | 10125 |
+| Idle pod-seconds (in backoff) | 13300 | 0 | 8 |
+| Time to drain the burst | 450 s | 720 s | 495 s |
 
-`make bench` reproduces both runs on a laptop; `docs/benchmark.md` describes the
-setup, the hypothesis written before the first run and how each number is measured.
+Read it as a trade-off set by `safety`. At 0.85 quotaware ends every 429 and cuts
+the pod-seconds by more than half, but leaves 20 % of the quota unused, so under
+sustained overload jobs wait 50 % longer. At 1 it matches the baseline's latency
+within 2 % with 43 % of the pod-seconds and 2 % of the 429s. `make bench` reproduces
+all three runs on a laptop; `docs/benchmark.md` has the setup, the hypothesis
+written before the first run, the result against it and how each number is measured.
 
 ## How it works
 
@@ -268,10 +274,11 @@ Not a gateway, not a rate limiter, not a cost dashboard. See `docs/SPEC.md`.
 ## Status
 
 v0.1.0 is released: binaries for Linux and macOS on the releases page, the image on
-`ghcr.io`, everything in `docs/SPEC.md` implemented and benchmarked. See
+`ghcr.io`, everything in `docs/SPEC.md` implemented and benchmarked. `main` adds the
+network defaults of ADR 0008, the store limits, a worker that never retries before
+`retry-after` and the three-run benchmark above, for the next release. See
 `docs/design.md` for how the pieces fit and `docs/release.md` for how a release is
-cut. Specification in `docs/SPEC.md`,
-decisions in `docs/adr`.
+cut. Specification in `docs/SPEC.md`, decisions in `docs/adr`.
 
 ## License
 
