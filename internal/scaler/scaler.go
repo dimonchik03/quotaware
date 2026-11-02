@@ -276,7 +276,10 @@ func (s *Service) GetMetrics(ctx context.Context, request *externalscaler.GetMet
 	if err != nil {
 		return nil, err
 	}
-	value := s.ceiling(ref, t)
+	value, err := s.ceiling(ref, t)
+	if err != nil {
+		return nil, err
+	}
 	if t.queue != nil {
 		demand, err := s.demand(ctx, t.queue)
 		if err != nil {
@@ -378,7 +381,7 @@ func (s *Service) queueDepth(ctx context.Context, q *queueTrigger) (int64, error
 	return depth, nil
 }
 
-func (s *Service) ceiling(ref *externalscaler.ScaledObjectRef, t trigger) int {
+func (s *Service) ceiling(ref *externalscaler.ScaledObjectRef, t trigger) (int, error) {
 	now := s.now()
 	total := 0
 	matched := 0
@@ -388,13 +391,17 @@ func (s *Service) ceiling(ref *externalscaler.ScaledObjectRef, t trigger) int {
 		}
 		matched++
 		consumer := state.Consumer{Namespace: ref.GetNamespace(), ScaledObject: ref.GetName(), Bucket: b.Key}
-		total += s.evaluate(consumer, t, b.Observation(), b.Recent, now)
+		value, err := s.evaluate(consumer, t, b.Observation(), b.Recent, now)
+		if err != nil {
+			return 0, err
+		}
+		total += value
 	}
 	if matched == 0 {
 		consumer := state.Consumer{Namespace: ref.GetNamespace(), ScaledObject: ref.GetName(), Bucket: state.Key{Provider: t.provider, Model: t.model, Key: t.credential}}
 		return s.evaluate(consumer, t, headroom.Observation{}, state.Recent{}, now)
 	}
-	return min(total, t.cfg.MaxReplicas)
+	return min(total, t.cfg.MaxReplicas), nil
 }
 
 type decision struct {
@@ -407,10 +414,10 @@ type decision struct {
 	podRate     float64
 }
 
-func (s *Service) evaluate(consumer state.Consumer, t trigger, obs headroom.Observation, recent state.Recent, now time.Time) int {
+func (s *Service) evaluate(consumer state.Consumer, t trigger, obs headroom.Observation, recent state.Recent, now time.Time) (int, error) {
 	var change *decision
 	var from int
-	ceiling := s.store.UpdateCeiling(consumer, func(previous state.Ceiling, known bool) state.Ceiling {
+	ceiling, err := s.store.UpdateCeiling(consumer, func(previous state.Ceiling, known bool) state.Ceiling {
 		d := decide(t, obs, recent, previous, known, now)
 		next := state.Ceiling{Value: d.value, Bound: d.bound, Mode: d.mode, ChangedAt: previous.ChangedAt, Seen: now, HoldUntil: d.holdUntil}
 		if !known || d.value != previous.Value {
@@ -419,6 +426,12 @@ func (s *Service) evaluate(consumer state.Consumer, t trigger, obs headroom.Obse
 		}
 		return next
 	})
+	switch {
+	case errors.Is(err, state.ErrTooManyConsumers):
+		return 0, status.Error(codes.ResourceExhausted, err.Error())
+	case err != nil:
+		return 0, status.Error(codes.Internal, err.Error())
+	}
 	if change != nil {
 		s.logger.Info("ceiling changed",
 			"namespace", consumer.Namespace, "scaledobject", consumer.ScaledObject,
@@ -426,7 +439,7 @@ func (s *Service) evaluate(consumer state.Consumer, t trigger, obs headroom.Obse
 			"from", from, "to", change.value, "mode", string(change.mode), "reason", change.reason,
 			"allowed_rate", change.allowedRate, "pod_rate", change.podRate)
 	}
-	return ceiling.Value
+	return ceiling.Value, nil
 }
 
 func decide(t trigger, obs headroom.Observation, recent state.Recent, previous state.Ceiling, known bool, now time.Time) decision {

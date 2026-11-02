@@ -79,7 +79,12 @@ func (c *clock) Advance(d time.Duration) {
 
 func newFixture(t *testing.T) *fixture {
 	t.Helper()
-	store, err := state.New(0.5)
+	return newFixtureWithLimits(t, state.DefaultLimits())
+}
+
+func newFixtureWithLimits(t *testing.T, limits state.Limits) *fixture {
+	t.Helper()
+	store, err := state.NewWithLimits(0.5, limits)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -376,6 +381,22 @@ func TestGetMetrics(t *testing.T) {
 
 		if got := metric(t, f, metadata); got != 3 {
 			t.Fatalf("metric = %d, want one replica per queued item", got)
+		}
+	})
+
+	t.Run("answers ResourceExhausted once too many scaled objects track a ceiling", func(t *testing.T) {
+		f := newFixtureWithLimits(t, state.Limits{Buckets: state.DefaultMaxBuckets, Consumers: 1})
+		f.observe(bucketA, 900, 500000)
+		if _, err := f.service.GetMetrics(context.Background(), &externalscaler.GetMetricsRequest{ScaledObjectRef: ref(capMetadata())}); err != nil {
+			t.Fatal(err)
+		}
+		other := ref(capMetadata())
+		other.Name = "another-workers"
+
+		_, err := f.service.GetMetrics(context.Background(), &externalscaler.GetMetricsRequest{ScaledObjectRef: other})
+
+		if code(err) != codes.ResourceExhausted {
+			t.Fatalf("code = %v, want ResourceExhausted", code(err))
 		}
 	})
 

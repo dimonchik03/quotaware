@@ -169,29 +169,73 @@ type Ceiling struct {
 	HoldUntil time.Time
 }
 
+const (
+	DefaultMaxBuckets   = 10000
+	DefaultMaxConsumers = 1000
+)
+
+var ErrTooManyConsumers = errors.New("too many scaled objects track a ceiling")
+
+type Limits struct {
+	Buckets   int
+	Consumers int
+}
+
+func DefaultLimits() Limits {
+	return Limits{Buckets: DefaultMaxBuckets, Consumers: DefaultMaxConsumers}
+}
+
+type Stats struct {
+	Buckets           int
+	Consumers         int
+	RejectedBuckets   int64
+	RejectedConsumers int64
+}
+
 type Store struct {
 	alpha    float64
+	limits   Limits
 	mu       sync.Mutex
 	buckets  map[Key]*Bucket
 	windows  map[Key]*window
 	ceilings map[Consumer]Ceiling
+	stats    Stats
 }
 
 func New(alpha float64) (*Store, error) {
-	if alpha <= 0 || alpha > 1 {
-		return nil, errors.New("alpha must be within (0, 1]")
-	}
-	return &Store{alpha: alpha, buckets: map[Key]*Bucket{}, windows: map[Key]*window{}, ceilings: map[Consumer]Ceiling{}}, nil
+	return NewWithLimits(alpha, DefaultLimits())
 }
 
-func (s *Store) UpdateCeiling(consumer Consumer, update func(previous Ceiling, known bool) Ceiling) Ceiling {
+func NewWithLimits(alpha float64, limits Limits) (*Store, error) {
+	switch {
+	case alpha <= 0 || alpha > 1:
+		return nil, errors.New("alpha must be within (0, 1]")
+	case limits.Buckets <= 0 || limits.Consumers <= 0:
+		return nil, errors.New("bucket and scaled object limits must be positive")
+	}
+	return &Store{alpha: alpha, limits: limits, buckets: map[Key]*Bucket{}, windows: map[Key]*window{}, ceilings: map[Consumer]Ceiling{}}, nil
+}
+
+func (s *Store) Stats() Stats {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	stats := s.stats
+	stats.Buckets, stats.Consumers = len(s.buckets), len(s.ceilings)
+	return stats
+}
+
+func (s *Store) UpdateCeiling(consumer Consumer, update func(previous Ceiling, known bool) Ceiling) (Ceiling, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	previous, known := s.ceilings[consumer]
+	if !known && len(s.ceilings) >= s.limits.Consumers {
+		s.stats.RejectedConsumers++
+		return Ceiling{}, ErrTooManyConsumers
+	}
 	next := update(previous, known)
 	next.Consumer = consumer
 	s.ceilings[consumer] = next
-	return next
+	return next, nil
 }
 
 func (s *Store) Ceiling(consumer Consumer) (Ceiling, bool) {
@@ -228,7 +272,10 @@ func (c Consumer) less(other Consumer) bool {
 func (s *Store) Begin(key Key, now time.Time) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	b := s.bucket(key)
+	b, ok := s.bucket(key)
+	if !ok {
+		return
+	}
 	b.InFlight++
 	b.LastSeen = latest(b.LastSeen, now)
 }
@@ -236,7 +283,10 @@ func (s *Store) Begin(key Key, now time.Time) {
 func (s *Store) Fail(key Key, now time.Time) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	b := s.bucket(key)
+	b, ok := s.bucket(key)
+	if !ok {
+		return
+	}
 	b.InFlight = max(b.InFlight-1, 0)
 	b.UpstreamErrors++
 	b.LastSeen = latest(b.LastSeen, now)
@@ -245,7 +295,10 @@ func (s *Store) Fail(key Key, now time.Time) {
 func (s *Store) Abort(key Key, now time.Time) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	b := s.bucket(key)
+	b, ok := s.bucket(key)
+	if !ok {
+		return
+	}
 	b.InFlight = max(b.InFlight-1, 0)
 	b.Aborted++
 	b.LastSeen = latest(b.LastSeen, now)
@@ -254,7 +307,10 @@ func (s *Store) Abort(key Key, now time.Time) {
 func (s *Store) End(key Key, sample Sample) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	b := s.bucket(key)
+	b, ok := s.bucket(key)
+	if !ok {
+		return
+	}
 	b.InFlight = max(b.InFlight-1, 0)
 	b.LastSeen = latest(b.LastSeen, sample.At)
 	b.Responses++
@@ -367,13 +423,18 @@ func (s *Store) window(key Key) *window {
 	return w
 }
 
-func (s *Store) bucket(key Key) *Bucket {
+func (s *Store) bucket(key Key) (*Bucket, bool) {
 	b, ok := s.buckets[key]
-	if !ok {
-		b = &Bucket{Key: key}
-		s.buckets[key] = b
+	if ok {
+		return b, true
 	}
-	return b
+	if len(s.buckets) >= s.limits.Buckets {
+		s.stats.RejectedBuckets++
+		return nil, false
+	}
+	b = &Bucket{Key: key}
+	s.buckets[key] = b
+	return b, true
 }
 
 func (s *Store) smooth(previous, sample float64) float64 {
