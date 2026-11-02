@@ -1,0 +1,38 @@
+{
+  "title": "quotaware",
+  "uid": "quotaware",
+  "schemaVersion": 39,
+  "editable": true,
+  "refresh": "15s",
+  "time": {"from": "now-30m", "to": "now"},
+  "templating": {
+    "list": [
+      {"name": "model", "type": "query", "datasource": {"type": "prometheus"}, "query": "label_values(quotaware_remaining_requests, model)", "includeAll": true, "multi": true, "current": {"text": "All", "value": "$__all"}}
+    ]
+  },
+  "panels": [
+    {"id": 1, "type": "timeseries", "title": "Replica ceiling", "gridPos": {"x": 0, "y": 0, "w": 12, "h": 8},
+     "targets": [{"expr": "quotaware_ceiling{model=~\"$model\"}", "legendFormat": "{{scaledobject}} {{model}}"}]},
+    {"id": 2, "type": "timeseries", "title": "429 per minute", "gridPos": {"x": 12, "y": 0, "w": 12, "h": 8},
+     "targets": [{"expr": "sum by (model) (rate(quotaware_429_total{model=~\"$model\"}[1m]) * 60)", "legendFormat": "{{model}}"}]},
+    {"id": 3, "type": "timeseries", "title": "Remaining requests", "gridPos": {"x": 0, "y": 8, "w": 12, "h": 8},
+     "targets": [{"expr": "quotaware_remaining_requests{model=~\"$model\"}", "legendFormat": "{{model}} {{key}}"}]},
+    {"id": 4, "type": "timeseries", "title": "Remaining tokens", "gridPos": {"x": 12, "y": 8, "w": 12, "h": 8},
+     "targets": [{"expr": "quotaware_remaining_tokens{model=~\"$model\"}", "legendFormat": "{{model}} {{window}}"}]},
+    {"id": 5, "type": "timeseries", "title": "Calls in flight", "gridPos": {"x": 0, "y": 16, "w": 8, "h": 8},
+     "targets": [{"expr": "quotaware_inflight{model=~\"$model\"}", "legendFormat": "{{model}}"}]},
+    {"id": 6, "type": "timeseries", "title": "Latency (smoothed)", "gridPos": {"x": 8, "y": 16, "w": 8, "h": 8},
+     "fieldConfig": {"defaults": {"unit": "s"}},
+     "targets": [{"expr": "quotaware_latency_seconds{model=~\"$model\"}", "legendFormat": "{{model}}"}]},
+    {"id": 7, "type": "timeseries", "title": "Tokens per call (smoothed)", "gridPos": {"x": 16, "y": 16, "w": 8, "h": 8},
+     "targets": [{"expr": "quotaware_tokens_per_call{model=~\"$model\"}", "legendFormat": "{{model}}"}]},
+    {"id": 8, "type": "stat", "title": "Observation health", "gridPos": {"x": 0, "y": 24, "w": 24, "h": 5},
+     "targets": [
+       {"expr": "sum(increase(quotaware_headers_missing_total[10m]))", "legendFormat": "headers missing (10m)"},
+       {"expr": "sum(increase(quotaware_headers_malformed_total[10m]))", "legendFormat": "headers malformed (10m)"},
+       {"expr": "sum(increase(quotaware_usage_missing_total[10m]))", "legendFormat": "usage missing (10m)"},
+       {"expr": "sum(increase(quotaware_upstream_errors_total[10m]))", "legendFormat": "upstream errors (10m)"},
+       {"expr": "sum(increase(quotaware_aborted_total[10m]))", "legendFormat": "aborted streams (10m)"}
+     ]}
+  ]
+}

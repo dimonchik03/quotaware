@@ -1,0 +1,22 @@
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: llm-workers
+spec:
+  scaleTargetRef:
+    name: llm-workers
+  minReplicaCount: 0
+  maxReplicaCount: 40
+  pollingInterval: 15
+  cooldownPeriod: 60
+  triggers:
+    - type: external
+      name: capped-demand
+      metadata:
+        scalerAddress: quotaware:9090
+        bucket: openai/gpt-4.1-mini
+        concurrency: "4"
+        maxReplicas: "40"
+        redisAddress: redis:6379
+        listName: jobs
+        listLength: "10"

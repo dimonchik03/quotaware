@@ -11,7 +11,10 @@ import (
 	"github.com/dimonchik03/quotaware/internal/state"
 )
 
-var bucketLabels = []string{"provider", "model", "key"}
+var (
+	bucketLabels   = []string{"provider", "model", "key"}
+	consumerLabels = []string{"namespace", "scaledobject", "provider", "model", "key"}
+)
 
 type Collector struct {
 	store *state.Store
@@ -33,6 +36,7 @@ type Collector struct {
 	headersMissing    *prometheus.Desc
 	headersMalformed  *prometheus.Desc
 	usageMissing      *prometheus.Desc
+	ceiling           *prometheus.Desc
 }
 
 func NewCollector(store *state.Store, now func() time.Time) *Collector {
@@ -58,6 +62,7 @@ func NewCollector(store *state.Store, now func() time.Time) *Collector {
 		headersMissing:    describe("headers_missing_total", "Responses that should carry rate-limit headers but did not."),
 		headersMalformed:  describe("headers_malformed_total", "Responses whose rate-limit headers could not be parsed."),
 		usageMissing:      describe("usage_missing_total", "Successful responses without a usable usage object."),
+		ceiling:           prometheus.NewDesc("quotaware_ceiling", "Replica ceiling last reported to KEDA for a scaled object and bucket.", consumerLabels, nil),
 	}
 }
 
@@ -118,6 +123,11 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 		counter(c.headersMalformed, b.HeadersMalformed)
 		counter(c.usageMissing, b.UsageMissing)
 	}
+	for _, ceiling := range c.store.Ceilings() {
+		ch <- prometheus.MustNewConstMetric(c.ceiling, prometheus.GaugeValue, float64(ceiling.Value),
+			ceiling.Consumer.Namespace, ceiling.Consumer.ScaledObject,
+			ceiling.Consumer.Bucket.Provider, ceiling.Consumer.Bucket.Model, ceiling.Consumer.Bucket.Key)
+	}
 }
 
 func (c *Collector) descs() []*prometheus.Desc {
@@ -125,6 +135,7 @@ func (c *Collector) descs() []*prometheus.Desc {
 		c.limitRequests, c.remainingRequests, c.limitTokens, c.remainingTokens, c.resetSeconds,
 		c.tokensPerCall, c.latencySeconds, c.inflight, c.retryAfterSeconds,
 		c.responses, c.rateLimited, c.aborted, c.upstreamErrors, c.headersMissing, c.headersMalformed, c.usageMissing,
+		c.ceiling,
 	}
 }
 

@@ -1,0 +1,30 @@
+image:
+  repository: ghcr.io/dimonchik03/quotaware
+  tag: ""
+  pullPolicy: IfNotPresent
+
+upstreams:
+  openai: https://api.openai.com
+  anthropic: https://api.anthropic.com
+
+ports:
+  proxy: 8080
+  grpc: 9090
+  admin: 9100
+
+ewmaAlpha: 0.2
+extraArgs: []
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    memory: 256Mi
+
+prometheusAnnotations: true
+podAnnotations: {}
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

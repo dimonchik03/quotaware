@@ -1,0 +1,14 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: seed-queue
+  namespace: quotaware-demo
+spec:
+  backoffLimit: 2
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: seed
+          image: redis:7-alpine
+          command: ["sh", "-c", "redis-cli -h redis del jobs > /dev/null; for i in $(seq 1 200); do redis-cli -h redis lpush jobs job-$i > /dev/null; done; redis-cli -h redis llen jobs"]

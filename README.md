@@ -19,8 +19,8 @@ every response; nothing wires them to the autoscaler.
    usage, latency and 429s per `(provider, model, key)`.
 2. The headroom algorithm turns remaining quota, tokens per call and latency into a
    replica ceiling, with an AIMD fallback when headers are missing.
-3. `quotaware scaler` serves that ceiling to KEDA over gRPC; a `scalingModifiers`
-   formula takes the minimum of your queue trigger and the ceiling.
+3. The KEDA external scaler in `quotaware all` serves that ceiling over gRPC; a
+   `scalingModifiers` formula takes the minimum of your queue trigger and the ceiling.
 
 ## Try it without a cluster
 
@@ -105,13 +105,87 @@ the client sets `stream_options.include_usage`; a stream without it is counted i
 `quotaware_usage_missing_total` instead of guessed. The credential is hashed before
 it becomes a label.
 
+## Deploy with KEDA
+
+The chart runs `quotaware all`: the proxy, the metrics endpoint and the KEDA
+external scaler in one pod. No image is published yet, so build and push your own
+(the `Dockerfile` at the root) and point the chart at it:
+
+    helm install quotaware deploy/helm/quotaware -n llm --create-namespace \
+      --set image.repository=registry.example.com/quotaware --set image.tag=dev
+
+Point your workers at `http://quotaware.llm.svc:8080` and add the ceiling as a second
+trigger next to your queue trigger. KEDA takes the largest value across triggers, so
+the two are combined with `scalingModifiers` into a minimum (ADR 0005). Inside a
+formula KEDA uses the raw trigger values and ignores each trigger's own target, so the
+queue length is divided by the jobs-per-replica target in the formula itself:
+
+    advanced:
+      scalingModifiers:
+        formula: "demand / 10 < ceiling ? demand / 10 : ceiling"
+        target: "1"
+        metricType: AverageValue
+    triggers:
+      - type: redis
+        name: demand
+        metadata:
+          address: redis:6379
+          listName: jobs
+          listLength: "10"
+      - type: external
+        name: ceiling
+        metadata:
+          scalerAddress: quotaware.llm.svc:9090
+          bucket: openai/gpt-4.1-mini
+          concurrency: "4"
+
+`bucket` is `provider/model`; `concurrency` is how many provider calls one worker pod
+keeps open; `maxReplicas` has to mirror `maxReplicaCount` by hand because KEDA does
+not pass it to external scalers. With `scalingModifiers` KEDA activates the
+ScaledObject when the formula result is above `activationTarget` (default 0), so an
+exhausted quota with `minReplicaCount: 0` scales to zero; keep `minReplicaCount` at
+one or more when the workers must stay warm. If quotaware is unreachable the HPA
+keeps the current replica count. Full manifests for this mode and for the
+single-trigger mode (quotaware reads the Redis list itself and returns the minimum)
+are in `deploy/examples/`; the remaining knobs (`credential`, `safety`, `share`,
+`maxStepUp`, `stepInterval`, `defaultCeiling`, `minReplicas`, `staleAfter`,
+`staleHard`, `window`) and their defaults are listed in `docs/SPEC.md`. A Grafana
+dashboard is in `deploy/grafana/`.
+
+## Watch it on kind
+
+    make demo        # kind cluster, KEDA 2.21, fake provider, Redis, workers, quotaware
+    make demo-down
+
+The demo creates a cluster with its own kubeconfig under `bench/kind/`, so your
+default context is never touched. Workers are curl loops (two calls in flight per
+pod, backing off on `retry-after`) scaled by the Mode A ScaledObject against a fake
+provider limited to 600 requests per minute; 200 queued jobs keep demand at 20. After
+90 seconds a job with another credential bursts the shared quota for a minute:
+
+    time      replicas  desired  429/15s ceiling (quotaware log)
+    21:40:33  -         -        0      0 -> 8 (headroom)
+    21:40:49  8         8        0
+    21:41:50  8         8        0
+    21:42:05  burst job started: 30 loops with another credential for 60s
+    21:42:21  8         7        0      8 -> 7 (drain)
+    21:43:07  7         1        0      3 -> 1 (clamped)
+    21:43:23  1         1        0
+    21:43:38  1         5        0      1 -> 5 (step_up)
+    21:43:53  5         8        0      5 -> 8 (headroom)
+    21:44:09  8         8        0
+
+Eight replicas is what 600 requests per minute feeds at one call per second per pod
+with the safety factor applied; the workers never see a 429. When the burst drains
+the window, the ceiling drops and the HPA follows within a poll; after the window
+resets the ceiling steps back up by `maxStepUp` per interval.
+
 ## Planned usage
 
-    make demo        # kind cluster, KEDA, fake provider, workers, quotaware
     make bench       # two runs, same seed: queue trigger vs queue trigger + quotaware
 
-Both targets land with milestones 3 and 4 of `docs/SPEC.md`. Benchmark charts and
-numbers will be published in `docs/benchmark.md`.
+The benchmark lands with milestone 4 of `docs/SPEC.md`; charts and numbers will be
+published in `docs/benchmark.md`.
 
 ## Non-goals
 
@@ -120,8 +194,8 @@ Not a gateway, not a rate limiter, not a cost dashboard. See `docs/SPEC.md`.
 ## Status
 
 v0.1 in progress. Header parsers, the headroom algorithm, `simulate`, the proxy
-with its metrics and the fake provider are done. The KEDA scaler, the
-`quotaware_ceiling` series, the Grafana dashboard and the benchmark follow. Specification in `docs/SPEC.md`,
+with its metrics, the fake provider, the KEDA external scaler, the Helm chart and
+the kind demo are done. The benchmark and the AIMD fallback follow. Specification in `docs/SPEC.md`,
 decisions in `docs/adr`.
 
 ## License

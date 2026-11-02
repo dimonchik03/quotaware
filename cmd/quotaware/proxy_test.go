@@ -6,9 +6,9 @@ import (
 	"testing"
 )
 
-func TestProxyFlags(t *testing.T) {
+func TestObserverFlags(t *testing.T) {
 	t.Run("accepts origins and fills the defaults", func(t *testing.T) {
-		options, err := parseProxyFlags([]string{"-openai-upstream", "http://fakeprovider:8081"}, &bytes.Buffer{})
+		options, err := parseObserverFlags("proxy", []string{"-openai-upstream", "http://fakeprovider:8081"}, &bytes.Buffer{}, false)
 
 		if err != nil {
 			t.Fatal(err)
@@ -21,8 +21,27 @@ func TestProxyFlags(t *testing.T) {
 		}
 	})
 
+	t.Run("adds the grpc address for the all command", func(t *testing.T) {
+		options, err := parseObserverFlags("all", []string{"-grpc", ":9999"}, &bytes.Buffer{}, true)
+
+		if err != nil {
+			t.Fatal(err)
+		}
+		if options.grpc != ":9999" || options.pushInterval <= 0 {
+			t.Fatalf("options = %+v, want the grpc address and a push interval", options)
+		}
+	})
+
+	t.Run("rejects the grpc flag for the proxy command", func(t *testing.T) {
+		_, err := parseObserverFlags("proxy", []string{"-grpc", ":9999"}, &bytes.Buffer{}, false)
+
+		if err == nil {
+			t.Fatal("expected an unknown flag error")
+		}
+	})
+
 	t.Run("rejects an upstream with a path", func(t *testing.T) {
-		_, err := parseProxyFlags([]string{"-anthropic-upstream", "https://api.anthropic.com/v1"}, &bytes.Buffer{})
+		_, err := parseObserverFlags("proxy", []string{"-anthropic-upstream", "https://api.anthropic.com/v1"}, &bytes.Buffer{}, false)
 
 		if err == nil || !strings.Contains(err.Error(), "anthropic-upstream") {
 			t.Fatalf("err = %v, want it to name the flag", err)
@@ -30,7 +49,7 @@ func TestProxyFlags(t *testing.T) {
 	})
 
 	t.Run("rejects an upstream without a host", func(t *testing.T) {
-		_, err := parseProxyFlags([]string{"-openai-upstream", "fakeprovider:8081"}, &bytes.Buffer{})
+		_, err := parseObserverFlags("proxy", []string{"-openai-upstream", "fakeprovider:8081"}, &bytes.Buffer{}, false)
 
 		if err == nil {
 			t.Fatal("expected an error for a bare host without scheme")
@@ -38,17 +57,25 @@ func TestProxyFlags(t *testing.T) {
 	})
 
 	t.Run("rejects the same address for the proxy and the admin port", func(t *testing.T) {
-		_, err := parseProxyFlags([]string{"-listen", ":8080", "-admin", ":8080"}, &bytes.Buffer{})
+		_, err := parseObserverFlags("proxy", []string{"-listen", ":8080", "-admin", ":8080"}, &bytes.Buffer{}, false)
 
 		if err == nil || !strings.Contains(err.Error(), "differ") {
 			t.Fatalf("err = %v, want a complaint about identical addresses", err)
 		}
 	})
 
+	t.Run("rejects a grpc address that collides with the admin port", func(t *testing.T) {
+		_, err := parseObserverFlags("all", []string{"-grpc", ":9100"}, &bytes.Buffer{}, true)
+
+		if err == nil || !strings.Contains(err.Error(), "grpc") {
+			t.Fatalf("err = %v, want a complaint about the grpc address", err)
+		}
+	})
+
 	t.Run("exits with 2 on an invalid alpha", func(t *testing.T) {
 		var stderr bytes.Buffer
 
-		code := run([]string{"proxy", "-ewma-alpha", "2"}, strings.NewReader(""), &bytes.Buffer{}, &stderr)
+		code := run([]string{"all", "-ewma-alpha", "2"}, strings.NewReader(""), &bytes.Buffer{}, &stderr)
 
 		if code != 2 || !strings.Contains(stderr.String(), "alpha") {
 			t.Fatalf("exit = %d, stderr = %q, want 2 naming alpha", code, stderr.String())

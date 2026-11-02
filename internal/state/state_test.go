@@ -255,6 +255,33 @@ func TestStore(t *testing.T) {
 		}
 	})
 
+	t.Run("ceilings are updated atomically per consumer and dropped once nobody polls them", func(t *testing.T) {
+		s := store(t, 0.5)
+		consumer := state.Consumer{Namespace: "jobs", ScaledObject: "llm-workers", Bucket: key}
+		first := s.UpdateCeiling(consumer, func(previous state.Ceiling, known bool) state.Ceiling {
+			if known {
+				t.Fatal("a previous ceiling was reported before any update")
+			}
+			return state.Ceiling{Value: 4, ChangedAt: now, Seen: now}
+		})
+		second := s.UpdateCeiling(consumer, func(previous state.Ceiling, known bool) state.Ceiling {
+			if !known || previous.Value != 4 {
+				t.Fatalf("previous = %+v known = %v, want the first update", previous, known)
+			}
+			return state.Ceiling{Value: 6, ChangedAt: now.Add(time.Minute), Seen: now.Add(time.Minute)}
+		})
+
+		if first.Value != 4 || second.Value != 6 || second.Consumer != consumer || len(s.Ceilings()) != 1 {
+			t.Fatalf("updates = %+v / %+v, want both applied to one consumer", first, second)
+		}
+
+		s.Evict(now.Add(12*time.Minute), 10*time.Minute)
+
+		if _, ok := s.Ceiling(consumer); ok || len(s.Ceilings()) != 0 {
+			t.Fatal("ceiling survived although its consumer stopped polling")
+		}
+	})
+
 	t.Run("buckets are listed in a stable order", func(t *testing.T) {
 		s := store(t, 0.5)
 		s.Begin(state.Key{Provider: "openai", Model: "gpt-4.1", Key: "b"}, now)

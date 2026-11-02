@@ -1,0 +1,9 @@
+quotaware is running as {{ include "quotaware.fullname" . }} in {{ .Release.Namespace }}.
+
+Point your workers at the proxy:
+  base_url: http://{{ include "quotaware.fullname" . }}.{{ .Release.Namespace }}.svc:{{ .Values.ports.proxy }}
+
+Reference the scaler from a ScaledObject:
+  scalerAddress: {{ include "quotaware.fullname" . }}.{{ .Release.Namespace }}.svc:{{ .Values.ports.grpc }}
+
+Metrics are on port {{ .Values.ports.admin }} at /metrics.

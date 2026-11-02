@@ -1,0 +1,5 @@
+The files externalscaler.proto, externalscaler.pb.go and externalscaler_grpc.pb.go
+in this directory are copied unchanged from the KEDA project, release v2.21.0,
+path pkg/scalers/externalscaler, and are licensed under the Apache License,
+Version 2.0. Copyright The KEDA Authors.
+https://github.com/kedacore/keda

@@ -40,8 +40,9 @@ into the autoscaler. quotaware does.
 
 ## How it works
 
-One Go binary, `quotaware`, with subcommands `proxy`, `scaler`, `all` (both in one
-process, the v0.1 default) and `simulate`.
+One Go binary, `quotaware`, with subcommands `proxy`, `all` (proxy and scaler in
+one process, the v0.1 deployment) and `simulate`. A standalone `scaler` arrives with
+the shared state backend, since the scaler reads what the proxy observed.
 
 ### 1. Observation: `quotaware proxy`
 
@@ -119,59 +120,48 @@ Header mode and AIMD run together; AIMD acts as a guard even when headers exist.
 A gRPC server implementing KEDA's `ExternalScaler` service
 (`pkg/scalers/externalscaler/externalscaler.proto`, vendored):
 
-- `GetMetricSpec` returns metric `quotaware_ceiling` with `targetSize: 1`.
+- `GetMetricSpec` returns metric `quotaware-ceiling` with `targetSize: 1` (the
+  Prometheus series of the same number is `quotaware_ceiling`).
 - `GetMetrics` returns the ceiling as `metricValue`. With KEDA's default
   `AverageValue` semantics the HPA computes `ceil(metricValue / targetSize)`, so the
   returned number is the replica count itself.
-- `IsActive` returns true while the bucket has observations newer than `stale_hard`.
-- `StreamIsActive` is implemented so the trigger can run as `external-push` and react
-  to a 429 burst before the next polling interval.
+- `IsActive` is always false for a cap trigger, so activation stays with the demand
+  trigger; in single-trigger mode it is true while the queue has items.
+- `StreamIsActive` sends the state once and, in single-trigger mode, pushes changes
+  of the queue activity so the trigger can run as `external-push`. A push only
+  re-runs activation; the HPA metric is still refreshed on its own cadence.
+- A raise of the ceiling is limited to `maxStepUp` per `stepInterval` (default 15 s)
+  however often KEDA polls; a drop is immediate. Ceilings are evaluated under one lock
+  per ScaledObject and bucket, so concurrent polls cannot raise twice.
 
 Trigger metadata: `scalerAddress`, `bucket` (`openai/gpt-4.1-mini`), `concurrency` (k),
-`safety`, `share`, `defaultCeiling`.
+and optionally `credential` (the hashed key label, to narrow a shared model to one
+key), `safety` (0.85), `share` (1), `maxStepUp` (2), `stepInterval` (15s),
+`defaultCeiling` (1), `minReplicas` (1), `maxReplicas` (100, mirror
+`maxReplicaCount` by hand), `staleAfter` (2m), `staleHard` (10m), `window` (1m).
+Ceilings are computed per ScaledObject and per bucket, summed across the credentials
+that match and clamped to `maxReplicas`. A cap trigger never reports `IsActive`;
+activation stays with the demand trigger.
 
 ### 5. Combining with the existing queue trigger
 
 KEDA takes the maximum across triggers, which is the opposite of what we need: demand
 should come from the queue and the cap from the quota. Two supported modes.
 
-Mode A, recommended, uses `scalingModifiers`:
-
-    apiVersion: keda.sh/v1alpha1
-    kind: ScaledObject
-    metadata:
-      name: llm-workers
-    spec:
-      scaleTargetRef:
-        name: llm-workers
-      minReplicaCount: 1
-      maxReplicaCount: 40
-      pollingInterval: 15
-      advanced:
-        scalingModifiers:
-          formula: "demand < ceiling ? demand : ceiling"
-          target: "1"
-          metricType: AverageValue
-      triggers:
-        - type: redis
-          name: demand
-          metadata:
-            address: redis:6379
-            listName: jobs
-            listLength: "10"
-        - type: external
-          name: ceiling
-          metadata:
-            scalerAddress: quotaware:9090
-            bucket: openai/gpt-4.1-mini
-            concurrency: "4"
-
-The ternary form is documented by KEDA; `min()` may exist in the bundled `expr`
-build but is unverified.
+Mode A, recommended, uses `scalingModifiers` with the formula
+`demand / 10 < ceiling ? demand / 10 : ceiling`, where `demand` is the raw queue
+length (inside a formula KEDA ignores each trigger's own target, so the
+jobs-per-replica division moves into the formula) and `ceiling` is this scaler's
+replica count. The full manifest is `deploy/examples/scaledobject-mode-a.yaml`. The
+ternary form is documented by KEDA; `min()` from the bundled expression language is
+not relied on until it is verified. With `scalingModifiers` the ScaledObject is active
+while the formula result is above `activationTarget`, so `minReplicaCount` should be
+at least one unless scaling to zero on an exhausted quota is intended.
 
 Mode B, single trigger, for clusters where `scalingModifiers` is unavailable:
 quotaware reads the queue depth itself (Redis list in v0.1) and returns
-`min(demand_replicas, ceiling)`.
+`min(demand_replicas, ceiling)`; activation follows the queue. The manifest is
+`deploy/examples/scaledobject-mode-b.yaml`.
 
 ### 6. Metrics
 
@@ -238,13 +228,14 @@ way. If B does not win, that is still the write-up, and a bug hunt.
 ## Repository layout
 
     quotaware/
-      cmd/quotaware/          main: proxy | scaler | all | simulate
+      cmd/quotaware/          main: proxy | all | simulate
       internal/headroom/      the algorithm as pure functions; table-driven and property tests
       internal/aimd/          congestion-control fallback, pure
       internal/state/         bucket state, EWMA, staleness; memory and redis backends
       internal/headers/       openai.go, anthropic.go, fixtures/, *_test.go
       internal/proxy/         reverse proxy, SSE passthrough, usage extraction
       internal/scaler/        gRPC ExternalScaler; proto vendored from KEDA
+      internal/queue/         queue depth readers for single-trigger mode
       internal/metrics/       Prometheus registry
       deploy/                 Helm chart (Deployment, Service, ScaledObject examples), grafana/
       bench/                  fakeprovider/, producer/, worker/, kind/, prometheus/, plot/, results/

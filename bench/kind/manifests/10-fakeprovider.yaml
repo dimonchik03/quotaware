@@ -1,0 +1,38 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fakeprovider
+  namespace: quotaware-demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: fakeprovider
+  template:
+    metadata:
+      labels:
+        app: fakeprovider
+    spec:
+      containers:
+        - name: fakeprovider
+          image: quotaware-fakeprovider:dev
+          imagePullPolicy: Never
+          args: ["-listen", ":8081", "-rpm", "600", "-tpm", "2000000", "-latency", "2s", "-jitter", "200ms", "-seed", "1"]
+          ports:
+            - containerPort: 8081
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8081
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: fakeprovider
+  namespace: quotaware-demo
+spec:
+  selector:
+    app: fakeprovider
+  ports:
+    - port: 8081
+      targetPort: 8081

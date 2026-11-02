@@ -58,7 +58,8 @@ func runSimulate(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	flags.DurationVar(&cfg.Window, "window", cfg.Window, "rate-limit window of the provider")
 	flags.IntVar(&cfg.MinReplicas, "min", cfg.MinReplicas, "minimum replica count")
 	flags.IntVar(&cfg.MaxReplicas, "max", cfg.MaxReplicas, "maximum replica count")
-	flags.IntVar(&cfg.MaxStepUp, "max-step-up", cfg.MaxStepUp, "largest raise of the ceiling per evaluation")
+	flags.IntVar(&cfg.MaxStepUp, "max-step-up", cfg.MaxStepUp, "largest raise of the ceiling per step interval")
+	flags.DurationVar(&cfg.StepInterval, "step-interval", cfg.StepInterval, "shortest time between two raises of the ceiling")
 	flags.DurationVar(&cfg.StaleAfter, "stale-after", cfg.StaleAfter, "age after which the last ceiling is frozen")
 	flags.DurationVar(&cfg.StaleHard, "stale-hard", cfg.StaleHard, "age after which the default ceiling is reported")
 	flags.IntVar(&cfg.DefaultCeiling, "default-ceiling", cfg.DefaultCeiling, "ceiling reported without usable observations")
@@ -115,7 +116,10 @@ func simulate(cfg headroom.Config, in io.Reader, out io.Writer) error {
 		result := headroom.Compute(cfg, line.observation(), previous, line.At)
 		fmt.Fprintf(out, "%s\t%d\t%s\t%.2f\t%.2f\n",
 			line.At.Format(time.RFC3339), result.Ceiling, result.Reason, result.AllowedRate, result.PodRate)
-		previous = headroom.Previous{Ceiling: result.Ceiling, Known: true}
+		if !previous.Known || previous.Ceiling != result.Ceiling {
+			previous.At = line.At
+		}
+		previous.Ceiling, previous.Known = result.Ceiling, true
 	}
 	if err := scanner.Err(); err != nil {
 		return fmt.Errorf("line %d: %w", number+1, err)

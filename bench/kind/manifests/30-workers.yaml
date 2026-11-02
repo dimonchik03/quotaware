@@ -1,0 +1,49 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: llm-workers
+  namespace: quotaware-demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: llm-workers
+  template:
+    metadata:
+      labels:
+        app: llm-workers
+    spec:
+      terminationGracePeriodSeconds: 5
+      containers:
+        - name: worker
+          image: curlimages/curl:8.11.1
+          command:
+            - sh
+            - -c
+            - |
+              call() {
+                while true; do
+                  result=$(curl -s -o /dev/null -w '%{http_code} %header{retry-after}' "${PROXY_URL}/v1/chat/completions" \
+                    -H "Authorization: Bearer ${API_KEY}" -H 'Content-Type: application/json' \
+                    -d "{\"model\":\"${MODEL}\",\"messages\":[{\"role\":\"user\",\"content\":\"job\"}]}")
+                  code=${result%% *}
+                  retry=${result#* }
+                  echo "$code"
+                  if [ "$code" = "429" ]; then sleep "${retry:-5}"; else sleep 0.2; fi
+                done
+              }
+              for i in $(seq 1 "${CONCURRENCY}"); do call & done
+              wait
+          env:
+            - name: PROXY_URL
+              value: http://quotaware:8080
+            - name: API_KEY
+              value: sk-workers
+            - name: MODEL
+              value: gpt-4.1-mini
+            - name: CONCURRENCY
+              value: "2"
+          resources:
+            requests:
+              cpu: 5m
+              memory: 16Mi

@@ -68,7 +68,7 @@ func mustPost(t *testing.T, target, credential, body string) (*http.Response, st
 	return response, raw
 }
 
-func metrics(t *testing.T, adminURL string) string {
+func metricsText(t *testing.T, adminURL string) string {
 	t.Helper()
 	response, err := client.Get(adminURL + "/metrics")
 	if err != nil {
@@ -123,7 +123,7 @@ func TestProxyAgainstTheFakeProvider(t *testing.T) {
 		if response.Header.Get("x-ratelimit-limit-requests") != "3" {
 			t.Fatalf("headers = %v, want the fake provider limits passed through", response.Header)
 		}
-		exposition := metrics(t, adminURL)
+		exposition := metricsText(t, adminURL)
 		if remaining := metricValue(t, exposition, "quotaware_remaining_requests", `provider="openai"`, `model="gpt-4.1-mini"`); remaining >= 3 {
 			t.Fatalf("remaining requests = %v, want it below the limit after a call", remaining)
 		}
@@ -144,7 +144,7 @@ func TestProxyAgainstTheFakeProvider(t *testing.T) {
 		if _, err := time.Parse(time.RFC3339, response.Header.Get("anthropic-ratelimit-tokens-reset")); err != nil {
 			t.Fatalf("anthropic reset header = %q, want RFC 3339", response.Header.Get("anthropic-ratelimit-tokens-reset"))
 		}
-		exposition := metrics(t, adminURL)
+		exposition := metricsText(t, adminURL)
 		if tokens := metricValue(t, exposition, "quotaware_tokens_per_call", `provider="anthropic"`, `model="claude-sonnet-4-5"`); tokens <= 0 {
 			t.Fatalf("tokens per call = %v, want usage captured from the stream", tokens)
 		}
@@ -162,7 +162,7 @@ func TestProxyAgainstTheFakeProvider(t *testing.T) {
 			t.Fatalf("limited = %d, want at least 10 of 20 calls rejected by a limit of 3 per minute, whatever the window boundary", limited)
 		}
 
-		exposition := metrics(t, adminURL)
+		exposition := metricsText(t, adminURL)
 		if counted := metricValue(t, exposition, "quotaware_429_total", `model="gpt-4.1"`); counted != float64(limited) {
 			t.Fatalf("quotaware_429_total = %v, want %d", counted, limited)
 		}

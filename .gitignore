@@ -14,3 +14,4 @@ CLAUDE.local.md
 /dist/
 coverage.out
 /quotaware
+bench/kind/.kubeconfig

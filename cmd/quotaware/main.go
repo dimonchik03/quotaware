@@ -9,6 +9,7 @@ import (
 const usage = `usage: quotaware <command> [flags]
 
 commands:
+  all        run the proxy and the KEDA external scaler in one process
   proxy      observe provider rate-limit headers in front of OpenAI and Anthropic
   simulate   replay a JSONL file of observations and print the replica ceiling per line
 `
@@ -23,6 +24,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return 2
 	}
 	switch args[0] {
+	case "all":
+		return runAll(args[1:], stderr)
 	case "proxy":
 		return runProxy(args[1:], stderr)
 	case "simulate":
