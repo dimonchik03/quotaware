@@ -91,7 +91,10 @@ v0.1; a shared backend is the planned step towards several.
 Nothing that arrives over the network is trusted on its own (ADR 0008). The
 observe endpoint needs a bearer token unless the operator opts out explicitly.
 Trigger metadata may only point single-trigger mode at Redis addresses the operator
-listed. The store caps the buckets and the ScaledObjects it tracks, counts what it
+listed. Ceiling state is keyed by a hash of the trigger metadata next to the
+ScaledObject, so a caller that sends other metadata for the same name evaluates its
+own entry and cannot move the one KEDA continues from (ADR 0009). The store caps the
+buckets and the ScaledObjects it tracks, counts what it
 refused, and the scaler bounds the names it accepts, so an unauthenticated caller
 can exhaust neither memory nor label cardinality.
 

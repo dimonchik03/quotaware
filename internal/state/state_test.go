@@ -427,6 +427,21 @@ func TestStore(t *testing.T) {
 		}
 	})
 
+	t.Run("a scaled object keeps one ceiling per trigger", func(t *testing.T) {
+		s := store(t, 0.5)
+		keep := func(value int) func(state.Ceiling, bool) state.Ceiling {
+			return func(state.Ceiling, bool) state.Ceiling { return state.Ceiling{Value: value, Seen: now} }
+		}
+		updateCeiling(t, s, state.Consumer{Namespace: "jobs", ScaledObject: "llm-workers", Trigger: "b", Bucket: key}, keep(4))
+		updateCeiling(t, s, state.Consumer{Namespace: "jobs", ScaledObject: "llm-workers", Trigger: "a", Bucket: key}, keep(1))
+
+		all := s.Ceilings()
+
+		if len(all) != 2 || all[0].Consumer.Trigger != "a" || all[0].Value != 1 || all[1].Consumer.Trigger != "b" || all[1].Value != 4 {
+			t.Fatalf("ceilings = %+v, want both triggers kept and listed by trigger", all)
+		}
+	})
+
 	t.Run("buckets are listed in a stable order", func(t *testing.T) {
 		s := store(t, 0.5)
 		s.Begin(state.Key{Provider: "openai", Model: "gpt-4.1", Key: "b"}, now)

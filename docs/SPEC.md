@@ -151,7 +151,10 @@ key), `safety` (0.85), `share` (1), `maxStepUp` (2), `stepInterval` (15s),
 `defaultCeiling` (1), `minReplicas` (1), `maxReplicas` (100, mirror
 `maxReplicaCount` by hand), `staleAfter` (2m), `staleHard` (10m), `window` (1m),
 `aimdThreshold` (0.02), `aimdDecrease` (0.5), `aimdIncrease` (1).
-Ceilings are computed per ScaledObject and per bucket, summed across the credentials
+Ceilings are computed per ScaledObject, trigger and bucket: the state a poll continues
+from is keyed by the namespace, the name and a hash of the trigger metadata, so a
+caller that sends other metadata for the same name evaluates its own entry and never
+moves the one KEDA's trigger reads (ADR 0009). They are summed across the credentials
 that match and clamped to `maxReplicas`. A cap trigger never reports `IsActive`;
 activation stays with the demand trigger. The scaler trusts nothing in the request
 beyond what it validates: ScaledObject names and namespaces are bounded to 253
@@ -187,7 +190,8 @@ credential): `quotaware_limit_requests`, `quotaware_remaining_requests`,
 the organization, project, input and output token windows), `quotaware_reset_seconds`
 per window, `quotaware_tokens_per_call`, `quotaware_latency_seconds`,
 `quotaware_inflight`, `quotaware_retry_after_seconds`, `quotaware_rate_limited_ratio`,
-`quotaware_ceiling`, and the counters `quotaware_responses_total`,
+`quotaware_ceiling` (labelled by `namespace`, `scaledobject` and `trigger` as well),
+and the counters `quotaware_responses_total`,
 `quotaware_429_total`, `quotaware_aborted_total`, `quotaware_upstream_errors_total`,
 `quotaware_headers_missing_total`, `quotaware_headers_malformed_total` and
 `quotaware_usage_missing_total`. Unlabelled: `quotaware_buckets`,

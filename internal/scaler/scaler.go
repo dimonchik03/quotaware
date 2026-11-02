@@ -2,9 +2,12 @@ package scaler
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"math"
 	"slices"
 	"strconv"
@@ -94,12 +97,13 @@ func (s *Service) Close() error {
 }
 
 type trigger struct {
-	provider   string
-	model      string
-	credential string
-	cfg        headroom.Config
-	aimd       aimd.Config
-	queue      *queueTrigger
+	fingerprint string
+	provider    string
+	model       string
+	credential  string
+	cfg         headroom.Config
+	aimd        aimd.Config
+	queue       *queueTrigger
 }
 
 type queueTrigger struct {
@@ -130,7 +134,18 @@ func (s *Service) parse(ref *externalscaler.ScaledObjectRef) (trigger, error) {
 	if err != nil {
 		return trigger{}, err
 	}
-	return trigger{provider: provider, model: model, credential: metadata["credential"], cfg: cfg, aimd: fallback, queue: queue}, nil
+	return trigger{fingerprint: fingerprint(metadata), provider: provider, model: model, credential: metadata["credential"], cfg: cfg, aimd: fallback, queue: queue}, nil
+}
+
+func fingerprint(metadata map[string]string) string {
+	digest := sha256.New()
+	for _, name := range slices.Sorted(maps.Keys(metadata)) {
+		digest.Write([]byte(name))
+		digest.Write([]byte{0})
+		digest.Write([]byte(metadata[name]))
+		digest.Write([]byte{0})
+	}
+	return hex.EncodeToString(digest.Sum(nil))[:12]
 }
 
 func (s *Service) parseAIMD(metadata map[string]string, cfg headroom.Config) (aimd.Config, error) {
@@ -400,7 +415,7 @@ func (s *Service) ceiling(ref *externalscaler.ScaledObjectRef, t trigger) (int, 
 			continue
 		}
 		matched++
-		consumer := state.Consumer{Namespace: ref.GetNamespace(), ScaledObject: ref.GetName(), Bucket: b.Key}
+		consumer := state.Consumer{Namespace: ref.GetNamespace(), ScaledObject: ref.GetName(), Trigger: t.fingerprint, Bucket: b.Key}
 		value, err := s.evaluate(consumer, t, b.Observation(), b.Recent, now)
 		if err != nil {
 			return 0, err
@@ -408,7 +423,7 @@ func (s *Service) ceiling(ref *externalscaler.ScaledObjectRef, t trigger) (int, 
 		total += value
 	}
 	if matched == 0 {
-		consumer := state.Consumer{Namespace: ref.GetNamespace(), ScaledObject: ref.GetName(), Bucket: state.Key{Provider: t.provider, Model: t.model, Key: t.credential}}
+		consumer := state.Consumer{Namespace: ref.GetNamespace(), ScaledObject: ref.GetName(), Trigger: t.fingerprint, Bucket: state.Key{Provider: t.provider, Model: t.model, Key: t.credential}}
 		return s.evaluate(consumer, t, headroom.Observation{}, state.Recent{}, now)
 	}
 	return min(total, t.cfg.MaxReplicas), nil
@@ -444,7 +459,7 @@ func (s *Service) evaluate(consumer state.Consumer, t trigger, obs headroom.Obse
 	}
 	if change != nil {
 		s.logger.Info("ceiling changed",
-			"namespace", consumer.Namespace, "scaledobject", consumer.ScaledObject,
+			"namespace", consumer.Namespace, "scaledobject", consumer.ScaledObject, "trigger", consumer.Trigger,
 			"bucket", consumer.Bucket.Provider+"/"+consumer.Bucket.Model, "credential", consumer.Bucket.Key,
 			"from", from, "to", change.value, "mode", string(change.mode), "reason", change.reason,
 			"allowed_rate", change.allowedRate, "pod_rate", change.podRate)

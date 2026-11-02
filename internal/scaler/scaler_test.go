@@ -353,6 +353,26 @@ func TestGetMetrics(t *testing.T) {
 		}
 	})
 
+	t.Run("keeps the ceiling of a trigger apart from a caller that sends other metadata for the same scaled object", func(t *testing.T) {
+		f := newFixture(t)
+		f.observe(bucketA, 900, 500000)
+		if got := metric(t, f, capMetadata()); got != 4 {
+			t.Fatalf("ceiling = %d, want 4 before the other caller", got)
+		}
+		other := capMetadata()
+		other["maxReplicas"] = "1"
+
+		if got := metric(t, f, other); got != 1 {
+			t.Fatalf("ceiling = %d, want the other caller clamped to its own maxReplicas", got)
+		}
+		if got := metric(t, f, capMetadata()); got != 4 {
+			t.Fatalf("ceiling = %d, want the trigger's own ceiling untouched by the other caller", got)
+		}
+		if ceilings := f.store.Ceilings(); len(ceilings) != 2 || ceilings[0].Consumer.Trigger == ceilings[1].Consumer.Trigger {
+			t.Fatalf("recorded = %+v, want one entry per trigger", ceilings)
+		}
+	})
+
 	t.Run("queue mode returns the demand when it is below the ceiling", func(t *testing.T) {
 		f := newFixture(t)
 		f.observe(bucketA, 900, 500000)
@@ -573,8 +593,8 @@ func TestAIMD(t *testing.T) {
 		if inflated != 10 || stillHeld != 10 {
 			t.Fatalf("ceilings = %d then %d, want the drain floor of 10 reported while the guarded bound of 2 stays recorded", inflated, stillHeld)
 		}
-		if ceiling, _ := f.store.Ceiling(state.Consumer{Namespace: "jobs", ScaledObject: "llm-workers", Bucket: bucketA}); ceiling.Bound != 2 {
-			t.Fatalf("bound = %d, want the halved value kept apart from the reported value", ceiling.Bound)
+		if ceilings := f.store.Ceilings(); len(ceilings) != 1 || ceilings[0].Bound != 2 {
+			t.Fatalf("ceilings = %+v, want the halved value kept apart from the reported value", ceilings)
 		}
 	})
 

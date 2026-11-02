@@ -195,8 +195,10 @@ single-trigger mode (quotaware reads the Redis list itself and returns the minim
 are in `deploy/examples/`. Single-trigger mode only reads the Redis addresses listed
 in `redisAddresses` (the `-redis-address` flag); any other `redisAddress` in trigger
 metadata is answered with PermissionDenied. Each quotaware serves at most
-`-max-scaled-objects` (1000) ScaledObjects; the rest get ResourceExhausted. The
-remaining knobs (`credential`, `safety`, `share`,
+`-max-scaled-objects` (1000) ScaledObjects; the rest get ResourceExhausted. Ceiling
+state is kept per ScaledObject and trigger metadata, so a caller on the gRPC port
+that sends other metadata for the same name gets its own entry and cannot move yours
+(ADR 0009). The remaining knobs (`credential`, `safety`, `share`,
 `maxStepUp`, `stepInterval`, `defaultCeiling`, `minReplicas`, `staleAfter`,
 `staleHard`, `window`) and their defaults are listed in `docs/SPEC.md`. A Grafana
 dashboard is in `deploy/grafana/`.

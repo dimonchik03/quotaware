@@ -149,6 +149,7 @@ func (b Bucket) Observation() headroom.Observation {
 type Consumer struct {
 	Namespace    string
 	ScaledObject string
+	Trigger      string
 	Bucket       Key
 }
 
@@ -264,6 +265,8 @@ func (c Consumer) less(other Consumer) bool {
 		return c.Namespace < other.Namespace
 	case c.ScaledObject != other.ScaledObject:
 		return c.ScaledObject < other.ScaledObject
+	case c.Trigger != other.Trigger:
+		return c.Trigger < other.Trigger
 	default:
 		return c.Bucket.less(other.Bucket)
 	}
