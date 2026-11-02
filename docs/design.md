@@ -28,9 +28,10 @@ other; `cmd/quotaware` wires them.
 
 ## Data flow
 
-1. A worker calls the provider through the proxy, which reads the model from the
-   request, hashes the credential and registers a call in flight for the bucket
-   `(provider, model, credential)`. A collector inside the worker observes the same
+1. A worker calls the provider through the proxy, which reads the body within a
+   deadline, reads the model from it, hashes the credential, registers a call in
+   flight for the bucket `(provider, model, credential)` and forwards the body as
+   replayable so the transport may retry a stale connection. A collector inside the worker observes the same
    call and posts it to `/v1/observe` afterwards; collector traffic therefore never
    counts as in flight and the drain guard only sees proxied calls.
 2. When the response arrives, the rate-limit headers are parsed into quotas. The body
@@ -38,10 +39,12 @@ other; `cmd/quotaware` wires them.
    of the body the usage object is extracted (JSON, the final OpenAI chunk, or
    Anthropic's `message_start` plus `message_delta`), inflated first when the provider
    compressed it.
-3. `state.Store.End` applies the sample: quotas replace the known windows, tokens per
-   call and latency are smoothed with an EWMA, counters move, the 429 window records
-   the response, and the call leaves the in-flight count exactly once, whether the
-   body reached EOF, the client went away or the upstream failed.
+3. `state.Store.End` applies the sample: the windows that parsed replace the known
+   ones even when another header was malformed, tokens per call and latency are
+   smoothed with an EWMA, counters move, the 429 window records the response, and the
+   call leaves the in-flight count exactly once. How the body ended decides the
+   counter: completed, abandoned by the client (an abort), or broken by the upstream
+   (an upstream error); a client that leaves before any response is an abort.
 4. KEDA asks the scaler for the ceiling of a ScaledObject. For every bucket that
    matches the trigger metadata, the scaler evaluates the domain under one lock per
    consumer: the headroom formula when a usable quota is known, AIMD otherwise, with
@@ -82,6 +85,15 @@ scaler once per bucket per poll, the metrics collector once per scrape. Ceilings
 updated with a closure under the same lock so KEDA's polling loop and the HPA sync
 cannot interleave. The in-memory store means one quotaware replica per cluster in
 v0.1; a shared backend is the planned step towards several.
+
+## Trust boundaries
+
+Nothing that arrives over the network is trusted on its own (ADR 0008). The
+observe endpoint needs a bearer token unless the operator opts out explicitly.
+Trigger metadata may only point single-trigger mode at Redis addresses the operator
+listed. The store caps the buckets and the ScaledObjects it tracks, counts what it
+refused, and the scaler bounds the names it accepts, so an unauthenticated caller
+can exhaust neither memory nor label cardinality.
 
 ## What is deliberately not here
 

@@ -21,4 +21,4 @@ For v0.1.0 and every release after it.
    `appVersion` bump for the next release.
 9. Install the chart from the tag against a kind cluster with the published image
    and run the demo ScaledObject once more.
-10. Announce with the two benchmark charts and the numbers table, nothing else.
+10. Announce with the benchmark charts and the numbers table, nothing else.

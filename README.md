@@ -91,7 +91,10 @@ records what it sees per `(provider, model, credential hash)`. Point your worker
     quotaware proxy -listen :8080 -admin :9100
 
 `-openai-upstream` and `-anthropic-upstream` default to the public APIs. The admin
-port serves `/metrics` and `/healthz`.
+port serves `/metrics`, `/healthz` and `/v1/observe`; the last one needs a token (see
+below). A client that stalls while sending a request body gets 408 after
+`-read-body-timeout` (30 s); the buffered body is handed to the transport as
+replayable, so a stale pooled connection is retried instead of answered with 502.
 
 To see it work without a provider account, `docker compose up --build` starts the
 proxy in front of `bench/fakeprovider`, a provider stand-in with real rate-limit
@@ -124,9 +127,12 @@ three requests per minute:
 
 What the proxy records per bucket: the limit, remaining and reset of every window
 the provider reports, a smoothed tokens-per-call and latency over successful calls,
-calls in flight, 429s with their `retry-after`, upstream failures, streams the client
-abandoned, and how often headers were missing or malformed or usage was absent.
-Buckets that see no traffic for ten minutes are dropped. Tokens per call count what the provider charges against the quota: prompt
+calls in flight, 429s with their `retry-after`, upstream failures (including a body
+that broke mid-stream), streams the client abandoned, and how often headers were
+missing or malformed or usage was absent. A malformed header spoils only its own
+window; the windows that parsed still count. Buckets that see no traffic for ten
+minutes are dropped, and at most `-max-buckets` (10000) are tracked: calls on new
+buckets beyond that are counted in `quotaware_buckets_rejected_total` and ignored. Tokens per call count what the provider charges against the quota: prompt
 plus completion tokens for OpenAI, uncached input plus cache writes plus output for
 Anthropic. Usage comes from the response body, so OpenAI streams only report it when
 the client sets `stream_options.include_usage`; a stream without it is counted in
@@ -139,7 +145,13 @@ The chart runs `quotaware all`: the proxy, the metrics endpoint and the KEDA
 external scaler in one pod, from the image `ghcr.io/dimonchik03/quotaware` that
 every release publishes for linux/amd64 and linux/arm64:
 
-    helm install quotaware deploy/helm/quotaware -n llm --create-namespace
+    helm install quotaware deploy/helm/quotaware -n llm --create-namespace \
+      --set observe.token="$(openssl rand -hex 16)"
+
+The chart refuses to render without `observe.token`, `observe.existingSecret` or an
+explicit `observe.insecure=true`. The proxy, gRPC and admin ports carry no
+authentication of their own: keep them inside the cluster and restrict them with a
+NetworkPolicy to the workers, KEDA and Prometheus.
 
 Point your workers at `http://quotaware.llm.svc:8080` and add the ceiling as a second
 trigger next to your queue trigger. KEDA takes the largest value across triggers, so
@@ -174,7 +186,11 @@ exhausted quota with `minReplicaCount: 0` scales to zero; keep `minReplicaCount`
 one or more when the workers must stay warm. If quotaware is unreachable the HPA
 keeps the current replica count. Full manifests for this mode and for the
 single-trigger mode (quotaware reads the Redis list itself and returns the minimum)
-are in `deploy/examples/`; the remaining knobs (`credential`, `safety`, `share`,
+are in `deploy/examples/`. Single-trigger mode only reads the Redis addresses listed
+in `redisAddresses` (the `-redis-address` flag); any other `redisAddress` in trigger
+metadata is answered with PermissionDenied. Each quotaware serves at most
+`-max-scaled-objects` (1000) ScaledObjects; the rest get ResourceExhausted. The
+remaining knobs (`credential`, `safety`, `share`,
 `maxStepUp`, `stepInterval`, `defaultCeiling`, `minReplicas`, `staleAfter`,
 `staleHard`, `window`) and their defaults are listed in `docs/SPEC.md`. A Grafana
 dashboard is in `deploy/grafana/`.
@@ -184,9 +200,10 @@ dashboard is in `deploy/grafana/`.
 Workers that cannot or should not route through the proxy can report what they
 see themselves. Both collectors post the same observation to `POST /v1/observe` on
 the admin port and never block or fail the call they observe: a full queue drops, a
-failed delivery is counted, an error inside the hook is counted. Start quotaware
-with `-observe-token` (or `QUOTAWARE_OBSERVE_TOKEN`) and give the collectors the
-same token whenever the admin port is reachable beyond the namespace.
+failed delivery is counted, an error inside the hook is counted. quotaware refuses
+to start without `-observe-token` (or `QUOTAWARE_OBSERVE_TOKEN`) unless
+`-observe-insecure` is passed, because anyone who can post an observation can move
+the ceiling; give the collectors the same token.
 
     import "github.com/dimonchik03/quotaware/collector"
 
@@ -200,9 +217,10 @@ same token whenever the admin port is reachable beyond the namespace.
     client = httpx.Client(base_url="https://api.openai.com", event_hooks=hook.hooks())
 
 The Python hook is one module in `collector/python/` with a `pyproject.toml`; copy
-the file or `pip install ./collector/python`. It reads usage from JSON responses and
-records streams without usage; collector traffic is not counted as in flight, so the
-drain guard only sees proxied calls (ADR 0007).
+the file or `pip install ./collector/python`. It reads usage from JSON responses;
+a stream is observed when it is closed, with the latency measured to the end and
+`complete` false if the caller abandoned it. Collector traffic is not counted as in
+flight, so the drain guard only sees proxied calls (ADR 0007).
 
 ## When the headers are missing
 
