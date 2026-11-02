@@ -9,6 +9,10 @@ results="${BENCH_RESULTS:-bench/results/$(date +%Y-%m-%d)}"
 concurrency=2
 step=15
 local_port=19095
+commit=$(git rev-parse HEAD)
+dirty=false
+if [ -n "$(git status --porcelain --untracked-files=no)" ]; then dirty=true; fi
+rpm=$(grep -o '"-rpm", "[0-9]*"' bench/kind/manifests/10-fakeprovider.yaml | grep -o '[0-9]*')
 
 ensure_cluster
 build_and_load worker producer
@@ -46,7 +50,7 @@ stop_forward() {
 trap stop_forward EXIT
 
 export_series() {
-  local dir=$1 start=$2 end=$3 window=$4
+  local dir=$1 start=$2 end=$3 window=$4 label=$5
   kubectl -n "$namespace" port-forward svc/prometheus "$local_port:9090" >/dev/null 2>&1 &
   forward_pid=$!
   for i in $(seq 1 30); do
@@ -73,17 +77,18 @@ export_series() {
   instant jobs_total 'max_over_time(producer_jobs_total['"$window"'s])'
   instant completed_total 'sum(max_over_time(worker_jobs_completed_total['"$window"'s]))'
   instant failed_total 'sum(max_over_time(worker_jobs_failed_total['"$window"'s]))'
+  instant abandoned_total 'sum(max_over_time(worker_jobs_abandoned_total['"$window"'s]))'
   instant rate_limited_total 'sum(max_over_time(worker_calls_total{status="429"}['"$window"'s]))'
   instant retries_total 'sum(max_over_time(worker_retries_total['"$window"'s]))'
   instant backoff_seconds_total 'sum(max_over_time(worker_backoff_seconds_total['"$window"'s]))'
   instant latency_p50 'histogram_quantile(0.5, sum(max_over_time(worker_job_latency_seconds_bucket['"$window"'s])) by (le))'
   instant latency_p95 'histogram_quantile(0.95, sum(max_over_time(worker_job_latency_seconds_bucket['"$window"'s])) by (le))'
-  printf '{"start":%s,"end":%s}\n' "$start" "$end" > "$dir/run.json"
+  printf '{"start":%s,"end":%s,"label":"%s","commit":"%s","dirty":%s}\n' "$start" "$end" "$label" "$commit" "$dirty" > "$dir/run.json"
   stop_forward
 }
 
 run_variant() {
-  local name=$1 manifest=$2
+  local name=$1 manifest=$2 label=$3
   local dir="$results/$name"
   mkdir -p "$dir"
   log "run $name: $manifest, schedule ${schedule_seconds}s"
@@ -103,18 +108,23 @@ run_variant() {
   kubectl -n "$namespace" wait --for=condition=complete job/producer --timeout "$(( schedule_seconds + 1200 ))s" >/dev/null
   end=$(date -u +%s)
   log "run $name finished after $(( end - start ))s, exporting series"
-  export_series "$dir" "$start" "$end" "$(( end - start ))"
+  export_series "$dir" "$start" "$end" "$(( end - start ))" "$label"
 }
 
-run_variant A bench/manifests/scaledobject-a.yaml
-run_variant B bench/manifests/scaledobject-b.yaml
+run_variant A bench/manifests/scaledobject-a.yaml "queue trigger"
+run_variant B bench/manifests/scaledobject-b.yaml "queue trigger + quotaware, safety 0.85"
+run_variant C bench/manifests/scaledobject-c.yaml "queue trigger + quotaware, safety 1"
 
 log "plotting"
 go run ./bench/cmd/plot -results "$results" -concurrency "$concurrency" >/dev/null
 {
   echo "# quotaware benchmark $(basename "$results")"
   echo
-  echo "Schedule \`$phases\` against a fake provider limited to 600 requests per minute, two calls in flight per worker pod, the same seed for both runs."
+  echo "Schedule \`$phases\` against a fake provider limited to $rpm requests per minute, two calls in flight per worker pod, the same job schedule and prompt sizes for every run (producer seed 1). Built from commit \`$commit\`$([ "$dirty" = true ] && echo ' with uncommitted changes')."
+  echo
+  echo "- A: the KEDA Redis list trigger alone, ten jobs per replica, 1 to 30 pods."
+  echo "- B: the same trigger capped by the quotaware ceiling at the default safety factor 0.85."
+  echo "- C: the same cap with \`safety: \"1\"\`, so the ceiling is the full quota."
   echo
   echo "![replicas](replicas.svg)"
   echo

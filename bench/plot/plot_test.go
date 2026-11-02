@@ -106,7 +106,7 @@ func TestReport(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	report := plot.Build(baseline, capped, 2)
+	report := plot.Build(baseline, []plot.Run{capped}, 2)
 
 	t.Run("loads series and totals from Prometheus responses", func(t *testing.T) {
 		if len(baseline.Series["replicas"]) != 5 || baseline.Totals["rate_limited_total"] != 500 {
@@ -122,7 +122,7 @@ func TestReport(t *testing.T) {
 
 	t.Run("summarises both runs in a table", func(t *testing.T) {
 		table := report.Markdown()
-		for _, want := range []string{"| 429 responses | 500 | 0 |", "| Peak replicas | 12 | 8 |", "| Idle pod-seconds (in backoff) | 420 | 0 |", "| Job latency p95 | 60.0 s | 40.0 s |", "| Time to drain the burst | 60 s | 60 s |", "| Time to react after the first 429 | n/a (no ceiling) | no 429 observed |"} {
+		for _, want := range []string{"| Metric | A | B |", "| 429 responses | 500 | 0 |", "| Peak replicas | 12 | 8 |", "| Idle pod-seconds (in backoff) | 420 | 0 |", "| Job latency p95 | 60.0 s | 40.0 s |", "| Time to drain the burst | 60 s | 60 s |", "| Jobs unaccounted for | 0 | 0 |"} {
 			if !strings.Contains(table, want) {
 				t.Fatalf("table lacks %q:\n%s", want, table)
 			}
@@ -132,6 +132,38 @@ func TestReport(t *testing.T) {
 	t.Run("integrates pod-seconds under the replica curve", func(t *testing.T) {
 		if !strings.Contains(report.Markdown(), "| Pod-seconds | 2070 | 1470 |") {
 			t.Fatalf("table:\n%s", report.Markdown())
+		}
+	})
+
+	t.Run("lays out one column per capped run and names runs by their label", func(t *testing.T) {
+		writeRunAt(t, root, "C", start.Add(60*time.Minute),
+			shift([][2]float64{{at(0), 1}, {at(60), 5}, {at(120), 10}, {at(180), 10}, {at(240), 10}}, 3600),
+			shift([][2]float64{{at(0), 0}, {at(60), 0}, {at(120), 20}, {at(180), 0}, {at(240), 0}}, 3600),
+			shift([][2]float64{{at(0), 0}, {at(60), 10}, {at(120), 450}, {at(180), 100}, {at(240), 0}}, 3600),
+			shift(multiplier, 3600),
+			shift([][2]float64{{at(0), 1}, {at(60), 10}, {at(120), 10}, {at(180), 10}, {at(240), 10}}, 3600),
+			map[string]float64{"jobs_total": 900, "completed_total": 880, "failed_total": 0, "abandoned_total": 5, "rate_limited_total": 40, "retries_total": 40, "latency_p50": 13, "latency_p95": 45, "backoff_seconds_total": 10})
+		if err := os.WriteFile(filepath.Join(root, "C", "run.json"), []byte(`{"start":`+strconvFloat(float64(start.Add(60*time.Minute).Unix()))+`,"end":`+strconvFloat(float64(start.Add(64*time.Minute).Unix()))+`,"label":"safety 1","commit":"abc1234"}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		third, err := plot.LoadRun(filepath.Join(root, "C"))
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		wide := plot.Build(baseline, []plot.Run{capped, third}, 2)
+
+		if third.Commit != "abc1234" || third.Title() != "C (safety 1)" {
+			t.Fatalf("run = %+v, want the commit and the label loaded", third)
+		}
+		table := wide.Markdown()
+		for _, want := range []string{"| Metric | A | B | C (safety 1) |", "| 429 responses | 500 | 0 | 40 |", "| Jobs abandoned on shutdown | 0 | 0 | 5 |", "| Jobs unaccounted for | 0 | 0 | 15 |"} {
+			if !strings.Contains(table, want) {
+				t.Fatalf("table lacks %q:\n%s", want, table)
+			}
+		}
+		if svg := wide.Charts()["replicas.svg"]; strings.Count(svg, "<path") != 5 {
+			t.Fatalf("replica chart has %d lines, want replicas for three runs and ceilings for two", strings.Count(svg, "<path"))
 		}
 	})
 

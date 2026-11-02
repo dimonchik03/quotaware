@@ -21,10 +21,20 @@ type Series []Point
 
 type Run struct {
 	Name   string
+	Label  string
+	Commit string
+	Dirty  bool
 	Start  time.Time
 	End    time.Time
 	Series map[string]Series
 	Totals map[string]float64
+}
+
+func (r Run) Title() string {
+	if r.Label == "" {
+		return r.Name
+	}
+	return r.Name + " (" + r.Label + ")"
 }
 
 type response struct {
@@ -45,13 +55,17 @@ func LoadRun(dir string) (Run, error) {
 		return Run{}, err
 	}
 	var bounds struct {
-		Start int64 `json:"start"`
-		End   int64 `json:"end"`
+		Start  int64  `json:"start"`
+		End    int64  `json:"end"`
+		Label  string `json:"label"`
+		Commit string `json:"commit"`
+		Dirty  bool   `json:"dirty"`
 	}
 	if err := json.Unmarshal(window, &bounds); err != nil {
 		return Run{}, fmt.Errorf("run.json: %w", err)
 	}
 	run.Start, run.End = time.Unix(bounds.Start, 0).UTC(), time.Unix(bounds.End, 0).UTC()
+	run.Label, run.Commit, run.Dirty = bounds.Label, bounds.Commit, bounds.Dirty
 	files, err := filepath.Glob(filepath.Join(dir, "*.json"))
 	if err != nil {
 		return Run{}, err
@@ -170,15 +184,6 @@ func (s Series) FirstAtOrBelow(threshold float64, after time.Time) (time.Time, b
 	for _, p := range s {
 		if !p.At.Before(after) && p.Value <= threshold {
 			return p.At, true
-		}
-	}
-	return time.Time{}, false
-}
-
-func (s Series) FirstDropAfter(after time.Time) (time.Time, bool) {
-	for i := 1; i < len(s); i++ {
-		if !s[i].At.Before(after) && s[i].Value < s[i-1].Value {
-			return s[i].At, true
 		}
 	}
 	return time.Time{}, false
