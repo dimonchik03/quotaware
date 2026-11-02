@@ -44,7 +44,7 @@ Detailed rules live in `.claude/rules`. The short version:
 - Format: `gofmt -l -w .` (the Claude Code hook applies it on every edited Go file)
 - End to end through Docker Compose: `make e2e` (builds both images, runs the scenario in `e2e/`, tears down)
 - KEDA demo on kind: `make demo` (own kubeconfig under `bench/kind/`, never your default context), `make demo-down`
-- Benchmark: `make bench` (available from milestone 4)
+- Benchmark on kind: `make bench` (two runs, queue trigger versus queue trigger capped by quotaware, results under `bench/results/<date>/`), `make bench-smoke` for a two-minute schedule
 
 Never run two heavy commands (tests, lint, kind) at the same time on this machine.
 

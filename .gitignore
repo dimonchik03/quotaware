@@ -15,3 +15,4 @@ CLAUDE.local.md
 coverage.out
 /quotaware
 bench/kind/.kubeconfig
+bench/results/smoke/

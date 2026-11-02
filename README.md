@@ -13,6 +13,34 @@ Queue-depth autoscaling past the provider's RPM/TPM limit is a feedback loop: mo
 pods, more 429s, more backoff, longer queue, more pods. The headers to stop it are on
 every response; nothing wires them to the autoscaler.
 
+## What it changes
+
+Same queue, same fake provider limited to 600 requests per minute, same seed. Run A
+scales on queue depth alone; run B caps the same trigger with the quotaware ceiling.
+
+![worker replicas](bench/results/2026-11-01/replicas.svg)
+
+![429 responses per minute](bench/results/2026-11-01/rate_limits.svg)
+
+| Metric | A (queue trigger) | B (queue trigger + quotaware) |
+|---|---|---|
+| Jobs produced | 9900 | 9900 |
+| Jobs completed | 9848 | 9875 |
+| Jobs failed | 0 | 0 |
+| 429 responses | 1140 | 0 |
+| Retries | 1140 | 0 |
+| Peak 429 per minute | 111 | 0 |
+| Job latency p50 | 157.9 s | 263.4 s |
+| Job latency p95 | 454.8 s | 689.3 s |
+| Peak replicas | 30 | 8 |
+| Pod-seconds | 23700 | 9945 |
+| Idle pod-seconds (in backoff) | 13681 | 0 |
+| Time to drain the burst | 465 s | 720 s |
+| Time to react after the first 429 | n/a (no ceiling) | no 429 observed |
+
+`make bench` reproduces both runs on a laptop; `docs/benchmark.md` describes the
+setup, the hypothesis written before the first run and how each number is measured.
+
 ## How it works
 
 1. `quotaware proxy` sits in front of the provider and records rate-limit headers,
