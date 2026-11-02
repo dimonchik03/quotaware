@@ -8,17 +8,27 @@ import (
 	"testing"
 )
 
+const observation = `{"provider":"anthropic","model":"claude-observed","credential":"e2e0e2e0e2e0","status":200,"headers":{"anthropic-ratelimit-requests-limit":"50","anthropic-ratelimit-requests-remaining":"49","anthropic-ratelimit-requests-reset":"2030-01-01T00:00:00Z"},"usage":120,"latency_ms":900,"complete":true}`
+
+func observeRequest(t *testing.T, adminURL, token string) *http.Request {
+	t.Helper()
+	request, err := http.NewRequest(http.MethodPost, adminURL+"/v1/observe", strings.NewReader(observation))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	if token != "" {
+		request.Header.Set("Authorization", "Bearer "+token)
+	}
+	return request
+}
+
 func TestObserveEndpointAgainstTheBuiltImage(t *testing.T) {
 	proxyURL := env("E2E_PROXY_URL", "http://localhost:18080")
 	adminURL := env("E2E_ADMIN_URL", "http://localhost:19100")
 	waitUntilReady(t, proxyURL, adminURL)
 
-	request, err := http.NewRequest(http.MethodPost, adminURL+"/v1/observe", strings.NewReader(`{"provider":"anthropic","model":"claude-observed","credential":"e2e0e2e0e2e0","status":200,"headers":{"anthropic-ratelimit-requests-limit":"50","anthropic-ratelimit-requests-remaining":"49","anthropic-ratelimit-requests-reset":"2030-01-01T00:00:00Z"},"usage":120,"latency_ms":900,"complete":true}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	request.Header.Set("Content-Type", "application/json")
-	response, err := client.Do(request)
+	response, err := client.Do(observeRequest(t, adminURL, ""))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -27,8 +37,7 @@ func TestObserveEndpointAgainstTheBuiltImage(t *testing.T) {
 		t.Fatalf("status without a token = %d, want 401", response.StatusCode)
 	}
 
-	request.Header.Set("Authorization", "Bearer "+env("E2E_OBSERVE_TOKEN", "e2e-observe-token"))
-	response, err = client.Do(request)
+	response, err = client.Do(observeRequest(t, adminURL, env("E2E_OBSERVE_TOKEN", "e2e-observe-token")))
 	if err != nil {
 		t.Fatal(err)
 	}
