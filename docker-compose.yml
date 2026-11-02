@@ -16,6 +16,8 @@ services:
       - -grpc=:9090
       - -openai-upstream=http://fakeprovider:8081
       - -anthropic-upstream=http://fakeprovider:8081
+    environment:
+      QUOTAWARE_OBSERVE_TOKEN: e2e-observe-token
     ports:
       - "18080:8080"
       - "19090:9090"

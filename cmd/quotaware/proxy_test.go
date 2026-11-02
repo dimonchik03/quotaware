@@ -21,7 +21,7 @@ func TestNewServerBoundsHeaderReadsAndIdleConnections(t *testing.T) {
 
 func TestObserverFlags(t *testing.T) {
 	t.Run("accepts origins and fills the defaults", func(t *testing.T) {
-		options, err := parseObserverFlags("proxy", []string{"-openai-upstream", "http://fakeprovider:8081"}, &bytes.Buffer{}, false)
+		options, err := parseObserverFlags("proxy", []string{"-openai-upstream", "http://fakeprovider:8081", "-observe-insecure"}, &bytes.Buffer{}, false)
 
 		if err != nil {
 			t.Fatal(err)
@@ -32,10 +32,32 @@ func TestObserverFlags(t *testing.T) {
 		if options.listen != ":8080" || options.admin != ":9100" || options.alpha != 0.2 {
 			t.Fatalf("options = %+v, want the documented defaults", options)
 		}
+		if options.limits.Buckets != 10000 || options.limits.Consumers != 1000 {
+			t.Fatalf("limits = %+v, want the documented defaults", options.limits)
+		}
+	})
+
+	t.Run("refuses to start without an observe token unless insecure is explicit", func(t *testing.T) {
+		_, err := parseObserverFlags("proxy", nil, &bytes.Buffer{}, false)
+
+		if err == nil || !strings.Contains(err.Error(), "observe-insecure") {
+			t.Fatalf("err = %v, want a refusal naming the insecure flag", err)
+		}
+	})
+
+	t.Run("accepts a token from the flag and reads the limits", func(t *testing.T) {
+		options, err := parseObserverFlags("proxy", []string{"-observe-token", "secret", "-max-buckets", "50", "-max-scaled-objects", "5"}, &bytes.Buffer{}, false)
+
+		if err != nil {
+			t.Fatal(err)
+		}
+		if options.observeToken != "secret" || options.limits.Buckets != 50 || options.limits.Consumers != 5 {
+			t.Fatalf("options = %+v, want the token and the limits", options)
+		}
 	})
 
 	t.Run("reads the body timeout flag", func(t *testing.T) {
-		options, err := parseObserverFlags("proxy", []string{"-read-body-timeout", "5s"}, &bytes.Buffer{}, false)
+		options, err := parseObserverFlags("proxy", []string{"-read-body-timeout", "5s", "-observe-insecure"}, &bytes.Buffer{}, false)
 
 		if err != nil {
 			t.Fatal(err)
@@ -46,7 +68,7 @@ func TestObserverFlags(t *testing.T) {
 	})
 
 	t.Run("adds the grpc address for the all command", func(t *testing.T) {
-		options, err := parseObserverFlags("all", []string{"-grpc", ":9999"}, &bytes.Buffer{}, true)
+		options, err := parseObserverFlags("all", []string{"-grpc", ":9999", "-observe-insecure"}, &bytes.Buffer{}, true)
 
 		if err != nil {
 			t.Fatal(err)
@@ -99,7 +121,7 @@ func TestObserverFlags(t *testing.T) {
 	t.Run("exits with 2 on an invalid alpha", func(t *testing.T) {
 		var stderr bytes.Buffer
 
-		code := run([]string{"all", "-ewma-alpha", "2"}, strings.NewReader(""), &bytes.Buffer{}, &stderr)
+		code := run([]string{"all", "-ewma-alpha", "2", "-observe-insecure"}, strings.NewReader(""), &bytes.Buffer{}, &stderr)
 
 		if code != 2 || !strings.Contains(stderr.String(), "alpha") {
 			t.Fatalf("exit = %d, stderr = %q, want 2 naming alpha", code, stderr.String())

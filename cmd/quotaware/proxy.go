@@ -31,25 +31,30 @@ const (
 )
 
 type observerOptions struct {
-	listen       string
-	admin        string
-	grpc         string
-	alpha        float64
-	pushInterval time.Duration
-	observeToken string
-	proxy        proxy.Config
+	listen          string
+	admin           string
+	grpc            string
+	alpha           float64
+	limits          state.Limits
+	pushInterval    time.Duration
+	observeToken    string
+	observeInsecure bool
+	proxy           proxy.Config
 }
 
 func parseObserverFlags(command string, args []string, stderr io.Writer, withScaler bool) (observerOptions, error) {
 	flags := flag.NewFlagSet("quotaware "+command, flag.ContinueOnError)
 	flags.SetOutput(stderr)
-	options := observerOptions{proxy: proxy.DefaultConfig(), pushInterval: scaler.DefaultConfig().PushInterval}
+	options := observerOptions{proxy: proxy.DefaultConfig(), pushInterval: scaler.DefaultConfig().PushInterval, limits: state.DefaultLimits()}
 	openAI := flags.String("openai-upstream", "https://api.openai.com", "origin of the OpenAI API, without a path")
 	anthropic := flags.String("anthropic-upstream", "https://api.anthropic.com", "origin of the Anthropic API, without a path")
 	flags.StringVar(&options.listen, "listen", ":8080", "address the proxy listens on")
 	flags.StringVar(&options.admin, "admin", ":9100", "address that serves /metrics and /healthz")
 	flags.Float64Var(&options.alpha, "ewma-alpha", 0.2, "weight of the newest sample in the smoothed averages")
-	flags.StringVar(&options.observeToken, "observe-token", os.Getenv("QUOTAWARE_OBSERVE_TOKEN"), "bearer token collectors must present on /v1/observe (empty accepts anyone)")
+	flags.StringVar(&options.observeToken, "observe-token", os.Getenv("QUOTAWARE_OBSERVE_TOKEN"), "bearer token collectors must present on /v1/observe")
+	flags.BoolVar(&options.observeInsecure, "observe-insecure", false, "accept observations on /v1/observe without a token")
+	flags.IntVar(&options.limits.Buckets, "max-buckets", options.limits.Buckets, "most (provider, model, credential) buckets tracked at once")
+	flags.IntVar(&options.limits.Consumers, "max-scaled-objects", options.limits.Consumers, "most scaled objects served a ceiling at once")
 	flags.Int64Var(&options.proxy.MaxRequestBytes, "max-request-bytes", options.proxy.MaxRequestBytes, "largest request body accepted")
 	flags.Int64Var(&options.proxy.MaxCaptureBytes, "max-capture-bytes", options.proxy.MaxCaptureBytes, "largest response body inspected for usage")
 	flags.DurationVar(&options.proxy.ReadBodyTimeout, "read-body-timeout", options.proxy.ReadBodyTimeout, "how long a client may take to send a request body")
@@ -75,6 +80,9 @@ func parseObserverFlags(command string, args []string, stderr io.Writer, withSca
 	}
 	if options.proxy.Anthropic, err = parseOrigin(*anthropic); err != nil {
 		return observerOptions{}, fmt.Errorf("anthropic-upstream: %w", err)
+	}
+	if options.observeToken == "" && !options.observeInsecure {
+		return observerOptions{}, errors.New("observe token is required: set -observe-token or QUOTAWARE_OBSERVE_TOKEN, or pass -observe-insecure to accept unauthenticated observations")
 	}
 	return options, nil
 }
@@ -113,7 +121,7 @@ func runObserver(command string, args []string, stderr io.Writer, withScaler boo
 	}
 	logger := slog.New(slog.NewTextHandler(stderr, nil))
 	options.proxy.Logger = logger
-	store, err := state.New(options.alpha)
+	store, err := state.NewWithLimits(options.alpha, options.limits)
 	if err != nil {
 		fmt.Fprintf(stderr, "quotaware %s: %v\n", command, err)
 		return 2

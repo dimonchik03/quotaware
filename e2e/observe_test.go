@@ -23,6 +23,16 @@ func TestObserveEndpointAgainstTheBuiltImage(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = response.Body.Close()
+	if response.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status without a token = %d, want 401", response.StatusCode)
+	}
+
+	request.Header.Set("Authorization", "Bearer "+env("E2E_OBSERVE_TOKEN", "e2e-observe-token"))
+	response, err = client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = response.Body.Close()
 
 	if response.StatusCode != http.StatusAccepted {
 		t.Fatalf("status = %d, want 202", response.StatusCode)
