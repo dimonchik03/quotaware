@@ -156,8 +156,12 @@ every release publishes for linux/amd64 and linux/arm64:
 
 The chart refuses to render without `observe.token`, `observe.existingSecret` or an
 explicit `observe.insecure=true`. The proxy, gRPC and admin ports carry no
-authentication of their own: keep them inside the cluster and restrict them with a
-NetworkPolicy to the workers, KEDA and Prometheus.
+authentication of their own, so the chart ships a NetworkPolicy, on by default, that
+admits KEDA's operator from the `keda` namespace to the gRPC port and the release
+namespace to the proxy and admin ports. Set `networkPolicy.keda.namespace` when KEDA
+runs elsewhere, and list workers or Prometheus from other namespaces as peers under
+`networkPolicy.proxyFrom` and `networkPolicy.adminFrom`; a CNI that does not enforce
+policies ignores it (ADR 0009).
 
 Point your workers at `http://quotaware.llm.svc:8080` and add the ceiling as a second
 trigger next to your queue trigger. KEDA takes the largest value across triggers, so

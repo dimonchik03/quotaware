@@ -22,6 +22,15 @@ observe:
   secretKey: observe-token
   insecure: false
 
+networkPolicy:
+  enabled: true
+  keda:
+    namespace: keda
+    podSelector:
+      app: keda-operator
+  proxyFrom: []
+  adminFrom: []
+
 extraArgs: []
 
 resources:
