@@ -1,0 +1,111 @@
+package proxy
+
+import (
+	"crypto/subtle"
+	"encoding/json"
+	"errors"
+	"io"
+	"log/slog"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/dimonchik03/quotaware/internal/headers"
+	"github.com/dimonchik03/quotaware/internal/state"
+	"github.com/dimonchik03/quotaware/internal/usage"
+)
+
+type Observer struct {
+	store    *state.Store
+	now      func() time.Time
+	maxBytes int64
+	token    string
+	logger   *slog.Logger
+}
+
+func NewObserver(store *state.Store, now func() time.Time, maxBytes int64, token string, logger *slog.Logger) (*Observer, error) {
+	if store == nil || now == nil || logger == nil || maxBytes <= 0 {
+		return nil, errors.New("store, clock, logger and a positive size limit are required")
+	}
+	return &Observer{store: store, now: now, maxBytes: maxBytes, token: token, logger: logger}, nil
+}
+
+func (o *Observer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if !o.authorized(r) {
+		writeError(w, http.StatusUnauthorized, "observe token missing or wrong")
+		return
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, o.maxBytes+1))
+	if err != nil || int64(len(body)) > o.maxBytes {
+		writeError(w, http.StatusRequestEntityTooLarge, "observation too large")
+		return
+	}
+	var observation usage.Observation
+	if err := json.Unmarshal(body, &observation); err != nil {
+		writeError(w, http.StatusBadRequest, "observation is not valid JSON")
+		return
+	}
+	if err := observation.Validate(); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	provider := headers.Provider(observation.Provider)
+	now := o.now()
+	h := http.Header{}
+	for name, value := range observation.Headers {
+		h.Set(name, value)
+	}
+	quotas, status := parseLimits(o.logger, provider, observation.Model, h, now)
+	retryAfter, err := headers.RetryAfter(h, now)
+	if err != nil {
+		o.logger.Warn("retry-after malformed", "provider", provider, "model", observation.Model, "error", err.Error())
+		retryAfter = 0
+	}
+	sample := state.Sample{
+		Status:     observation.Status,
+		Complete:   observation.Complete,
+		Headers:    status,
+		Quotas:     quotas,
+		Latency:    time.Duration(observation.LatencyMS * float64(time.Millisecond)),
+		RetryAfter: retryAfter,
+		At:         now,
+	}
+	if observation.Usage != nil && *observation.Usage > 0 {
+		sample.HasUsage, sample.Usage = true, *observation.Usage
+	}
+	key := state.Key{Provider: string(provider), Model: observation.Model, Key: observation.Credential}
+	o.store.Begin(key, now)
+	o.store.End(key, sample)
+	w.WriteHeader(http.StatusAccepted)
+}
+
+func (o *Observer) authorized(r *http.Request) bool {
+	if o.token == "" {
+		return true
+	}
+	presented := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	return subtle.ConstantTimeCompare([]byte(presented), []byte(o.token)) == 1
+}
+
+func parseLimits(logger *slog.Logger, provider headers.Provider, model string, h http.Header, now time.Time) (state.Quotas, state.HeadersStatus) {
+	limits, err := headers.Parse(provider, h, now)
+	switch {
+	case err == nil:
+		return quotasOf(limits), state.HeadersPresent
+	case errors.Is(err, headers.ErrMissing):
+		return state.Quotas{}, state.HeadersMissing
+	default:
+		logger.Warn("rate-limit headers malformed", "provider", provider, "model", model, "error", err.Error())
+		return state.Quotas{}, state.HeadersMalformed
+	}
+}
+
+func quotasOf(limits headers.Limits) state.Quotas {
+	return state.Quotas{
+		Requests:      limits.Requests.Quota(),
+		Tokens:        limits.Tokens.Quota(),
+		ProjectTokens: limits.ProjectTokens.Quota(),
+		InputTokens:   limits.InputTokens.Quota(),
+		OutputTokens:  limits.OutputTokens.Quota(),
+	}
+}

@@ -22,6 +22,7 @@ import (
 	"github.com/dimonchik03/quotaware/internal/queue"
 	"github.com/dimonchik03/quotaware/internal/scaler"
 	"github.com/dimonchik03/quotaware/internal/state"
+	"github.com/dimonchik03/quotaware/internal/usage"
 )
 
 const (
@@ -35,6 +36,7 @@ type observerOptions struct {
 	grpc         string
 	alpha        float64
 	pushInterval time.Duration
+	observeToken string
 	proxy        proxy.Config
 }
 
@@ -47,6 +49,7 @@ func parseObserverFlags(command string, args []string, stderr io.Writer, withSca
 	flags.StringVar(&options.listen, "listen", ":8080", "address the proxy listens on")
 	flags.StringVar(&options.admin, "admin", ":9100", "address that serves /metrics and /healthz")
 	flags.Float64Var(&options.alpha, "ewma-alpha", 0.2, "weight of the newest sample in the smoothed averages")
+	flags.StringVar(&options.observeToken, "observe-token", os.Getenv("QUOTAWARE_OBSERVE_TOKEN"), "bearer token collectors must present on /v1/observe (empty accepts anyone)")
 	flags.Int64Var(&options.proxy.MaxRequestBytes, "max-request-bytes", options.proxy.MaxRequestBytes, "largest request body accepted")
 	flags.Int64Var(&options.proxy.MaxCaptureBytes, "max-capture-bytes", options.proxy.MaxCaptureBytes, "largest response body inspected for usage")
 	if withScaler {
@@ -119,8 +122,14 @@ func runObserver(command string, args []string, stderr io.Writer, withScaler boo
 		fmt.Fprintf(stderr, "quotaware %s: %v\n", command, err)
 		return 2
 	}
+	observer, err := proxy.NewObserver(store, time.Now, 64<<10, options.observeToken, logger)
+	if err != nil {
+		fmt.Fprintf(stderr, "quotaware %s: %v\n", command, err)
+		return 2
+	}
 	admin := http.NewServeMux()
 	admin.Handle("GET /metrics", metrics.Handler(store, time.Now))
+	admin.Handle("POST "+usage.ObservePath, observer)
 	admin.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})

@@ -1,15 +1,30 @@
-package proxy
+package usage
 
 import (
 	"bufio"
 	"bytes"
 	"compress/gzip"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"io"
+	"net/http"
 	"strings"
 
 	"github.com/dimonchik03/quotaware/internal/headers"
 )
+
+func CredentialHash(h http.Header) string {
+	credential := h.Get("Authorization")
+	if credential == "" {
+		credential = h.Get("x-api-key")
+	}
+	if credential == "" {
+		return "anonymous"
+	}
+	sum := sha256.Sum256([]byte(credential))
+	return hex.EncodeToString(sum[:])[:12]
+}
 
 type usagePayload struct {
 	PromptTokens        int `json:"prompt_tokens"`
@@ -26,7 +41,7 @@ func (u usagePayload) tokens(provider headers.Provider) float64 {
 	return float64(u.PromptTokens + u.CompletionTokens)
 }
 
-func extractUsage(provider headers.Provider, contentType string, body []byte) (float64, bool) {
+func Extract(provider headers.Provider, contentType string, body []byte) (float64, bool) {
 	if strings.HasPrefix(strings.ToLower(contentType), "text/event-stream") {
 		return streamUsage(provider, body)
 	}
@@ -90,7 +105,7 @@ func mergeAnthropicEvent(merged *usagePayload, payload []byte) bool {
 	return false
 }
 
-func decompress(encoding string, body []byte, limit int64) ([]byte, bool) {
+func Decompress(encoding string, body []byte, limit int64) ([]byte, bool) {
 	switch strings.ToLower(strings.TrimSpace(encoding)) {
 	case "":
 		return body, true

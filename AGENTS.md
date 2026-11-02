@@ -43,6 +43,7 @@ Detailed rules live in `.claude/rules`. The short version:
 - Lint: `golangci-lint run`
 - Format: `gofmt -l -w .` (the Claude Code hook applies it on every edited Go file)
 - End to end through Docker Compose: `make e2e` (builds both images, runs the scenario in `e2e/`, tears down)
+- Python collector tests: `pip install -r collector/python/requirements.txt pytest && python -m pytest -q collector/python`
 - KEDA demo on kind: `make demo` (own kubeconfig under `bench/kind/`, never your default context), `make demo-down`
 - Benchmark on kind: `make bench` (two runs, queue trigger versus queue trigger capped by quotaware, results under `bench/results/<date>/`), `make bench-smoke` for a two-minute schedule
 
@@ -52,13 +53,15 @@ Never run two heavy commands (tests, lint, kind) at the same time on this machin
 
     cmd/quotaware/      entry point and subcommands: proxy, all, simulate
     internal/headroom/  domain: the ceiling algorithm, pure functions
-    internal/aimd/      domain: congestion-control fallback, pure functions
-    internal/state/     application: per-bucket state, EWMA, eviction
+    internal/aimd/      domain: congestion-control fallback and guard, pure functions
+    internal/state/     application: per-bucket state, EWMA, 429 window, ceilings, eviction
     internal/headers/   application: provider header parsers, pure functions over http.Header
-    internal/proxy/     adapter: transparent reverse proxy and usage extraction
+    internal/usage/     application: usage extraction, body capture, credential hashing
+    internal/proxy/     adapter: transparent reverse proxy and the /observe endpoint
     internal/scaler/    adapter: KEDA ExternalScaler over gRPC, vendored proto in externalscaler/
     internal/queue/     adapter: queue depth readers for single-trigger mode (Redis lists)
     internal/metrics/   adapter: Prometheus registry
+    collector/          adapter: Go RoundTripper and Python httpx hooks feeding /observe
     deploy/             helm/quotaware chart, examples/ ScaledObjects for both modes, grafana/ dashboard
     bench/              fakeprovider, producer and worker libraries, binaries under bench/cmd, kind/ demo, Prometheus configs, plots, results
     e2e/                Docker Compose scenario against the built images, behind the e2e build tag

@@ -47,7 +47,7 @@ func populated(t *testing.T) *state.Store {
 	s.Begin(key, now)
 	s.Fail(key, now)
 	s.UpdateCeiling(state.Consumer{Namespace: "jobs", ScaledObject: "llm-workers", Bucket: key}, func(state.Ceiling, bool) state.Ceiling {
-		return state.Ceiling{Value: 4, ChangedAt: now, Seen: now}
+		return state.Ceiling{Value: 4, Bound: 4, Mode: state.ModeHeadroom, ChangedAt: now, Seen: now}
 	})
 	return s
 }
@@ -72,6 +72,9 @@ quotaware_limit_requests{key="ab12",model="gpt-4.1-mini",provider="openai"} 1000
 # TYPE quotaware_limit_tokens gauge
 quotaware_limit_tokens{key="ab12",model="gpt-4.1-mini",provider="openai",window="project_tokens"} 100000
 quotaware_limit_tokens{key="ab12",model="gpt-4.1-mini",provider="openai",window="tokens"} 600000
+# HELP quotaware_rate_limited_ratio Share of responses in the last minute that were 429.
+# TYPE quotaware_rate_limited_ratio gauge
+quotaware_rate_limited_ratio{key="ab12",model="gpt-4.1-mini",provider="openai"} 0.5
 # HELP quotaware_remaining_requests Requests remaining in the current window.
 # TYPE quotaware_remaining_requests gauge
 quotaware_remaining_requests{key="ab12",model="gpt-4.1-mini",provider="openai"} 0
@@ -101,7 +104,7 @@ quotaware_upstream_errors_total{key="ab12",model="gpt-4.1-mini",provider="openai
 quotaware_usage_missing_total{key="ab12",model="gpt-4.1-mini",provider="openai"} 0
 `
 		if err := testutil.CollectAndCompare(collector, strings.NewReader(expected),
-			"quotaware_429_total", "quotaware_ceiling", "quotaware_inflight", "quotaware_limit_requests", "quotaware_limit_tokens",
+			"quotaware_429_total", "quotaware_ceiling", "quotaware_inflight", "quotaware_limit_requests", "quotaware_limit_tokens", "quotaware_rate_limited_ratio",
 			"quotaware_remaining_requests", "quotaware_remaining_tokens", "quotaware_reset_seconds",
 			"quotaware_responses_total", "quotaware_retry_after_seconds", "quotaware_tokens_per_call",
 			"quotaware_upstream_errors_total", "quotaware_usage_missing_total"); err != nil {

@@ -61,6 +61,12 @@ type Sample struct {
 	At         time.Time
 }
 
+type Recent struct {
+	Responses   int64
+	RateLimited int64
+	RetryAfter  time.Duration
+}
+
 type Bucket struct {
 	Key              Key
 	Quotas           Quotas
@@ -77,6 +83,50 @@ type Bucket struct {
 	HeadersMalformed int64
 	UsageMissing     int64
 	RetryAfter       time.Duration
+	Recent           Recent
+}
+
+const (
+	binSeconds   = 5
+	binCount     = 12
+	WindowLength = binSeconds * binCount * time.Second
+)
+
+type bin struct {
+	slot        int64
+	responses   int64
+	rateLimited int64
+	retryAfter  time.Duration
+}
+
+type window struct {
+	bins [binCount]bin
+}
+
+func (w *window) record(at time.Time, rateLimited bool, retryAfter time.Duration) {
+	slot := at.Unix() / binSeconds
+	b := &w.bins[slot%binCount]
+	if b.slot != slot {
+		*b = bin{slot: slot}
+	}
+	b.responses++
+	if rateLimited {
+		b.rateLimited++
+		b.retryAfter = max(b.retryAfter, retryAfter)
+	}
+}
+
+func (w *window) recent(at time.Time) Recent {
+	latest := at.Unix() / binSeconds
+	var r Recent
+	for _, b := range w.bins {
+		if b.slot > latest-binCount && b.slot <= latest {
+			r.Responses += b.responses
+			r.RateLimited += b.rateLimited
+			r.RetryAfter = max(r.RetryAfter, b.retryAfter)
+		}
+	}
+	return r
 }
 
 func (b Bucket) Observation() headroom.Observation {
@@ -97,17 +147,28 @@ type Consumer struct {
 	Bucket       Key
 }
 
+type Mode string
+
+const (
+	ModeHeadroom Mode = "headroom"
+	ModeAIMD     Mode = "aimd"
+)
+
 type Ceiling struct {
 	Consumer  Consumer
 	Value     int
+	Bound     int
+	Mode      Mode
 	ChangedAt time.Time
 	Seen      time.Time
+	HoldUntil time.Time
 }
 
 type Store struct {
 	alpha    float64
 	mu       sync.Mutex
 	buckets  map[Key]*Bucket
+	windows  map[Key]*window
 	ceilings map[Consumer]Ceiling
 }
 
@@ -115,7 +176,7 @@ func New(alpha float64) (*Store, error) {
 	if alpha <= 0 || alpha > 1 {
 		return nil, errors.New("alpha must be within (0, 1]")
 	}
-	return &Store{alpha: alpha, buckets: map[Key]*Bucket{}, ceilings: map[Consumer]Ceiling{}}, nil
+	return &Store{alpha: alpha, buckets: map[Key]*Bucket{}, windows: map[Key]*window{}, ceilings: map[Consumer]Ceiling{}}, nil
 }
 
 func (s *Store) UpdateCeiling(consumer Consumer, update func(previous Ceiling, known bool) Ceiling) Ceiling {
@@ -187,6 +248,7 @@ func (s *Store) End(key Key, sample Sample) {
 		b.RateLimited++
 		b.RetryAfter = sample.RetryAfter
 	}
+	s.window(key).record(sample.At, sample.Status == http.StatusTooManyRequests, sample.RetryAfter)
 	switch sample.Headers {
 	case HeadersPresent:
 		b.Quotas = b.Quotas.merge(sample.Quotas)
@@ -220,6 +282,7 @@ func (s *Store) Evict(now time.Time, idleFor time.Duration) int {
 	for key, b := range s.buckets {
 		if b.InFlight == 0 && now.Sub(b.LastSeen) > idleFor {
 			delete(s.buckets, key)
+			delete(s.windows, key)
 			evicted++
 		}
 	}
@@ -231,22 +294,22 @@ func (s *Store) Evict(now time.Time, idleFor time.Duration) int {
 	return evicted
 }
 
-func (s *Store) Bucket(key Key) (Bucket, bool) {
+func (s *Store) Bucket(key Key, now time.Time) (Bucket, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	b, ok := s.buckets[key]
 	if !ok {
 		return Bucket{}, false
 	}
-	return *b, true
+	return s.snapshot(b, now), true
 }
 
-func (s *Store) Buckets() []Bucket {
+func (s *Store) Buckets(now time.Time) []Bucket {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	all := make([]Bucket, 0, len(s.buckets))
 	for _, b := range s.buckets {
-		all = append(all, *b)
+		all = append(all, s.snapshot(b, now))
 	}
 	sort.Slice(all, func(i, j int) bool {
 		return all[i].Key.less(all[j].Key)
@@ -263,6 +326,23 @@ func (k Key) less(other Key) bool {
 	default:
 		return k.Key < other.Key
 	}
+}
+
+func (s *Store) snapshot(b *Bucket, now time.Time) Bucket {
+	copied := *b
+	if w, ok := s.windows[b.Key]; ok {
+		copied.Recent = w.recent(now)
+	}
+	return copied
+}
+
+func (s *Store) window(key Key) *window {
+	w, ok := s.windows[key]
+	if !ok {
+		w = &window{}
+		s.windows[key] = w
+	}
+	return w
 }
 
 func (s *Store) bucket(key Key) *Bucket {

@@ -1,4 +1,4 @@
-package proxy
+package usage_test
 
 import (
 	"bytes"
@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/dimonchik03/quotaware/internal/headers"
+	"github.com/dimonchik03/quotaware/internal/usage"
 )
 
 func TestExtractUsage(t *testing.T) {
@@ -97,7 +98,7 @@ func TestExtractUsage(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			tokens, ok := extractUsage(tc.provider, tc.contentType, []byte(tc.body))
+			tokens, ok := usage.Extract(tc.provider, tc.contentType, []byte(tc.body))
 
 			if ok != tc.wantOK || tokens != tc.wantTokens {
 				t.Fatalf("tokens = %v ok = %v, want %v %v", tokens, ok, tc.wantTokens, tc.wantOK)
@@ -118,27 +119,27 @@ func TestDecompress(t *testing.T) {
 	}
 
 	t.Run("passes an unencoded body through", func(t *testing.T) {
-		body, ok := decompress("", payload, 1024)
+		body, ok := usage.Decompress("", payload, 1024)
 		if !ok || !bytes.Equal(body, payload) {
 			t.Fatalf("body = %q ok = %v", body, ok)
 		}
 	})
 
 	t.Run("inflates a gzip body", func(t *testing.T) {
-		body, ok := decompress("gzip", compressed.Bytes(), 1024)
+		body, ok := usage.Decompress("gzip", compressed.Bytes(), 1024)
 		if !ok || !bytes.Equal(body, payload) {
 			t.Fatalf("body = %q ok = %v", body, ok)
 		}
 	})
 
 	t.Run("refuses a gzip body that inflates past the limit", func(t *testing.T) {
-		if _, ok := decompress("gzip", compressed.Bytes(), 10); ok {
+		if _, ok := usage.Decompress("gzip", compressed.Bytes(), 10); ok {
 			t.Fatal("expected the inflated body to be refused")
 		}
 	})
 
 	t.Run("refuses an encoding it cannot inflate", func(t *testing.T) {
-		if _, ok := decompress("br", payload, 1024); ok {
+		if _, ok := usage.Decompress("br", payload, 1024); ok {
 			t.Fatal("expected brotli to be refused")
 		}
 	})

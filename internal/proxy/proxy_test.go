@@ -127,12 +127,12 @@ func (h *harness) post(t *testing.T, path, credential, body string) (*http.Respo
 
 func (h *harness) bucket(t *testing.T, provider, model string) state.Bucket {
 	t.Helper()
-	for _, b := range h.store.Buckets() {
+	for _, b := range h.store.Buckets(h.clock.Now()) {
 		if b.Key.Provider == provider && b.Key.Model == model {
 			return b
 		}
 	}
-	t.Fatalf("no bucket for %s/%s in %+v", provider, model, h.store.Buckets())
+	t.Fatalf("no bucket for %s/%s in %+v", provider, model, h.store.Buckets(h.clock.Now()))
 	return state.Bucket{}
 }
 
@@ -372,7 +372,7 @@ func TestProxy(t *testing.T) {
 		h.post(t, "/v1/messages", "sk-first", message)
 		h.post(t, "/v1/chat/completions", "", chat)
 
-		buckets := h.store.Buckets()
+		buckets := h.store.Buckets(h.clock.Now())
 		if len(buckets) != 4 {
 			t.Fatalf("buckets = %d, want 4", len(buckets))
 		}
@@ -396,8 +396,8 @@ func TestProxy(t *testing.T) {
 
 		response, _ := h.post(t, "/v1/chat/completions", "sk-test", `{"messages":[]}`)
 
-		if response.StatusCode != http.StatusBadRequest || len(h.store.Buckets()) != 0 {
-			t.Fatalf("status = %d, buckets = %d, want 400 and none", response.StatusCode, len(h.store.Buckets()))
+		if response.StatusCode != http.StatusBadRequest || len(h.store.Buckets(h.clock.Now())) != 0 {
+			t.Fatalf("status = %d, buckets = %d, want 400 and none", response.StatusCode, len(h.store.Buckets(h.clock.Now())))
 		}
 	})
 
@@ -406,7 +406,7 @@ func TestProxy(t *testing.T) {
 
 		response, body := h.post(t, "/v1/chat/completions", "sk-test", `{"model":"`+strings.Repeat("m", 300)+`","messages":[]}`)
 
-		if response.StatusCode != http.StatusBadRequest || !strings.Contains(body, "too long") || len(h.store.Buckets()) != 0 {
+		if response.StatusCode != http.StatusBadRequest || !strings.Contains(body, "too long") || len(h.store.Buckets(h.clock.Now())) != 0 {
 			t.Fatalf("status = %d, body = %s, want 400 naming the length and no bucket", response.StatusCode, body)
 		}
 	})

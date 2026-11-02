@@ -45,7 +45,12 @@ func success(usage float64, latency time.Duration) state.Sample {
 
 func bucket(t *testing.T, s *state.Store) state.Bucket {
 	t.Helper()
-	b, ok := s.Bucket(key)
+	return bucketAt(t, s, now.Add(time.Minute))
+}
+
+func bucketAt(t *testing.T, s *state.Store, at time.Time) state.Bucket {
+	t.Helper()
+	b, ok := s.Bucket(key, at)
 	if !ok {
 		t.Fatal("bucket not found")
 	}
@@ -125,6 +130,40 @@ func TestStore(t *testing.T) {
 		}
 		if b.TokensPerCall != 1000 || b.Latency != 2*time.Second || b.UsageMissing != 0 {
 			t.Fatalf("bucket = %+v, want the averages and usage counter untouched", b)
+		}
+	})
+
+	t.Run("keeps the 429 ratio and the longest retry-after over the last minute", func(t *testing.T) {
+		s := store(t, 0.5)
+		limited := success(0, 50*time.Millisecond)
+		limited.Status = http.StatusTooManyRequests
+		limited.HasUsage = false
+		for i := range 10 {
+			sample := success(1000, time.Second)
+			sample.At = now.Add(time.Duration(i) * 4 * time.Second)
+			s.End(key, sample)
+		}
+		limited.RetryAfter = 20 * time.Second
+		limited.At = now.Add(45 * time.Second)
+		s.End(key, limited)
+		limited.RetryAfter = 5 * time.Second
+		limited.At = now.Add(50 * time.Second)
+		s.End(key, limited)
+
+		recent := bucketAt(t, s, now.Add(50*time.Second)).Recent
+		if recent.Responses != 12 || recent.RateLimited != 2 || recent.RetryAfter != 20*time.Second {
+			t.Fatalf("recent = %+v, want 12 responses, 2 limited, retry-after 20s", recent)
+		}
+		if recent := bucketAt(t, s, now.Add(2*time.Minute)).Recent; recent.Responses != 0 || recent.RateLimited != 0 {
+			t.Fatalf("recent = %+v, want the window empty a minute after the last response", recent)
+		}
+
+		late := success(1000, time.Second)
+		late.At = now.Add(2 * time.Minute)
+		s.End(key, late)
+
+		if recent := bucketAt(t, s, now.Add(2*time.Minute)).Recent; recent.Responses != 1 || recent.RateLimited != 0 {
+			t.Fatalf("recent = %+v, want only the sample inside the last minute", recent)
 		}
 	})
 
@@ -244,13 +283,13 @@ func TestStore(t *testing.T) {
 		if evicted != 1 {
 			t.Fatalf("evicted = %d, want 1", evicted)
 		}
-		if _, ok := s.Bucket(idle); ok {
+		if _, ok := s.Bucket(idle, now); ok {
 			t.Fatal("idle bucket still present")
 		}
-		if _, ok := s.Bucket(busy); !ok {
+		if _, ok := s.Bucket(busy, now); !ok {
 			t.Fatal("bucket with a call in flight was evicted")
 		}
-		if _, ok := s.Bucket(key); !ok {
+		if _, ok := s.Bucket(key, now); !ok {
 			t.Fatal("recently seen bucket was evicted")
 		}
 	})
@@ -288,7 +327,7 @@ func TestStore(t *testing.T) {
 		s.Begin(state.Key{Provider: "anthropic", Model: "claude-sonnet-4-5", Key: "a"}, now)
 		s.Begin(state.Key{Provider: "openai", Model: "gpt-4.1", Key: "a"}, now)
 
-		all := s.Buckets()
+		all := s.Buckets(now)
 
 		want := []state.Key{
 			{Provider: "anthropic", Model: "claude-sonnet-4-5", Key: "a"},

@@ -180,6 +180,42 @@ are in `deploy/examples/`; the remaining knobs (`credential`, `safety`, `share`,
 `staleHard`, `window`) and their defaults are listed in `docs/SPEC.md`. A Grafana
 dashboard is in `deploy/grafana/`.
 
+## Without the proxy hop
+
+Workers that cannot or should not route through the proxy can report what they
+see themselves. Both collectors post the same observation to `POST /v1/observe` on
+the admin port and never block or fail the call they observe: a full queue drops, a
+failed delivery is counted, an error inside the hook is counted. Start quotaware
+with `-observe-token` (or `QUOTAWARE_OBSERVE_TOKEN`) and give the collectors the
+same token whenever the admin port is reachable beyond the namespace.
+
+    import "github.com/dimonchik03/quotaware/collector"
+
+    c, err := collector.New(collector.DefaultConfig("http://quotaware:9100", "openai"))
+    defer c.Close()
+    client := &http.Client{Transport: c.Wrap(http.DefaultTransport)}
+
+    from quotaware_httpx import QuotawareHook
+
+    hook = QuotawareHook("http://quotaware:9100", "openai")
+    client = httpx.Client(base_url="https://api.openai.com", event_hooks=hook.hooks())
+
+The Python hook is one module in `collector/python/` with a `pyproject.toml`; copy
+the file or `pip install ./collector/python`. It reads usage from JSON responses and
+records streams without usage; collector traffic is not counted as in flight, so the
+drain guard only sees proxied calls (ADR 0007).
+
+## When the headers are missing
+
+Buckets without a usable quota, because the provider or a gateway strips the
+headers or the last observation is older than `staleHard`, are driven by AIMD:
+start at `defaultCeiling`, add `aimdIncrease` per `stepInterval` of clean traffic,
+multiply by `aimdDecrease` (0.5) when more than `aimdThreshold` (2 %) of the last
+minute's responses were 429, then hold for the longest `retry-after` seen and at
+least one minute, so one burst is halved once. The same rule guards a header-derived
+ceiling, so a burst of 429s halves it even while the headers still look healthy.
+`quotaware_rate_limited_ratio` shows the share the rule reacts to (ADR 0006).
+
 ## Watch it on kind
 
     make demo        # kind cluster, KEDA 2.21, fake provider, Redis, workers, quotaware
@@ -208,22 +244,15 @@ with the safety factor applied; the workers never see a 429. When the burst drai
 the window, the ceiling drops and the HPA follows within a poll; after the window
 resets the ceiling steps back up by `maxStepUp` per interval.
 
-## Planned usage
-
-    make bench       # two runs, same seed: queue trigger vs queue trigger + quotaware
-
-The benchmark lands with milestone 4 of `docs/SPEC.md`; charts and numbers will be
-published in `docs/benchmark.md`.
-
 ## Non-goals
 
 Not a gateway, not a rate limiter, not a cost dashboard. See `docs/SPEC.md`.
 
 ## Status
 
-v0.1 in progress. Header parsers, the headroom algorithm, `simulate`, the proxy
-with its metrics, the fake provider, the KEDA external scaler, the Helm chart and
-the kind demo are done. The benchmark and the AIMD fallback follow. Specification in `docs/SPEC.md`,
+v0.1 in progress: everything in `docs/SPEC.md` is implemented; the benchmark results
+and the first tagged release are the remaining steps. See `docs/design.md` for how the
+pieces fit and `docs/release.md` for how a release is cut. Specification in `docs/SPEC.md`,
 decisions in `docs/adr`.
 
 ## License

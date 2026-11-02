@@ -287,6 +287,14 @@ func TestCompute(t *testing.T) {
 	}
 }
 
+func TestComputeReportsTheBoundBeforeTheDrainGuard(t *testing.T) {
+	result := headroom.Compute(config(), withInFlight(observation(0, 0, now.Add(30*time.Second)), 10), known(4), now)
+
+	if result.Ceiling != 3 || result.Bound != 1 {
+		t.Fatalf("ceiling = %d bound = %d, want the drain floor reported and the clamped quota value kept as the bound", result.Ceiling, result.Bound)
+	}
+}
+
 func TestComputeReportsTheRatesBehindTheCeiling(t *testing.T) {
 	result := headroom.Compute(config(), observation(900, 500000, now.Add(30*time.Second)), headroom.Previous{}, now)
 
