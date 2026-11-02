@@ -35,6 +35,7 @@ func run(args []string) int {
 	flags.IntVar(&cfg.Concurrency, "concurrency", cfg.Concurrency, "concurrent provider calls")
 	flags.IntVar(&cfg.MaxAttempts, "max-attempts", cfg.MaxAttempts, "attempts per job before giving up")
 	flags.DurationVar(&cfg.MaxBackoff, "max-backoff", cfg.MaxBackoff, "longest wait between attempts")
+	linger := flags.Duration("linger", 15*time.Second, "how long to keep serving metrics after the last job so the final counters get scraped")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
@@ -62,6 +63,8 @@ func run(args []string) int {
 	defer stop()
 	logger.Info("worker started", "proxy", cfg.ProxyURL, "model", cfg.Model, "concurrency", cfg.Concurrency, "list", cfg.List)
 	w.Run(ctx)
+	logger.Info("worker draining finished, lingering for the last scrape", "linger", linger.String())
+	time.Sleep(*linger)
 	shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := server.Shutdown(shutdown); err != nil {
