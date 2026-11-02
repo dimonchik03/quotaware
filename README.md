@@ -136,11 +136,10 @@ it becomes a label.
 ## Deploy with KEDA
 
 The chart runs `quotaware all`: the proxy, the metrics endpoint and the KEDA
-external scaler in one pod. No image is published yet, so build and push your own
-(the `Dockerfile` at the root) and point the chart at it:
+external scaler in one pod, from the image `ghcr.io/dimonchik03/quotaware` that
+every release publishes for linux/amd64 and linux/arm64:
 
-    helm install quotaware deploy/helm/quotaware -n llm --create-namespace \
-      --set image.repository=registry.example.com/quotaware --set image.tag=dev
+    helm install quotaware deploy/helm/quotaware -n llm --create-namespace
 
 Point your workers at `http://quotaware.llm.svc:8080` and add the ceiling as a second
 trigger next to your queue trigger. KEDA takes the largest value across triggers, so
@@ -250,9 +249,10 @@ Not a gateway, not a rate limiter, not a cost dashboard. See `docs/SPEC.md`.
 
 ## Status
 
-v0.1 in progress: everything in `docs/SPEC.md` is implemented; the benchmark results
-and the first tagged release are the remaining steps. See `docs/design.md` for how the
-pieces fit and `docs/release.md` for how a release is cut. Specification in `docs/SPEC.md`,
+v0.1.0 is released: binaries for Linux and macOS on the releases page, the image on
+`ghcr.io`, everything in `docs/SPEC.md` implemented and benchmarked. See
+`docs/design.md` for how the pieces fit and `docs/release.md` for how a release is
+cut. Specification in `docs/SPEC.md`,
 decisions in `docs/adr`.
 
 ## License
