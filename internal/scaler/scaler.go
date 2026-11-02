@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -30,10 +31,13 @@ type QueueDepth interface {
 
 type QueueFactory func(address string) QueueDepth
 
+const maxRefLength = 253
+
 type Config struct {
-	Defaults     headroom.Config
-	AIMD         aimd.Config
-	PushInterval time.Duration
+	Defaults      headroom.Config
+	AIMD          aimd.Config
+	PushInterval  time.Duration
+	AllowedQueues []string
 }
 
 func DefaultConfig() Config {
@@ -105,6 +109,9 @@ type queueTrigger struct {
 }
 
 func (s *Service) parse(ref *externalscaler.ScaledObjectRef) (trigger, error) {
+	if ref.GetName() == "" || len(ref.GetName()) > maxRefLength || len(ref.GetNamespace()) > maxRefLength {
+		return trigger{}, status.Errorf(codes.InvalidArgument, "scaled object name is required and name and namespace must be at most %d characters", maxRefLength)
+	}
 	metadata := ref.GetScalerMetadata()
 	bucket := metadata["bucket"]
 	provider, model, ok := strings.Cut(bucket, "/")
@@ -211,6 +218,9 @@ func (s *Service) parseQueue(metadata map[string]string) (*queueTrigger, error) 
 	q := &queueTrigger{address: address, list: metadata["listName"], listLength: 1}
 	if q.address == "" || q.list == "" {
 		return nil, status.Error(codes.InvalidArgument, `metadata "redisAddress" and "listName" are both required for queue mode`)
+	}
+	if !slices.Contains(s.cfg.AllowedQueues, q.address) {
+		return nil, status.Errorf(codes.PermissionDenied, "redisAddress %q is not on this scaler's allow list", q.address)
 	}
 	if raw, present := metadata["listLength"]; present {
 		length, err := strconv.ParseInt(raw, 10, 64)

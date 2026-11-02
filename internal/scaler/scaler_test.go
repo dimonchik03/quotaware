@@ -93,6 +93,7 @@ func newFixtureWithLimits(t *testing.T, limits state.Limits) *fixture {
 	c := &clock{now: now}
 	cfg := scaler.DefaultConfig()
 	cfg.PushInterval = 10 * time.Millisecond
+	cfg.AllowedQueues = []string{"redis:6379"}
 	service, err := scaler.New(cfg, store, func(string) scaler.QueueDepth { return queue }, c.Now, slog.New(slog.NewTextHandler(logs, nil)))
 	if err != nil {
 		t.Fatal(err)
@@ -397,6 +398,30 @@ func TestGetMetrics(t *testing.T) {
 
 		if code(err) != codes.ResourceExhausted {
 			t.Fatalf("code = %v, want ResourceExhausted", code(err))
+		}
+	})
+
+	t.Run("refuses a redis address that is not on the allow list", func(t *testing.T) {
+		f := newFixture(t)
+		metadata := queueMetadata()
+		metadata["redisAddress"] = "10.0.0.5:6379"
+
+		_, err := f.service.GetMetrics(context.Background(), &externalscaler.GetMetricsRequest{ScaledObjectRef: ref(metadata)})
+
+		if code(err) != codes.PermissionDenied || !strings.Contains(err.Error(), "10.0.0.5:6379") {
+			t.Fatalf("err = %v, want PermissionDenied naming the address", err)
+		}
+	})
+
+	t.Run("rejects a scaled object name longer than a Kubernetes name", func(t *testing.T) {
+		f := newFixture(t)
+		long := ref(capMetadata())
+		long.Name = strings.Repeat("n", 254)
+
+		_, err := f.service.GetMetricSpec(context.Background(), long)
+
+		if code(err) != codes.InvalidArgument {
+			t.Fatalf("code = %v, want InvalidArgument", code(err))
 		}
 	})
 

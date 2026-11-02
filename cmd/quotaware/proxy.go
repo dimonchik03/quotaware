@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -36,6 +37,7 @@ type observerOptions struct {
 	grpc            string
 	alpha           float64
 	limits          state.Limits
+	redisAddresses  []string
 	pushInterval    time.Duration
 	observeToken    string
 	observeInsecure bool
@@ -58,13 +60,16 @@ func parseObserverFlags(command string, args []string, stderr io.Writer, withSca
 	flags.Int64Var(&options.proxy.MaxRequestBytes, "max-request-bytes", options.proxy.MaxRequestBytes, "largest request body accepted")
 	flags.Int64Var(&options.proxy.MaxCaptureBytes, "max-capture-bytes", options.proxy.MaxCaptureBytes, "largest response body inspected for usage")
 	flags.DurationVar(&options.proxy.ReadBodyTimeout, "read-body-timeout", options.proxy.ReadBodyTimeout, "how long a client may take to send a request body")
+	var redisAddresses string
 	if withScaler {
 		flags.StringVar(&options.grpc, "grpc", ":9090", "address the KEDA external scaler listens on")
 		flags.DurationVar(&options.pushInterval, "push-interval", options.pushInterval, "how often StreamIsActive re-evaluates a queue trigger")
+		flags.StringVar(&redisAddresses, "redis-address", "", "comma-separated redis addresses single-trigger mode may read queues from (empty disables queue mode)")
 	}
 	if err := flags.Parse(args); err != nil {
 		return observerOptions{}, err
 	}
+	options.redisAddresses = splitAddresses(redisAddresses)
 	addresses := map[string]string{options.listen: "listen", options.admin: "admin"}
 	if len(addresses) < 2 {
 		return observerOptions{}, errors.New("listen and admin addresses must differ")
@@ -85,6 +90,16 @@ func parseObserverFlags(command string, args []string, stderr io.Writer, withSca
 		return observerOptions{}, errors.New("observe token is required: set -observe-token or QUOTAWARE_OBSERVE_TOKEN, or pass -observe-insecure to accept unauthenticated observations")
 	}
 	return options, nil
+}
+
+func splitAddresses(raw string) []string {
+	var addresses []string
+	for _, address := range strings.Split(raw, ",") {
+		if address = strings.TrimSpace(address); address != "" {
+			addresses = append(addresses, address)
+		}
+	}
+	return addresses
 }
 
 func parseOrigin(raw string) (*url.URL, error) {
@@ -147,7 +162,12 @@ func runObserver(command string, args []string, stderr io.Writer, withScaler boo
 	if withScaler {
 		cfg := scaler.DefaultConfig()
 		cfg.PushInterval = options.pushInterval
-		service, err := scaler.New(cfg, store, func(address string) scaler.QueueDepth { return queue.NewRedis(address) }, time.Now, logger)
+		cfg.AllowedQueues = options.redisAddresses
+		var queues scaler.QueueFactory
+		if len(options.redisAddresses) > 0 {
+			queues = func(address string) scaler.QueueDepth { return queue.NewRedis(address) }
+		}
+		service, err := scaler.New(cfg, store, queues, time.Now, logger)
 		if err != nil {
 			fmt.Fprintf(stderr, "quotaware %s: %v\n", command, err)
 			return 2

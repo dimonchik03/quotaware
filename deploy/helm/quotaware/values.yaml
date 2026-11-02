@@ -14,6 +14,7 @@ ports:
 
 ewmaAlpha: 0.2
 maxBuckets: 10000
+redisAddresses: []
 
 observe:
   token: ""

@@ -78,6 +78,17 @@ func TestObserverFlags(t *testing.T) {
 		}
 	})
 
+	t.Run("reads the redis addresses queue mode may use", func(t *testing.T) {
+		options, err := parseObserverFlags("all", []string{"-redis-address", "redis:6379, redis-b:6379", "-observe-insecure"}, &bytes.Buffer{}, true)
+
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(options.redisAddresses) != 2 || options.redisAddresses[1] != "redis-b:6379" {
+			t.Fatalf("redis addresses = %v, want both trimmed entries", options.redisAddresses)
+		}
+	})
+
 	t.Run("rejects the grpc flag for the proxy command", func(t *testing.T) {
 		_, err := parseObserverFlags("proxy", []string{"-grpc", ":9999"}, &bytes.Buffer{}, false)
 

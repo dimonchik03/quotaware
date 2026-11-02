@@ -43,6 +43,9 @@ spec:
             - -anthropic-upstream={{ .Values.upstreams.anthropic }}
             - -ewma-alpha={{ .Values.ewmaAlpha }}
             - -max-buckets={{ .Values.maxBuckets }}
+            {{- with .Values.redisAddresses }}
+            - -redis-address={{ join "," . }}
+            {{- end }}
             {{- if .Values.observe.insecure }}
             - -observe-insecure
             {{- end }}
