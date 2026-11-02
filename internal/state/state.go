@@ -32,6 +32,10 @@ type Quotas struct {
 	OutputTokens  headroom.Quota
 }
 
+func (q Quotas) Usable() bool {
+	return q.Requests.Known() || q.Tokens.Known()
+}
+
 func (q Quotas) merge(update Quotas) Quotas {
 	return Quotas{
 		Requests:      keep(q.Requests, update.Requests),
@@ -259,6 +263,10 @@ func (s *Store) End(key Key, sample Sample) {
 		}
 	case HeadersMalformed:
 		b.HeadersMalformed++
+		if sample.Quotas.Usable() {
+			b.Quotas = b.Quotas.merge(sample.Quotas)
+			b.ObservedAt = sample.At
+		}
 	}
 	if !sample.Complete {
 		b.Aborted++

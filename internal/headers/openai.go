@@ -5,22 +5,15 @@ import (
 	"time"
 )
 
-func parseOpenAI(h http.Header, now time.Time) (Limits, error) {
+func parseOpenAI(h http.Header, now time.Time) Limits {
 	limits := Limits{Provider: OpenAI}
-	var err error
-	if limits.Requests, err = openAIWindow(h, "requests", now); err != nil {
-		return Limits{}, err
-	}
-	if limits.Tokens, err = openAIWindow(h, "tokens", now); err != nil {
-		return Limits{}, err
-	}
-	if limits.ProjectTokens, err = openAIWindow(h, "project-tokens", now); err != nil {
-		return Limits{}, err
-	}
-	return complete(limits, h, now)
+	limits.Requests = limits.collect(openAIWindow(h, "requests", now))
+	limits.Tokens = limits.collect(openAIWindow(h, "tokens", now))
+	limits.ProjectTokens = limits.collect(openAIWindow(h, "project-tokens", now))
+	return limits
 }
 
-func openAIWindow(h http.Header, kind string, now time.Time) (Window, error) {
+func openAIWindow(h http.Header, kind string, now time.Time) (Window, *MalformedError) {
 	return window(h, "x-ratelimit-limit-"+kind, "x-ratelimit-remaining-"+kind, "x-ratelimit-reset-"+kind, now, durationReset)
 }
 

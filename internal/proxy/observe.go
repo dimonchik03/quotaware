@@ -90,14 +90,19 @@ func (o *Observer) authorized(r *http.Request) bool {
 func parseLimits(logger *slog.Logger, provider headers.Provider, model string, h http.Header, now time.Time) (state.Quotas, state.HeadersStatus) {
 	limits, err := headers.Parse(provider, h, now)
 	switch {
-	case err == nil:
-		return quotasOf(limits), state.HeadersPresent
 	case errors.Is(err, headers.ErrMissing):
 		return state.Quotas{}, state.HeadersMissing
-	default:
-		logger.Warn("rate-limit headers malformed", "provider", provider, "model", model, "error", err.Error())
+	case err != nil:
+		logger.Warn("rate-limit headers unreadable", "provider", provider, "model", model, "error", err.Error())
 		return state.Quotas{}, state.HeadersMalformed
 	}
+	for _, malformed := range limits.Malformed {
+		logger.Warn("rate-limit header malformed", "provider", provider, "model", model, "error", malformed.Error())
+	}
+	if len(limits.Malformed) > 0 {
+		return quotasOf(limits), state.HeadersMalformed
+	}
+	return quotasOf(limits), state.HeadersPresent
 }
 
 func quotasOf(limits headers.Limits) state.Quotas {

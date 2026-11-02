@@ -345,7 +345,7 @@ func TestProxy(t *testing.T) {
 		}
 	})
 
-	t.Run("counts and logs malformed rate-limit headers", func(t *testing.T) {
+	t.Run("counts and logs a malformed reset and keeps the window without it", func(t *testing.T) {
 		h := newHarnessWithHandler(t, &clock{now: start}, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			w.Header().Set("x-ratelimit-limit-requests", "60")
 			w.Header().Set("x-ratelimit-remaining-requests", "59")
@@ -356,8 +356,12 @@ func TestProxy(t *testing.T) {
 
 		h.post(t, "/v1/chat/completions", "sk-test", chat)
 
-		if b := h.bucket(t, "openai", "gpt-4.1-mini"); b.HeadersMalformed != 1 || b.HeadersMissing != 0 {
+		b := h.bucket(t, "openai", "gpt-4.1-mini")
+		if b.HeadersMalformed != 1 || b.HeadersMissing != 0 {
 			t.Fatalf("bucket = %+v, want one malformed header count", b)
+		}
+		if b.Quotas.Requests.Remaining != 59 || !b.Quotas.Requests.ResetAt.IsZero() {
+			t.Fatalf("quotas = %+v, want the requests window kept without its reset", b.Quotas)
 		}
 		if !strings.Contains(h.logs.String(), "x-ratelimit-reset-requests") {
 			t.Fatalf("logs = %q, want the malformed header named", h.logs.String())

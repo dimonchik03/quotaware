@@ -212,6 +212,23 @@ func TestStore(t *testing.T) {
 		if b.HeadersMalformed != 1 || b.HeadersMissing != 0 {
 			t.Fatalf("bucket = %+v, want one malformed and no missing", b)
 		}
+		if b.ObservedAt.Equal(now) {
+			t.Fatalf("observed at = %v, want untouched when nothing usable was parsed", b.ObservedAt)
+		}
+	})
+
+	t.Run("malformed headers still apply the windows that parsed", func(t *testing.T) {
+		s := store(t, 0.5)
+		partial := success(1000, time.Second)
+		partial.Headers = state.HeadersMalformed
+		partial.Quotas = state.Quotas{Requests: headroom.Quota{Limit: 60, Remaining: 59}}
+
+		s.End(key, partial)
+
+		b := bucket(t, s)
+		if b.HeadersMalformed != 1 || b.Quotas.Requests.Remaining != 59 || !b.ObservedAt.Equal(now) {
+			t.Fatalf("bucket = %+v, want the malformed count and the parsed window applied", b)
+		}
 	})
 
 	t.Run("a success without usage counts as usage missing", func(t *testing.T) {

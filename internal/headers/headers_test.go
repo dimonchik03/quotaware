@@ -64,18 +64,15 @@ func TestParseOpenAI(t *testing.T) {
 		if limits.ProjectTokens.Known() {
 			t.Fatalf("project tokens = %+v, want unknown without project headers", limits.ProjectTokens)
 		}
-		if limits.RetryAfter != 0 {
-			t.Fatalf("retry-after = %v, want 0 on a successful response", limits.RetryAfter)
+		if len(limits.Malformed) != 0 {
+			t.Fatalf("malformed = %v, want none on a clean response", limits.Malformed)
 		}
 	})
 
-	t.Run("reports retry-after and fractional resets on a 429", func(t *testing.T) {
+	t.Run("parses fractional resets on a 429", func(t *testing.T) {
 		limits, err := headers.Parse(headers.OpenAI, fixture(t, "openai_429.http"), now)
 		if err != nil {
 			t.Fatal(err)
-		}
-		if limits.RetryAfter != 20*time.Second {
-			t.Fatalf("retry-after = %v, want 20s", limits.RetryAfter)
 		}
 		if limits.Requests.Remaining != 0 {
 			t.Fatalf("remaining requests = %d, want 0", limits.Requests.Remaining)
@@ -105,34 +102,66 @@ func TestParseOpenAI(t *testing.T) {
 		}
 	})
 
-	t.Run("names the header when a reset cannot be parsed", func(t *testing.T) {
-		_, err := headers.Parse(headers.OpenAI, fixture(t, "openai_malformed.http"), now)
-		malformed := malformedHeader(t, err)
+	t.Run("keeps a window without its reset and names the malformed reset", func(t *testing.T) {
+		limits, err := headers.Parse(headers.OpenAI, fixture(t, "openai_malformed.http"), now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		malformed := onlyMalformed(t, limits)
 		if malformed.Header != "x-ratelimit-reset-tokens" || malformed.Value != "soon" {
 			t.Fatalf("malformed = %+v, want the reset-tokens header and its value", malformed)
 		}
-	})
-
-	t.Run("names the absent counterpart of a partial window", func(t *testing.T) {
-		_, err := headers.Parse(headers.OpenAI, fixture(t, "openai_partial_tokens.http"), now)
-		malformed := malformedHeader(t, err)
-		if malformed.Header != "x-ratelimit-remaining-tokens" {
-			t.Fatalf("malformed = %+v, want the absent remaining-tokens header", malformed)
+		if want := window(60, 59, now.Add(time.Second)); limits.Requests != want {
+			t.Fatalf("requests = %+v, want the untouched window %+v", limits.Requests, want)
+		}
+		if want := window(150000, 149984, time.Time{}); limits.Tokens != want {
+			t.Fatalf("tokens = %+v, want the window kept without a reset %+v", limits.Tokens, want)
 		}
 	})
 
-	t.Run("rejects an integer header with a thousands separator", func(t *testing.T) {
+	t.Run("leaves a partial window unknown, names the absent counterpart and keeps the others", func(t *testing.T) {
+		limits, err := headers.Parse(headers.OpenAI, fixture(t, "openai_partial_tokens.http"), now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		malformed := onlyMalformed(t, limits)
+		if malformed.Header != "x-ratelimit-remaining-tokens" {
+			t.Fatalf("malformed = %+v, want the absent remaining-tokens header", malformed)
+		}
+		if limits.Tokens.Known() {
+			t.Fatalf("tokens = %+v, want unknown", limits.Tokens)
+		}
+		if want := window(60, 59, now.Add(time.Second)); limits.Requests != want {
+			t.Fatalf("requests = %+v, want %+v", limits.Requests, want)
+		}
+	})
+
+	t.Run("names an integer header with a thousands separator and reports nothing usable", func(t *testing.T) {
 		h := http.Header{}
 		h.Set("x-ratelimit-limit-requests", "1,000")
 		h.Set("x-ratelimit-remaining-requests", "999")
 
-		_, err := headers.Parse(headers.OpenAI, h, now)
+		limits, err := headers.Parse(headers.OpenAI, h, now)
 
-		malformed := malformedHeader(t, err)
+		if err != nil {
+			t.Fatal(err)
+		}
+		malformed := onlyMalformed(t, limits)
 		if malformed.Header != "x-ratelimit-limit-requests" || malformed.Value != "1,000" {
 			t.Fatalf("malformed = %+v, want the limit-requests header and its value", malformed)
 		}
+		if limits.Usable() {
+			t.Fatalf("limits = %+v, want nothing usable", limits)
+		}
 	})
+}
+
+func onlyMalformed(t *testing.T, limits headers.Limits) *headers.MalformedError {
+	t.Helper()
+	if len(limits.Malformed) != 1 {
+		t.Fatalf("malformed = %v, want exactly one", limits.Malformed)
+	}
+	return limits.Malformed[0]
 }
 
 func TestParseAnthropic(t *testing.T) {
@@ -175,13 +204,10 @@ func TestParseAnthropic(t *testing.T) {
 		}
 	})
 
-	t.Run("reports retry-after on a 429 and leaves absent windows unknown", func(t *testing.T) {
+	t.Run("leaves absent windows unknown on a 429", func(t *testing.T) {
 		limits, err := headers.Parse(headers.Anthropic, fixture(t, "anthropic_429.http"), now)
 		if err != nil {
 			t.Fatal(err)
-		}
-		if limits.RetryAfter != 15*time.Second {
-			t.Fatalf("retry-after = %v, want 15s", limits.RetryAfter)
 		}
 		if limits.Requests.Remaining != 0 {
 			t.Fatalf("remaining requests = %d, want 0", limits.Requests.Remaining)
@@ -198,17 +224,23 @@ func TestParseAnthropic(t *testing.T) {
 		}
 	})
 
-	t.Run("names the header when a reset is not RFC 3339", func(t *testing.T) {
+	t.Run("names a reset that is not RFC 3339 and keeps the window without it", func(t *testing.T) {
 		h := http.Header{}
 		h.Set("anthropic-ratelimit-requests-limit", "1000")
 		h.Set("anthropic-ratelimit-requests-remaining", "999")
 		h.Set("anthropic-ratelimit-requests-reset", "tomorrow")
 
-		_, err := headers.Parse(headers.Anthropic, h, now)
+		limits, err := headers.Parse(headers.Anthropic, h, now)
 
-		malformed := malformedHeader(t, err)
+		if err != nil {
+			t.Fatal(err)
+		}
+		malformed := onlyMalformed(t, limits)
 		if malformed.Header != "anthropic-ratelimit-requests-reset" || malformed.Value != "tomorrow" {
 			t.Fatalf("malformed = %+v, want the requests-reset header and its value", malformed)
+		}
+		if want := window(1000, 999, time.Time{}); !equalWindow(limits.Requests, want) {
+			t.Fatalf("requests = %+v, want the window kept without a reset %+v", limits.Requests, want)
 		}
 	})
 }
@@ -221,6 +253,17 @@ func TestParseRejectsUnknownProvider(t *testing.T) {
 }
 
 func TestRetryAfter(t *testing.T) {
+	t.Run("parses a number of seconds", func(t *testing.T) {
+		delay, err := headers.RetryAfter(fixture(t, "openai_429.http"), now)
+
+		if err != nil {
+			t.Fatal(err)
+		}
+		if delay != 20*time.Second {
+			t.Fatalf("retry-after = %v, want 20s", delay)
+		}
+	})
+
 	t.Run("is available on its own when the rate-limit headers are missing", func(t *testing.T) {
 		h := fixture(t, "retry_after_only.http")
 
