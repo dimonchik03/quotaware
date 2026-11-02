@@ -34,7 +34,7 @@ while [ $(( $(date +%s) - started )) -lt "$watch_seconds" ]; do
   fi
   read -r current desired <<<"$(kubectl -n "$namespace" get hpa keda-hpa-llm-workers -o jsonpath='{.status.currentReplicas} {.status.desiredReplicas}' 2>/dev/null || echo "- -")"
   limited=$(kubectl -n "$namespace" logs deploy/llm-workers --all-pods=true --since=15s 2>/dev/null | grep -cE '(^| )429$' || true)
-  ceiling=$(kubectl -n "$namespace" logs deploy/quotaware --since=15s 2>/dev/null | grep 'ceiling changed' | tail -1 | sed -E 's/.*from=([0-9]+) to=([0-9]+) reason=([a-z_]+).*/\1 -> \2 (\3)/' || true)
+  ceiling=$(kubectl -n "$namespace" logs deploy/quotaware --since=15s 2>/dev/null | grep 'ceiling changed' | tail -1 | sed -E 's/.*from=([0-9]+) to=([0-9]+)( mode=[a-z]+)? reason=([a-z_]+).*/\1 -> \2 (\4)/' || true)
   printf '%-9s %-9s %-8s %-6s %s\n' "$(date +%H:%M:%S)" "${current:--}" "${desired:--}" "${limited:-0}" "${ceiling}"
   sleep 15
 done
