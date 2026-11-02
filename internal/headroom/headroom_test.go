@@ -323,7 +323,8 @@ func TestConfigValidate(t *testing.T) {
 		{"rejects a zero step interval", func(c *headroom.Config) { c.StepInterval = 0 }},
 		{"rejects a zero stale_after", func(c *headroom.Config) { c.StaleAfter = 0 }},
 		{"rejects stale_hard below stale_after", func(c *headroom.Config) { c.StaleHard = time.Minute }},
-		{"rejects a negative default ceiling", func(c *headroom.Config) { c.DefaultCeiling = -1 }},
+		{"rejects a default ceiling below min replicas", func(c *headroom.Config) { c.MinReplicas, c.DefaultCeiling = 2, 1 }},
+		{"rejects a default ceiling above max replicas", func(c *headroom.Config) { c.DefaultCeiling = c.MaxReplicas + 1 }},
 	}
 
 	if err := config().Validate(); err != nil {

@@ -129,7 +129,7 @@ func (s *Service) parse(ref *externalscaler.ScaledObjectRef) (trigger, error) {
 func (s *Service) parseAIMD(metadata map[string]string, cfg headroom.Config) (aimd.Config, error) {
 	aimdConfig := s.cfg.AIMD
 	aimdConfig.Interval, aimdConfig.Window, aimdConfig.Min, aimdConfig.Max = cfg.StepInterval, state.WindowLength, cfg.MinReplicas, cfg.MaxReplicas
-	aimdConfig.Start = min(max(cfg.DefaultCeiling, cfg.MinReplicas), cfg.MaxReplicas)
+	aimdConfig.Start = cfg.DefaultCeiling
 	floats := []floatField{{"aimdThreshold", &aimdConfig.Threshold}, {"aimdDecrease", &aimdConfig.Decrease}}
 	for _, field := range floats {
 		if err := parseFloat(metadata, field.name, field.target); err != nil {
