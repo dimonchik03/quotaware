@@ -73,6 +73,9 @@ Buckets that never showed a usable quota, or whose last observation is older tha
 `staleHard`, are driven by AIMD: start at `defaultCeiling`, add `aimdIncrease` per
 `stepInterval` of clean traffic, multiply by `aimdDecrease` when the 429 share of the
 last minute exceeds `aimdThreshold`, then hold for the longest `retry-after` seen,
+where the window counts only the responses that carry the provider's verdict on the
+quota, 2xx and 429, so a 401 or an outage neither dilutes the share nor passes for
+clean traffic (ADR 0009),
 at least one window, and never halve twice on one burst. The same rule guards a
 header-derived ceiling: a burst of 429s halves it even when the headers still look
 healthy. Both act on the ceiling before the drain guard, and the store keeps that

@@ -60,7 +60,7 @@ func NewCollector(store *state.Store, now func() time.Time) *Collector {
 		latencySeconds:    describe("latency_seconds", "Smoothed wall-clock latency of successful calls."),
 		inflight:          describe("inflight", "Calls currently open through the proxy."),
 		retryAfterSeconds: describe("retry_after_seconds", "Retry-After of the last 429."),
-		rateLimitedRatio:  describe("rate_limited_ratio", "Share of responses in the last minute that were 429."),
+		rateLimitedRatio:  describe("rate_limited_ratio", "Share of 429 among the 2xx and 429 responses of the last minute."),
 		responses:         describe("responses_total", "Responses observed from the provider."),
 		rateLimited:       describe("429_total", "Responses with status 429."),
 		aborted:           describe("aborted_total", "Responses the client stopped reading before the end."),

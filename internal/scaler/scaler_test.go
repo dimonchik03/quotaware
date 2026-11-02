@@ -478,6 +478,26 @@ func TestAIMD(t *testing.T) {
 		}
 	})
 
+	t.Run("holds the ceiling while the provider answers 5xx instead of counting them as clean traffic", func(t *testing.T) {
+		f := newFixture(t)
+		metadata := capMetadata()
+		metadata["defaultCeiling"] = "2"
+		for range 5 {
+			f.respond(bucketA, http.StatusOK, state.HeadersMissing, 0)
+		}
+		if got := metric(t, f, metadata); got != 2 {
+			t.Fatalf("ceiling = %d, want the default of 2", got)
+		}
+		f.clock.Advance(70 * time.Second)
+		for range 5 {
+			f.respond(bucketA, http.StatusServiceUnavailable, state.HeadersMissing, 0)
+		}
+
+		if got := metric(t, f, metadata); got != 2 {
+			t.Fatalf("ceiling = %d, want the ceiling held through an outage", got)
+		}
+	})
+
 	t.Run("halves on 429s without headers and holds for the retry-after", func(t *testing.T) {
 		f := newFixture(t)
 		metadata := capMetadata()

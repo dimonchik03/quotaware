@@ -321,7 +321,9 @@ func (s *Store) End(key Key, sample Sample) {
 		b.RateLimited++
 		b.RetryAfter = sample.RetryAfter
 	}
-	s.window(key).record(sample.At, sample.Status == http.StatusTooManyRequests, sample.RetryAfter)
+	if carriesLimits(sample.Status) {
+		s.window(key).record(sample.At, sample.Status == http.StatusTooManyRequests, sample.RetryAfter)
+	}
 	switch sample.Headers {
 	case HeadersPresent:
 		b.Quotas = b.Quotas.merge(sample.Quotas)

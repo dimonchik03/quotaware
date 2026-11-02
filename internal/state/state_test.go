@@ -177,6 +177,21 @@ func TestStore(t *testing.T) {
 		}
 	})
 
+	t.Run("the 429 window ignores responses the provider did not accept", func(t *testing.T) {
+		s := store(t, 0.5)
+
+		s.End(key, state.Sample{Status: http.StatusUnauthorized, Complete: true, Headers: state.HeadersMissing, At: now})
+		s.End(key, state.Sample{Status: http.StatusServiceUnavailable, Complete: true, Headers: state.HeadersMissing, At: now})
+
+		b := bucketAt(t, s, now)
+		if b.Recent.Responses != 0 || b.Recent.RateLimited != 0 {
+			t.Fatalf("recent = %+v, want an empty window after a 401 and a 503", b.Recent)
+		}
+		if b.Responses != 2 {
+			t.Fatalf("responses = %d, want both still counted as responses", b.Responses)
+		}
+	})
+
 	t.Run("a window the new sample does not know keeps its last value", func(t *testing.T) {
 		s := store(t, 0.5)
 		s.End(key, success(1000, 2*time.Second))

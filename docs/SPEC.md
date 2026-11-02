@@ -119,8 +119,9 @@ Guards:
   says otherwise is rejected instead of clamped.
 
 AIMD fallback when headers are absent, unparseable or stale (Gemini, some gateways,
-Azure variants to be verified): classic congestion control. If the 429 ratio in the
-last minute exceeds `aimdThreshold` (default 0.02), multiply the ceiling by
+Azure variants to be verified): classic congestion control. If the share of 429 among
+the 2xx and 429 responses of the last minute exceeds `aimdThreshold` (default 0.02),
+multiply the ceiling by
 `aimdDecrease` (default 0.5) and hold it until the longest observed `retry-after`
 elapses, at least one minute; otherwise add `aimdIncrease` (default 1) per
 `stepInterval` up to `maxReplicas`. Header mode and AIMD run together; AIMD acts as a

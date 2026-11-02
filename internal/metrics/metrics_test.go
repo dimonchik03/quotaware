@@ -109,7 +109,7 @@ quotaware_limit_requests{key="ab12",model="gpt-4.1-mini",provider="openai"} 1000
 # TYPE quotaware_limit_tokens gauge
 quotaware_limit_tokens{key="ab12",model="gpt-4.1-mini",provider="openai",window="project_tokens"} 100000
 quotaware_limit_tokens{key="ab12",model="gpt-4.1-mini",provider="openai",window="tokens"} 600000
-# HELP quotaware_rate_limited_ratio Share of responses in the last minute that were 429.
+# HELP quotaware_rate_limited_ratio Share of 429 among the 2xx and 429 responses of the last minute.
 # TYPE quotaware_rate_limited_ratio gauge
 quotaware_rate_limited_ratio{key="ab12",model="gpt-4.1-mini",provider="openai"} 0.5
 # HELP quotaware_remaining_requests Requests remaining in the current window.
