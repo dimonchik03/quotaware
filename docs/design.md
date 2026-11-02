@@ -93,7 +93,8 @@ observe endpoint needs a bearer token unless the operator opts out explicitly.
 Trigger metadata may only point single-trigger mode at Redis addresses the operator
 listed. Ceiling state is keyed by a hash of the trigger metadata next to the
 ScaledObject, so a caller that sends other metadata for the same name evaluates its
-own entry and cannot move the one KEDA continues from (ADR 0009). The store caps the
+own entry and cannot move the one KEDA continues from, and one gRPC connection may
+hold at most 256 streams (ADR 0009). The store caps the
 buckets and the ScaledObjects it tracks, counts what it
 refused, and the scaler bounds the names it accepts, so an unauthenticated caller
 can exhaust neither memory nor label cardinality.

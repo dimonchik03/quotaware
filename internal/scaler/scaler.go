@@ -25,7 +25,14 @@ import (
 	"github.com/dimonchik03/quotaware/internal/state"
 )
 
-const MetricName = "quotaware-ceiling"
+const (
+	MetricName              = "quotaware-ceiling"
+	MaxStreamsPerConnection = 256
+)
+
+func NewServer() *grpc.Server {
+	return grpc.NewServer(grpc.MaxConcurrentStreams(MaxStreamsPerConnection))
+}
 
 type QueueDepth interface {
 	Len(ctx context.Context, name string) (int64, error)

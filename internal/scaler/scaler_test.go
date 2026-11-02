@@ -675,18 +675,22 @@ func TestOverGRPC(t *testing.T) {
 	f := newFixture(t)
 	f.observe(bucketA, 900, 500000)
 	listener := bufconn.Listen(1 << 20)
-	server := grpc.NewServer()
+	server := scaler.NewServer()
 	f.service.Register(server)
 	go func() { _ = server.Serve(listener) }()
 	t.Cleanup(server.Stop)
-	conn, err := grpc.NewClient("passthrough:///bufconn",
-		grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) { return listener.DialContext(ctx) }),
-		grpc.WithTransportCredentials(insecure.NewCredentials()))
-	if err != nil {
-		t.Fatal(err)
+	connect := func(t *testing.T) externalscaler.ExternalScalerClient {
+		t.Helper()
+		conn, err := grpc.NewClient("passthrough:///bufconn",
+			grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) { return listener.DialContext(ctx) }),
+			grpc.WithTransportCredentials(insecure.NewCredentials()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = conn.Close() })
+		return externalscaler.NewExternalScalerClient(conn)
 	}
-	t.Cleanup(func() { _ = conn.Close() })
-	client := externalscaler.NewExternalScalerClient(conn)
+	client := connect(t)
 
 	t.Run("serves metrics over the wire", func(t *testing.T) {
 		response, err := client.GetMetrics(context.Background(), &externalscaler.GetMetricsRequest{ScaledObjectRef: ref(capMetadata())})
@@ -752,6 +756,42 @@ func TestOverGRPC(t *testing.T) {
 
 		if code(err) != codes.DeadlineExceeded {
 			t.Fatalf("code = %v, want the stream to stay open until the client leaves", code(err))
+		}
+	})
+
+	t.Run("parks at most the stream limit on one connection and admits the next once one leaves", func(t *testing.T) {
+		own := connect(t)
+		parked, release := context.WithCancel(context.Background())
+		defer release()
+		for range scaler.MaxStreamsPerConnection {
+			stream, err := own.StreamIsActive(parked, ref(capMetadata()))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := stream.Recv(); err != nil {
+				t.Fatal(err)
+			}
+		}
+		waiting, stopWaiting := context.WithTimeout(context.Background(), 300*time.Millisecond)
+		defer stopWaiting()
+
+		extra, err := own.StreamIsActive(waiting, ref(capMetadata()))
+		if err == nil {
+			_, err = extra.Recv()
+		}
+
+		if code(err) != codes.DeadlineExceeded {
+			t.Fatalf("code = %v, want the stream beyond the limit to wait", code(err))
+		}
+		release()
+		admitted, stopAdmitted := context.WithTimeout(context.Background(), 5*time.Second)
+		defer stopAdmitted()
+		stream, err := own.StreamIsActive(admitted, ref(capMetadata()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := stream.Recv(); err != nil {
+			t.Fatalf("stream after the others left: %v", err)
 		}
 	})
 

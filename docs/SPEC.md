@@ -161,6 +161,8 @@ beyond what it validates: ScaledObject names and namespaces are bounded to 253
 characters, at most `-max-scaled-objects` (1000) ScaledObjects are served and the
 rest get ResourceExhausted, and single-trigger mode only dials the Redis addresses
 listed with `-redis-address`; any other `redisAddress` is PermissionDenied (ADR 0008).
+One gRPC connection may hold at most 256 streams, so a caller that parks
+`StreamIsActive` streams cannot grow the process without bound (ADR 0009).
 
 ### 5. Combining with the existing queue trigger
 
