@@ -81,6 +81,7 @@ type Bucket struct {
 	ObservedAt       time.Time
 	LastSeen         time.Time
 	Responses        int64
+	Succeeded        int64
 	RateLimited      int64
 	Aborted          int64
 	UpstreamErrors   int64
@@ -132,6 +133,10 @@ func (w *window) recent(at time.Time) Recent {
 		}
 	}
 	return r
+}
+
+func (b Bucket) Accepted() bool {
+	return b.Succeeded > 0 || b.RateLimited > 0
 }
 
 func (b Bucket) Observation() headroom.Observation {
@@ -317,6 +322,9 @@ func (s *Store) End(key Key, sample Sample) {
 	b.InFlight = max(b.InFlight-1, 0)
 	b.LastSeen = latest(b.LastSeen, sample.At)
 	b.Responses++
+	if succeeded(sample.Status) {
+		b.Succeeded++
+	}
 	if sample.Status == http.StatusTooManyRequests {
 		b.RateLimited++
 		b.RetryAfter = sample.RetryAfter

@@ -192,6 +192,23 @@ func TestStore(t *testing.T) {
 		}
 	})
 
+	t.Run("a bucket counts as accepted once the provider answered 2xx or 429", func(t *testing.T) {
+		s := store(t, 0.5)
+		limited := state.Key{Provider: "openai", Model: "gpt-4.1-mini", Key: "cd34"}
+
+		s.End(key, state.Sample{Status: http.StatusUnauthorized, Complete: true, Headers: state.HeadersMissing, At: now})
+		refused := bucketAt(t, s, now).Accepted()
+		s.End(key, success(1000, time.Second))
+		s.End(limited, state.Sample{Status: http.StatusTooManyRequests, Complete: true, Headers: state.HeadersMissing, At: now})
+
+		if refused || !bucketAt(t, s, now).Accepted() {
+			t.Fatal("want a bucket refused after a 401 and accepted after a 2xx")
+		}
+		if b, _ := s.Bucket(limited, now); !b.Accepted() {
+			t.Fatal("want a bucket accepted after a 429 alone")
+		}
+	})
+
 	t.Run("a window the new sample does not know keeps its last value", func(t *testing.T) {
 		s := store(t, 0.5)
 		s.End(key, success(1000, 2*time.Second))

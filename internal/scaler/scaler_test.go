@@ -280,6 +280,31 @@ func TestGetMetrics(t *testing.T) {
 		}
 	})
 
+	t.Run("leaves a credential the provider never accepted out of the sum", func(t *testing.T) {
+		f := newFixture(t)
+		f.observe(bucketA, 900, 500000)
+		for range 3 {
+			f.respond(state.Key{Provider: "openai", Model: "gpt-4.1-mini", Key: "b"}, http.StatusUnauthorized, state.HeadersMissing, 0)
+		}
+
+		if got := metric(t, f, capMetadata()); got != 4 {
+			t.Fatalf("ceiling = %d, want 4 with the refused credential ignored", got)
+		}
+		if ceilings := f.store.Ceilings(); len(ceilings) != 1 {
+			t.Fatalf("recorded = %+v, want no ceiling tracked for the refused credential", ceilings)
+		}
+	})
+
+	t.Run("counts a credential that only saw 429s", func(t *testing.T) {
+		f := newFixture(t)
+		f.observe(bucketA, 900, 500000)
+		f.respond(state.Key{Provider: "openai", Model: "gpt-4.1-mini", Key: "b"}, http.StatusTooManyRequests, state.HeadersMissing, 0)
+
+		if got := metric(t, f, capMetadata()); got != 5 {
+			t.Fatalf("ceiling = %d, want 4 plus the default of the rate-limited credential", got)
+		}
+	})
+
 	t.Run("clamps the sum across credentials to maxReplicas", func(t *testing.T) {
 		f := newFixture(t)
 		f.observe(bucketA, 900, 500000)

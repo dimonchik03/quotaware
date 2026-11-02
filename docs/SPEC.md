@@ -155,8 +155,10 @@ key), `safety` (0.85), `share` (1), `maxStepUp` (2), `stepInterval` (15s),
 Ceilings are computed per ScaledObject, trigger and bucket: the state a poll continues
 from is keyed by the namespace, the name and a hash of the trigger metadata, so a
 caller that sends other metadata for the same name evaluates its own entry and never
-moves the one KEDA's trigger reads (ADR 0009). They are summed across the credentials
-that match and clamped to `maxReplicas`. A cap trigger never reports `IsActive`;
+moves the one KEDA's trigger reads (ADR 0009). They are summed across the matching
+credentials the provider has accepted at least once with a 2xx or a 429, so a key
+that only ever saw 401s is tracked but never scaled on, and clamped to
+`maxReplicas`. A cap trigger never reports `IsActive`;
 activation stays with the demand trigger. The scaler trusts nothing in the request
 beyond what it validates: ScaledObject names and namespaces are bounded to 253
 characters, at most `-max-scaled-objects` (1000) ScaledObjects are served and the

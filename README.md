@@ -201,8 +201,10 @@ in `redisAddresses` (the `-redis-address` flag); any other `redisAddress` in tri
 metadata is answered with PermissionDenied. Each quotaware serves at most
 `-max-scaled-objects` (1000) ScaledObjects; the rest get ResourceExhausted. Ceiling
 state is kept per ScaledObject and trigger metadata, so a caller on the gRPC port
-that sends other metadata for the same name gets its own entry and cannot move yours
-(ADR 0009). The remaining knobs (`credential`, `safety`, `share`,
+that sends other metadata for the same name gets its own entry and cannot move yours.
+A credential enters the sum only once the provider has accepted it with a 2xx or a
+429, so a bogus key sent through the proxy adds nothing to the ceiling (ADR 0009).
+The remaining knobs (`credential`, `safety`, `share`,
 `maxStepUp`, `stepInterval`, `defaultCeiling`, `minReplicas`, `staleAfter`,
 `staleHard`, `window`) and their defaults are listed in `docs/SPEC.md`. A Grafana
 dashboard is in `deploy/grafana/`.

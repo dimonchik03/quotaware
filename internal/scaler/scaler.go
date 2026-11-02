@@ -421,6 +421,9 @@ func (s *Service) ceiling(ref *externalscaler.ScaledObjectRef, t trigger) (int, 
 		if b.Key.Provider != t.provider || b.Key.Model != t.model || (t.credential != "" && b.Key.Key != t.credential) {
 			continue
 		}
+		if !b.Accepted() {
+			continue
+		}
 		matched++
 		consumer := state.Consumer{Namespace: ref.GetNamespace(), ScaledObject: ref.GetName(), Trigger: t.fingerprint, Bucket: b.Key}
 		value, err := s.evaluate(consumer, t, b.Observation(), b.Recent, now)
