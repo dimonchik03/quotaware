@@ -192,23 +192,6 @@ func TestStore(t *testing.T) {
 		}
 	})
 
-	t.Run("a bucket counts as accepted once the provider answered 2xx or 429", func(t *testing.T) {
-		s := store(t, 0.5)
-		limited := state.Key{Provider: "openai", Model: "gpt-4.1-mini", Key: "cd34"}
-
-		s.End(key, state.Sample{Status: http.StatusUnauthorized, Complete: true, Headers: state.HeadersMissing, At: now})
-		refused := bucketAt(t, s, now).Accepted()
-		s.End(key, success(1000, time.Second))
-		s.End(limited, state.Sample{Status: http.StatusTooManyRequests, Complete: true, Headers: state.HeadersMissing, At: now})
-
-		if refused || !bucketAt(t, s, now).Accepted() {
-			t.Fatal("want a bucket refused after a 401 and accepted after a 2xx")
-		}
-		if b, _ := s.Bucket(limited, now); !b.Accepted() {
-			t.Fatal("want a bucket accepted after a 429 alone")
-		}
-	})
-
 	t.Run("a window the new sample does not know keeps its last value", func(t *testing.T) {
 		s := store(t, 0.5)
 		s.End(key, success(1000, 2*time.Second))
@@ -517,4 +500,31 @@ func TestStore(t *testing.T) {
 			}
 		}
 	})
+}
+
+func TestBucketAccepted(t *testing.T) {
+	cases := []struct {
+		name     string
+		statuses []int
+		want     bool
+	}{
+		{"a bucket the provider only refused is not accepted", []int{http.StatusUnauthorized, http.StatusForbidden}, false},
+		{"a bucket with only upstream failures is not accepted", []int{http.StatusServiceUnavailable}, false},
+		{"a success accepts the bucket", []int{http.StatusUnauthorized, http.StatusOK}, true},
+		{"a 429 alone accepts the bucket", []int{http.StatusTooManyRequests}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := store(t, 0.5)
+			for _, status := range tc.statuses {
+				s.End(key, state.Sample{Status: status, Complete: true, Headers: state.HeadersMissing, At: now})
+			}
+
+			got := bucketAt(t, s, now).Accepted()
+
+			if got != tc.want {
+				t.Fatalf("accepted = %v, want %v", got, tc.want)
+			}
+		})
+	}
 }
