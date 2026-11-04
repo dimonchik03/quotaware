@@ -520,7 +520,7 @@ func TestGetMetrics(t *testing.T) {
 		f.observe(bucketA, 900, 500000)
 		f.observe(state.Key{Provider: "openai", Model: "gpt-4.1-mini", Key: "b"}, 900, 500000)
 		metadata := perCredentialMetadata()
-		metadata["maxReplicas"] = "6"
+		metadata["maxReplicas"], metadata["maxStepUp"] = "6", "6"
 
 		if got := metric(t, f, metadata); got != 6 {
 			t.Fatalf("ceiling = %d, want the sum clamped to 6", got)
@@ -615,7 +615,7 @@ func TestGetMetrics(t *testing.T) {
 			t.Fatalf("ceiling = %d, want 4 before the other caller", got)
 		}
 		other := capMetadata()
-		other["maxReplicas"] = "1"
+		other["maxReplicas"], other["maxStepUp"] = "1", "1"
 
 		if got := metric(t, f, other); got != 1 {
 			t.Fatalf("ceiling = %d, want the other caller clamped to its own maxReplicas", got)

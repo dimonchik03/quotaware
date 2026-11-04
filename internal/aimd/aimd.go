@@ -28,8 +28,8 @@ func (c Config) Validate() error {
 		return errors.New("threshold must be within [0, 1)")
 	case math.IsNaN(c.Decrease) || c.Decrease <= 0 || c.Decrease >= 1:
 		return errors.New("decrease must be within (0, 1)")
-	case c.Increase <= 0:
-		return errors.New("increase must be positive")
+	case c.Increase <= 0 || c.Increase > c.Max:
+		return errors.New("increase must be positive and at most max")
 	case c.Interval <= 0 || c.Window <= 0:
 		return errors.New("interval and window must be positive")
 	case c.MaxHold < c.Window:

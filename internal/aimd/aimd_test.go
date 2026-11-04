@@ -120,6 +120,7 @@ func TestConfigValidate(t *testing.T) {
 		{"rejects a decrease that is not a number", func(c *aimd.Config) { c.Decrease = math.NaN() }},
 		{"rejects a decrease of one", func(c *aimd.Config) { c.Decrease = 1 }},
 		{"rejects a zero increase", func(c *aimd.Config) { c.Increase = 0 }},
+		{"rejects an increase above max", func(c *aimd.Config) { c.Increase = c.Max + 1 }},
 		{"rejects a zero interval", func(c *aimd.Config) { c.Interval = 0 }},
 		{"rejects a zero window", func(c *aimd.Config) { c.Window = 0 }},
 		{"rejects a max hold shorter than the window", func(c *aimd.Config) { c.MaxHold = 30 * time.Second }},

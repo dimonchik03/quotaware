@@ -61,10 +61,15 @@ func DefaultConfig() Config {
 	}
 }
 
+const (
+	MaxReplicaLimit = 100000
+	MaxConcurrency  = 1000000
+)
+
 func (c Config) Validate() error {
 	switch {
-	case c.Concurrency <= 0:
-		return errors.New("concurrency must be positive")
+	case c.Concurrency <= 0 || c.Concurrency > MaxConcurrency:
+		return errors.New("concurrency must be positive and at most 1000000")
 	case math.IsNaN(c.Safety) || c.Safety <= 0 || c.Safety > 1:
 		return errors.New("safety must be within (0, 1]")
 	case math.IsNaN(c.Share) || c.Share <= 0 || c.Share > 1:
@@ -73,10 +78,10 @@ func (c Config) Validate() error {
 		return errors.New("window must be positive")
 	case c.MinReplicas < 0:
 		return errors.New("min replicas must not be negative")
-	case c.MaxReplicas <= 0 || c.MaxReplicas < c.MinReplicas:
-		return errors.New("max replicas must be positive and at least min replicas")
-	case c.MaxStepUp <= 0:
-		return errors.New("max step up must be positive")
+	case c.MaxReplicas <= 0 || c.MaxReplicas < c.MinReplicas || c.MaxReplicas > MaxReplicaLimit:
+		return errors.New("max replicas must be positive, at least min replicas and at most 100000")
+	case c.MaxStepUp <= 0 || c.MaxStepUp > c.MaxReplicas:
+		return errors.New("max step up must be positive and at most max replicas")
 	case c.StepInterval <= 0:
 		return errors.New("step interval must be positive")
 	case c.StaleAfter <= 0 || c.StaleHard < c.StaleAfter:
