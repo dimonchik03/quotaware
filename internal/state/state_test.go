@@ -18,7 +18,7 @@ var (
 
 func store(t *testing.T, alpha float64) *state.Store {
 	t.Helper()
-	s, err := state.New(alpha)
+	s, err := state.New(alpha, state.DefaultLimits())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -62,11 +62,13 @@ func bucket(t *testing.T, s *state.Store) state.Bucket {
 
 func bucketAt(t *testing.T, s *state.Store, at time.Time) state.Bucket {
 	t.Helper()
-	b, ok := s.Bucket(key, at)
-	if !ok {
-		t.Fatal("bucket not found")
+	for _, b := range s.Buckets(at) {
+		if b.Key == key {
+			return b
+		}
 	}
-	return b
+	t.Fatal("bucket not found")
+	return state.Bucket{}
 }
 
 func TestStore(t *testing.T) {
@@ -352,7 +354,7 @@ func TestStore(t *testing.T) {
 	})
 
 	t.Run("refuses a new bucket beyond the limit and counts the rejection", func(t *testing.T) {
-		s, err := state.NewWithLimits(0.5, state.Limits{Buckets: 1, Consumers: 1})
+		s, err := state.New(0.5, state.Limits{Buckets: 1, Consumers: 1})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -362,7 +364,7 @@ func TestStore(t *testing.T) {
 		s.Begin(other, now)
 		s.End(other, success(1000, time.Second))
 
-		if _, ok := s.Bucket(other, now); ok {
+		if _, ok := lookup(s, other, now); ok {
 			t.Fatal("bucket beyond the limit was created")
 		}
 		if stats := s.Stats(); stats.Buckets != 1 || stats.RejectedBuckets != 2 {
@@ -375,7 +377,7 @@ func TestStore(t *testing.T) {
 	})
 
 	t.Run("refuses a new scaled object beyond the limit", func(t *testing.T) {
-		s, err := state.NewWithLimits(0.5, state.Limits{Buckets: 1, Consumers: 1})
+		s, err := state.New(0.5, state.Limits{Buckets: 1, Consumers: 1})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -400,7 +402,7 @@ func TestStore(t *testing.T) {
 	})
 
 	t.Run("rejects non-positive limits", func(t *testing.T) {
-		if _, err := state.NewWithLimits(0.5, state.Limits{Buckets: 0, Consumers: 1}); err == nil {
+		if _, err := state.New(0.5, state.Limits{Buckets: 0, Consumers: 1}); err == nil {
 			t.Fatal("expected an error for a zero bucket limit")
 		}
 	})
@@ -474,13 +476,13 @@ func TestStore(t *testing.T) {
 		if evicted != 1 {
 			t.Fatalf("evicted = %d, want 1", evicted)
 		}
-		if _, ok := s.Bucket(idle, now); ok {
+		if _, ok := lookup(s, idle, now); ok {
 			t.Fatal("idle bucket still present")
 		}
-		if _, ok := s.Bucket(busy, now); !ok {
+		if _, ok := lookup(s, busy, now); !ok {
 			t.Fatal("bucket with a call in flight was evicted")
 		}
-		if _, ok := s.Bucket(key, now); !ok {
+		if _, ok := lookup(s, key, now); !ok {
 			t.Fatal("recently seen bucket was evicted")
 		}
 	})
@@ -568,7 +570,7 @@ func TestStore(t *testing.T) {
 
 	t.Run("rejects an alpha outside the unit interval", func(t *testing.T) {
 		for _, alpha := range []float64{0, -0.1, 1.5, math.NaN()} {
-			if _, err := state.New(alpha); err == nil {
+			if _, err := state.New(alpha, state.DefaultLimits()); err == nil {
 				t.Fatalf("alpha %v accepted", alpha)
 			}
 		}
@@ -645,4 +647,13 @@ func minuteOfTraffic(t *testing.T) *state.Store {
 	limited.RetryAfter, limited.At = 5*time.Second, now.Add(50*time.Second)
 	s.End(key, limited)
 	return s
+}
+
+func lookup(s *state.Store, wanted state.Key, at time.Time) (state.Bucket, bool) {
+	for _, b := range s.Buckets(at) {
+		if b.Key == wanted {
+			return b, true
+		}
+	}
+	return state.Bucket{}, false
 }

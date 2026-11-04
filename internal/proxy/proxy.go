@@ -31,7 +31,7 @@ type Config struct {
 }
 
 func DefaultConfig() Config {
-	return Config{MaxRequestBytes: 8 << 20, MaxCaptureBytes: 4 << 20, MaxModelBytes: 256, ReadBodyTimeout: 30 * time.Second, Logger: slog.Default()}
+	return Config{MaxRequestBytes: 8 << 20, MaxCaptureBytes: 4 << 20, MaxModelBytes: usage.MaxModelBytes, ReadBodyTimeout: 30 * time.Second, Logger: slog.Default()}
 }
 
 type Proxy struct {

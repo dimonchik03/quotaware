@@ -148,7 +148,7 @@ func runObserver(command string, args []string, stderr io.Writer, withScaler boo
 	}
 	logger := slog.New(slog.NewTextHandler(stderr, nil))
 	options.proxy.Logger = logger
-	store, err := state.NewWithLimits(options.alpha, options.limits)
+	store, err := state.New(options.alpha, options.limits)
 	if err != nil {
 		fmt.Fprintf(stderr, "quotaware %s: %v\n", command, err)
 		return 2

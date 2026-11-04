@@ -18,7 +18,7 @@ var now = time.Date(2026, 11, 1, 18, 0, 0, 0, time.UTC)
 
 func populated(t *testing.T) *state.Store {
 	t.Helper()
-	s, err := state.New(0.5)
+	s, err := state.New(0.5, state.DefaultLimits())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -58,7 +58,7 @@ func populated(t *testing.T) *state.Store {
 
 func TestCollector(t *testing.T) {
 	t.Run("exposes how many buckets and scaled objects are tracked and how many were refused", func(t *testing.T) {
-		s, err := state.NewWithLimits(0.5, state.Limits{Buckets: 1, Consumers: 1})
+		s, err := state.New(0.5, state.Limits{Buckets: 1, Consumers: 1})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -134,7 +134,7 @@ quotaware_retry_after_seconds{key="ab12",model="gpt-4.1-mini",provider="openai"}
 # HELP quotaware_tokens_per_call Smoothed tokens consumed per successful call.
 # TYPE quotaware_tokens_per_call gauge
 quotaware_tokens_per_call{key="ab12",model="gpt-4.1-mini",provider="openai"} 1200
-# HELP quotaware_upstream_errors_total Calls that never produced a provider response.
+# HELP quotaware_upstream_errors_total Calls the upstream failed: no response at all, or a body that broke mid-stream.
 # TYPE quotaware_upstream_errors_total counter
 quotaware_upstream_errors_total{key="ab12",model="gpt-4.1-mini",provider="openai"} 1
 # HELP quotaware_usage_missing_total Successful responses without a usable usage object.

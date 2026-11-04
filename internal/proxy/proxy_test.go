@@ -99,7 +99,7 @@ func newHarnessWithOptions(t *testing.T, c *clock, upstream string, configure fu
 	if err != nil {
 		t.Fatal(err)
 	}
-	store, err := state.New(0.5)
+	store, err := state.New(0.5, state.DefaultLimits())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -647,7 +647,7 @@ func TestProxy(t *testing.T) {
 	})
 
 	t.Run("requires both upstreams", func(t *testing.T) {
-		store, _ := state.New(0.5)
+		store, _ := state.New(0.5, state.DefaultLimits())
 
 		if _, err := proxy.New(proxy.DefaultConfig(), store, time.Now); err == nil {
 			t.Fatal("expected an error without upstreams")

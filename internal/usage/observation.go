@@ -2,6 +2,7 @@ package usage
 
 import (
 	"errors"
+	"fmt"
 	"regexp"
 	"time"
 )
@@ -40,7 +41,7 @@ func (o Observation) Validate() error {
 	case !ValidProvider(o.Provider):
 		return errors.New("provider must be openai or anthropic")
 	case o.Model == "" || len(o.Model) > MaxModelBytes:
-		return errors.New("model is required and at most 256 bytes")
+		return fmt.Errorf("model is required and at most %d bytes", MaxModelBytes)
 	case !ValidCredential(o.Credential):
 		return errors.New("credential must be the 12-character hash or anonymous")
 	case o.Status < 100 || o.Status > 599:

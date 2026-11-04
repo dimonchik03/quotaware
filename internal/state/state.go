@@ -228,11 +228,7 @@ type Store struct {
 	stats    Stats
 }
 
-func New(alpha float64) (*Store, error) {
-	return NewWithLimits(alpha, DefaultLimits())
-}
-
-func NewWithLimits(alpha float64, limits Limits) (*Store, error) {
+func New(alpha float64, limits Limits) (*Store, error) {
 	switch {
 	case math.IsNaN(alpha) || alpha <= 0 || alpha > 1:
 		return nil, errors.New("alpha must be within (0, 1]")
@@ -419,16 +415,6 @@ func (s *Store) Evict(now time.Time, idleFor time.Duration) int {
 		}
 	}
 	return evicted
-}
-
-func (s *Store) Bucket(key Key, now time.Time) (Bucket, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	b, ok := s.buckets[key]
-	if !ok {
-		return Bucket{}, false
-	}
-	return s.snapshot(b, now), true
 }
 
 func (s *Store) Buckets(now time.Time) []Bucket {

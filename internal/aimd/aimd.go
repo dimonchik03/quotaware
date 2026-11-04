@@ -84,7 +84,7 @@ func Step(cfg Config, state State, signal Signal, now time.Time) Result {
 	switch {
 	case now.Before(state.HoldUntil):
 		return Result{Ceiling: clamp(cfg, state.Ceiling), Action: ActionHold, HoldUntil: state.HoldUntil}
-	case signal.Responses > 0 && signal.Ratio() > cfg.Threshold:
+	case signal.Ratio() > cfg.Threshold:
 		return Result{
 			Ceiling:   clamp(cfg, int(math.Floor(float64(state.Ceiling)*cfg.Decrease))),
 			Action:    ActionDecrease,
@@ -101,7 +101,7 @@ func Guard(cfg Config, ceiling int, state State, signal Signal, now time.Time) (
 	if state.Known && now.Before(state.HoldUntil) {
 		return min(ceiling, state.Ceiling), true, state.HoldUntil
 	}
-	if signal.Responses > 0 && signal.Ratio() > cfg.Threshold {
+	if signal.Ratio() > cfg.Threshold {
 		return clamp(cfg, int(math.Floor(float64(ceiling)*cfg.Decrease))), true, now.Add(hold(cfg, signal))
 	}
 	return ceiling, false, time.Time{}

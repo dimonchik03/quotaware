@@ -84,7 +84,7 @@ func newFixture(t *testing.T) *fixture {
 
 func newFixtureWithLimits(t *testing.T, limits state.Limits) *fixture {
 	t.Helper()
-	store, err := state.NewWithLimits(0.5, limits)
+	store, err := state.New(0.5, limits)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -183,7 +183,7 @@ var bucketA = state.Key{Provider: "openai", Model: "gpt-4.1-mini", Key: "a"}
 
 func TestNew(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	store, _ := state.New(0.5)
+	store, _ := state.New(0.5, state.DefaultLimits())
 	cases := []struct {
 		name  string
 		store *state.Store
@@ -237,7 +237,7 @@ func TestMetadata(t *testing.T) {
 	}
 
 	t.Run("refuses queue mode when no queue factory is configured", func(t *testing.T) {
-		store, _ := state.New(0.5)
+		store, _ := state.New(0.5, state.DefaultLimits())
 		service, err := scaler.New(scaler.DefaultConfig(), store, nil, time.Now, slog.New(slog.NewTextHandler(io.Discard, nil)))
 		if err != nil {
 			t.Fatal(err)
