@@ -6,6 +6,11 @@ services:
         CMD: ./bench/cmd/fakeprovider
     command: ["-listen", ":8081", "-rpm", "3", "-tpm", "50000", "-latency", "100ms", "-jitter", "20ms", "-seed", "1"]
 
+  redis:
+    image: redis:7.4-alpine
+    ports:
+      - "127.0.0.1:16379:6379"
+
   proxy:
     build:
       context: .
@@ -16,11 +21,13 @@ services:
       - -grpc=:9090
       - -openai-upstream=http://fakeprovider:8081
       - -anthropic-upstream=http://fakeprovider:8081
+      - -redis-address=redis:6379
     environment:
       QUOTAWARE_OBSERVE_TOKEN: e2e-observe-token
     ports:
-      - "18080:8080"
-      - "19090:9090"
-      - "19100:9100"
+      - "127.0.0.1:18080:8080"
+      - "127.0.0.1:19090:9090"
+      - "127.0.0.1:19100:9100"
     depends_on:
       - fakeprovider
+      - redis
