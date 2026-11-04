@@ -156,7 +156,7 @@ that broke mid-stream), streams the client abandoned, and how often headers were
 missing or malformed or usage was absent. A malformed header spoils only its own
 window; the windows that parsed still count. Buckets that see no traffic for ten
 minutes are dropped, and at most `-max-buckets` (10000) are tracked: calls on new
-buckets beyond that are counted in `quotaware_buckets_rejected_total` and ignored. Tokens per call count what the provider charges against the quota: prompt
+buckets beyond that are counted in `quotaware_buckets_rejected_total` and ignored. Tokens per call count the usage the provider reports for the quota: prompt
 plus completion tokens for OpenAI, uncached input plus cache writes plus output for
 Anthropic. Usage comes from the response body, so OpenAI streams only report it when
 the client sets `stream_options.include_usage`; a stream without it is counted in
@@ -370,6 +370,30 @@ prints the build version.
 | `-read-body-timeout` | `30s` | time a client may take to send the request body |
 | `-redis-address` (`all`) | none | Redis addresses single-trigger mode may read |
 | `-push-interval` (`all`) | `5s` | how often `StreamIsActive` re-checks a queue |
+
+## Known limitations
+
+- Token accounting follows the response's usage object. OpenAI charges its token limit
+  on an estimate of the prompt plus `max_tokens` when it admits a call, so a client
+  that sets a large `max_tokens` and gets short answers spends more of the window than
+  tokens per call suggests and can still meet 429s, which the AIMD guard then halves.
+- Anthropic reports input and output token windows separately and `tokens-*` as the
+  most restrictive one; quotaware exports all of them but bounds the ceiling by
+  `tokens-*` against input plus output per call, which is conservative when the output
+  limit binds.
+- The instant term reads `remaining / time to reset` as if the window were fixed.
+  Both providers refill continuously, so near the limit the ceiling is lower and
+  moves more than the refill rate alone would justify.
+- Usage is read from identity and gzip bodies only; a response compressed with `br`,
+  `zstd` or `deflate` counts in `quotaware_usage_missing_total` and leaves tokens per
+  call unknown, so only the request window bounds that bucket. A stream larger than
+  `-max-capture-bytes` loses its usage the same way, and every open call may hold up
+  to that much memory for the capture.
+- The proxy and the scaler run in one pod with in-memory state: a restart starts
+  every bucket afresh, and the proxy is in the path of every call it carries, so a
+  rolling update interrupts them. Run collectors instead of the proxy where that
+  matters.
+- Gemini and Azure OpenAI headers are not parsed; those buckets run on AIMD alone.
 
 ## Non-goals
 
