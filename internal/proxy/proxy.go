@@ -136,7 +136,7 @@ func (p *Proxy) observe(response *http.Response) error {
 	retryAfter, err := headers.RetryAfter(response.Header, now)
 	if err != nil {
 		p.cfg.Logger.Warn("retry-after malformed", "provider", c.provider, "model", c.key.Model, "error", err.Error())
-		retryAfter = 0
+		retryAfter, headersStatus = 0, state.HeadersMalformed
 	}
 	status := response.StatusCode
 	contentType := response.Header.Get("Content-Type")

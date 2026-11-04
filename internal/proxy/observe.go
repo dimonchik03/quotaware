@@ -59,7 +59,7 @@ func (o *Observer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	retryAfter, err := headers.RetryAfter(h, now)
 	if err != nil {
 		o.logger.Warn("retry-after malformed", "provider", provider, "model", observation.Model, "error", err.Error())
-		retryAfter = 0
+		retryAfter, status = 0, state.HeadersMalformed
 	}
 	sample := state.Sample{
 		Status:     observation.Status,
@@ -83,8 +83,8 @@ func (o *Observer) authorized(r *http.Request) bool {
 	if o.token == "" {
 		return true
 	}
-	presented := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-	return subtle.ConstantTimeCompare([]byte(presented), []byte(o.token)) == 1
+	presented, bearer := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+	return bearer && subtle.ConstantTimeCompare([]byte(presented), []byte(o.token)) == 1
 }
 
 func parseLimits(logger *slog.Logger, provider headers.Provider, model string, h http.Header, now time.Time) (state.Quotas, state.HeadersStatus) {
