@@ -103,7 +103,36 @@ func LoadRun(dir string) (Run, error) {
 			return Run{}, fmt.Errorf("%s: unsupported result type %q", file, parsed.Data.ResultType)
 		}
 	}
+	if err := run.validate(); err != nil {
+		return Run{}, fmt.Errorf("%s: %w", dir, err)
+	}
 	return run, nil
+}
+
+func (r Run) validate() error {
+	for _, name := range []string{"jobs_total", "completed_total", "failed_total", "abandoned_total", "retries_total", "backoff_seconds_total", "latency_p50", "latency_p95", "rate_limited_total"} {
+		value, ok := r.Totals[name]
+		if !ok {
+			return fmt.Errorf("missing %s.json", name)
+		}
+		if math.IsNaN(value) {
+			if name == "rate_limited_total" && r.Totals["jobs_total"] > 0 && r.Totals["jobs_total"] == r.Totals["completed_total"] && r.Totals["retries_total"] == 0 && r.Totals["failed_total"] == 0 && r.Totals["abandoned_total"] == 0 {
+				r.Totals[name] = 0
+				continue
+			}
+			return fmt.Errorf("no observation for %s", name)
+		}
+	}
+	for _, name := range []string{"replicas", "multiplier", "queue_length", "retries_per_minute", "ceiling"} {
+		points, ok := r.Series[name]
+		if !ok {
+			return fmt.Errorf("missing %s.json", name)
+		}
+		if len(points) == 0 && name != "ceiling" {
+			return fmt.Errorf("no samples for %s", name)
+		}
+	}
+	return nil
 }
 
 func matrix(parsed response) (Series, error) {
@@ -126,7 +155,7 @@ func matrix(parsed response) (Series, error) {
 func vector(parsed response) (float64, error) {
 	switch len(parsed.Data.Result) {
 	case 0:
-		return 0, nil
+		return math.NaN(), nil
 	case 1:
 	default:
 		return 0, fmt.Errorf("want one series, got %d", len(parsed.Data.Result))

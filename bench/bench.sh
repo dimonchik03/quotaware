@@ -6,6 +6,14 @@ cd "$(dirname "$0")/.."
 source bench/kind/common.sh
 phases="${BENCH_PHASES:-half:3m:0.5,full:3m:1,burst:4m:3,idle:4m:0}"
 results="${BENCH_RESULTS:-bench/results/$(date +%Y-%m-%d)}"
+profile="${BENCH_PROFILE:-fixed}"
+if [[ "$profile" == changing ]]; then
+  phases="${BENCH_PHASES:-load:2m:1.5,idle:1m:0}"
+  results="${BENCH_RESULTS:-bench/results/$(date +%Y-%m-%d)-changing}"
+elif [[ "$profile" != fixed ]]; then
+  echo "unknown BENCH_PROFILE: $profile" >&2
+  exit 1
+fi
 concurrency=2
 step=15
 local_port=19095
@@ -18,6 +26,10 @@ ensure_cluster
 build_and_load worker producer
 install_keda
 deploy_base
+if [[ "$profile" == changing ]]; then
+  kubectl -n "$namespace" patch deploy fakeprovider --type=json \
+    -p='[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"-openai-window-rpm=600,180,600"}]' >/dev/null
+fi
 
 log "deploying Prometheus"
 kubectl apply -f bench/prometheus/prometheus.yaml >/dev/null
@@ -87,6 +99,9 @@ export_series() {
     curl -sf "http://localhost:$local_port/api/v1/query" --data-urlencode "query=$2" --data-urlencode "time=$end" > "$dir/$1.json"
   }
   range replicas 'count(up{job="workers"} == 1)'
+  if [[ "$profile" == changing ]]; then
+    range provider_rpm 'max(quotaware_limit_requests{model="gpt-4.1-mini"})'
+  fi
   range inflight 'sum(worker_calls_inflight)'
   range rate_limited_per_minute '(sum(rate(worker_calls_total{status="429"}[1m])) * 60) or vector(0)'
   range retries_per_minute '(sum(rate(worker_retries_total[1m])) * 60) or vector(0)'
@@ -110,13 +125,17 @@ export_series() {
 
 run_variant() {
   local name=$1 manifest=$2 label=$3
-  local dir="$results/$name"
+  local dir="${4:-$results}/$name"
   mkdir -p "$dir"
   log "run $name: $manifest, schedule ${schedule_seconds}s"
   kubectl -n "$namespace" delete job producer --ignore-not-found --wait=true >/dev/null
   kubectl -n "$namespace" delete scaledobject llm-workers --ignore-not-found --wait=true >/dev/null
   kubectl -n "$namespace" delete deploy llm-workers --ignore-not-found --wait=true >/dev/null
   kubectl -n "$namespace" exec deploy/redis -- redis-cli del jobs >/dev/null
+  if [[ "$profile" == changing ]]; then
+    kubectl -n "$namespace" rollout restart deploy/fakeprovider >/dev/null
+    kubectl -n "$namespace" rollout status deploy/fakeprovider --timeout 120s >/dev/null
+  fi
   kubectl -n "$namespace" rollout restart deploy/quotaware >/dev/null
   kubectl -n "$namespace" rollout status deploy/quotaware --timeout 120s >/dev/null
   kubectl apply -f bench/manifests/workers.yaml >/dev/null
@@ -131,6 +150,23 @@ run_variant() {
   log "run $name finished after $(( end - start ))s, exporting series"
   export_series "$dir" "$start" "$end" "$(( end - start ))" "$label"
 }
+
+if [[ "$profile" == changing ]]; then
+  for pass in 1 2; do
+    order=(A B C)
+    if [[ "$pass" == 2 ]]; then order=(C B A); fi
+    for arm in "${order[@]}"; do
+      case "$arm" in
+        A) manifest=scaledobject-a; label="queue only" ;;
+        B) manifest=scaledobject-static; label="static maximum of 10" ;;
+        C) manifest=scaledobject-c; label="quotaware, safety 1" ;;
+      esac
+      run_variant "$arm" "bench/manifests/$manifest.yaml" "$label" "$results/pass-$pass"
+    done
+    go run ./bench/cmd/plot -results "$results/pass-$pass" -concurrency "$concurrency"
+  done
+  exit 0
+fi
 
 run_variant A bench/manifests/scaledobject-a.yaml "queue trigger"
 run_variant B bench/manifests/scaledobject-b.yaml "queue trigger + quotaware, safety 0.85"

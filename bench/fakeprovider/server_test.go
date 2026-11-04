@@ -348,3 +348,26 @@ func TestServer(t *testing.T) {
 		}
 	})
 }
+
+func TestOpenAIChangesRPMOnWindowsStartingAtTheFirstCall(t *testing.T) {
+	cfg := config()
+	cfg.OpenAIWindowRPM = []int{3, 1, 4}
+	s, c := newServer(t, cfg)
+	c.Advance(37 * time.Second)
+	for _, phase := range []struct {
+		delay time.Duration
+		limit string
+		count int
+	}{{0, "3", 3}, {time.Minute, "1", 1}, {time.Minute, "4", 4}, {time.Minute, "4", 4}} {
+		c.Advance(phase.delay)
+		for range phase.count {
+			r := post(t, s, "/v1/chat/completions", chat)
+			if r.Code != 200 || r.Header().Get("x-ratelimit-limit-requests") != phase.limit {
+				t.Fatalf("expected quota %s, got %d %v", phase.limit, r.Code, r.Header())
+			}
+		}
+		if got := post(t, s, "/v1/chat/completions", chat).Code; got != 429 {
+			t.Fatalf("spent quota %s returned %d", phase.limit, got)
+		}
+	}
+}

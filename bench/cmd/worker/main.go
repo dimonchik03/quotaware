@@ -33,7 +33,7 @@ func run(args []string) int {
 	flags.StringVar(&cfg.List, "list", cfg.List, "job list")
 	flags.StringVar(&cfg.ProxyURL, "proxy", cfg.ProxyURL, "quotaware proxy origin")
 	flags.StringVar(&cfg.Model, "model", cfg.Model, "model to call")
-	flags.StringVar(&cfg.APIKey, "api-key", os.Getenv("API_KEY"), "credential sent as a bearer token")
+	flags.StringVar(&cfg.APIKey, "api-key", "", "credential sent as a bearer token")
 	flags.IntVar(&cfg.Concurrency, "concurrency", cfg.Concurrency, "concurrent provider calls")
 	flags.IntVar(&cfg.MaxAttempts, "max-attempts", cfg.MaxAttempts, "attempts per job before giving up")
 	flags.DurationVar(&cfg.MaxBackoff, "max-backoff", cfg.MaxBackoff, "longest wait between attempts")
@@ -43,6 +43,15 @@ func run(args []string) int {
 			return 0
 		}
 		return 2
+	}
+	suppliedKey := false
+	flags.Visit(func(f *flag.Flag) {
+		if f.Name == "api-key" {
+			suppliedKey = true
+		}
+	})
+	if !suppliedKey {
+		cfg.APIKey = os.Getenv("API_KEY")
 	}
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	registry := prometheus.NewRegistry()

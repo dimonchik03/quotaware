@@ -70,8 +70,8 @@ func writeRunAt(t *testing.T, root, name string, runStart time.Time, replicas, r
 	write("queue_length.json", matrixJSON(t, queue))
 	write("multiplier.json", matrixJSON(t, multiplier))
 	write("ceiling.json", matrixJSON(t, ceiling))
-	for metric, value := range totals {
-		write(metric+".json", vectorJSON(t, value))
+	for _, metric := range []string{"jobs_total", "completed_total", "failed_total", "abandoned_total", "retries_total", "rate_limited_total", "latency_p50", "latency_p95", "backoff_seconds_total"} {
+		write(metric+".json", vectorJSON(t, totals[metric]))
 	}
 }
 
