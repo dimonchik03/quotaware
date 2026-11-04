@@ -177,11 +177,19 @@ func TestObserverFlags(t *testing.T) {
 		}
 	})
 
-	t.Run("rejects an upstream without a host", func(t *testing.T) {
-		_, err := parseObserverFlags("proxy", []string{"-openai-upstream", "fakeprovider:8081"}, &bytes.Buffer{}, false)
+	t.Run("rejects an upstream without a scheme", func(t *testing.T) {
+		_, err := parseObserverFlags("proxy", []string{"-openai-upstream", "fakeprovider:8081", "-observe-insecure"}, &bytes.Buffer{}, false)
 
-		if err == nil {
-			t.Fatal("expected an error for a bare host without scheme")
+		if err == nil || !strings.Contains(err.Error(), "scheme") {
+			t.Fatalf("err = %v, want a complaint about the scheme", err)
+		}
+	})
+
+	t.Run("rejects an upstream without a host", func(t *testing.T) {
+		_, err := parseObserverFlags("proxy", []string{"-openai-upstream", "http://", "-observe-insecure"}, &bytes.Buffer{}, false)
+
+		if err == nil || !strings.Contains(err.Error(), "host") {
+			t.Fatalf("err = %v, want a complaint about the host", err)
 		}
 	})
 

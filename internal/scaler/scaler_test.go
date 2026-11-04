@@ -449,7 +449,7 @@ func TestGetMetrics(t *testing.T) {
 			f.respond(state.Key{Provider: "openai", Model: "gpt-4.1-mini", Key: "b"}, http.StatusUnauthorized, state.HeadersMissing, 0)
 		}
 
-		if got := metric(t, f, capMetadata()); got != 4 {
+		if got := metric(t, f, perCredentialMetadata()); got != 4 {
 			t.Fatalf("ceiling = %d, want 4 with the refused credential ignored", got)
 		}
 		if ceilings := bucketCeilings(f); len(ceilings) != 1 {
@@ -635,23 +635,30 @@ func TestGetMetrics(t *testing.T) {
 		}
 	})
 
-	t.Run("keeps the ceiling of a trigger apart from a caller that sends other metadata for the same scaled object", func(t *testing.T) {
+	t.Run("gives a caller that sends other metadata for the same scaled object its own ceiling", func(t *testing.T) {
 		f := newFixture(t)
 		f.observe(bucketA, 900, 500000)
-		if got := metric(t, f, capMetadata()); got != 4 {
-			t.Fatalf("ceiling = %d, want 4 before the other caller", got)
-		}
+		metric(t, f, capMetadata())
 		other := capMetadata()
 		other["maxReplicas"], other["maxStepUp"] = "1", "1"
 
-		if got := metric(t, f, other); got != 1 {
-			t.Fatalf("ceiling = %d, want the other caller clamped to its own maxReplicas", got)
+		got := metric(t, f, other)
+
+		if got != 1 || len(combinedCeilings(f)) != 2 {
+			t.Fatalf("ceiling = %d combined = %+v, want the other caller clamped to its own maxReplicas in an entry of its own", got, combinedCeilings(f))
 		}
+	})
+
+	t.Run("leaves the trigger's ceiling untouched by a caller that sends other metadata", func(t *testing.T) {
+		f := newFixture(t)
+		f.observe(bucketA, 900, 500000)
+		metric(t, f, capMetadata())
+		other := capMetadata()
+		other["maxReplicas"], other["maxStepUp"] = "1", "1"
+		metric(t, f, other)
+
 		if got := metric(t, f, capMetadata()); got != 4 {
-			t.Fatalf("ceiling = %d, want the trigger's own ceiling untouched by the other caller", got)
-		}
-		if ceilings := bucketCeilings(f); len(ceilings) != 2 || ceilings[0].Consumer.Trigger == ceilings[1].Consumer.Trigger {
-			t.Fatalf("recorded = %+v, want one entry per trigger", ceilings)
+			t.Fatalf("ceiling = %d, want the trigger's own ceiling of 4", got)
 		}
 	})
 

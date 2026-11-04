@@ -49,6 +49,8 @@ func observeWith(o *proxy.Observer, body, token string) *httptest.ResponseRecord
 	return recorder
 }
 
+const tokenBody = `{"provider":"openai","model":"gpt-4.1-mini","credential":"ab12ab12ab12","status":200,"headers":{},"complete":true}`
+
 func TestObserver(t *testing.T) {
 	t.Run("records an observation posted by a collector", func(t *testing.T) {
 		o, store := observer(t)
@@ -144,25 +146,36 @@ func TestObserver(t *testing.T) {
 		}
 	})
 
-	t.Run("requires the token when one is configured", func(t *testing.T) {
+	t.Run("refuses a wrong token", func(t *testing.T) {
 		o, store, _ := observerWithToken(t, "secret")
-		body := `{"provider":"openai","model":"gpt-4.1-mini","credential":"ab12ab12ab12","status":200,"headers":{},"complete":true}`
 
-		if code := observeWith(o, body, "wrong").Code; code != http.StatusUnauthorized {
-			t.Fatalf("status = %d, want 401 for a wrong token", code)
+		code := observeWith(o, tokenBody, "wrong").Code
+
+		if code != http.StatusUnauthorized || len(store.Buckets(start)) != 0 {
+			t.Fatalf("status = %d buckets = %d, want 401 and nothing recorded", code, len(store.Buckets(start)))
 		}
-		if code := observeWith(o, body, "secret").Code; code != http.StatusAccepted {
-			t.Fatalf("status = %d, want 202 for the right token", code)
+	})
+
+	t.Run("accepts the configured token", func(t *testing.T) {
+		o, store, _ := observerWithToken(t, "secret")
+
+		code := observeWith(o, tokenBody, "secret").Code
+
+		if code != http.StatusAccepted || len(store.Buckets(start)) != 1 {
+			t.Fatalf("status = %d buckets = %d, want 202 and the observation recorded", code, len(store.Buckets(start)))
 		}
-		bare := httptest.NewRecorder()
-		request := httptest.NewRequest(http.MethodPost, usage.ObservePath, strings.NewReader(body))
+	})
+
+	t.Run("refuses the token without the Bearer scheme", func(t *testing.T) {
+		o, store, _ := observerWithToken(t, "secret")
+		recorder := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodPost, usage.ObservePath, strings.NewReader(tokenBody))
 		request.Header.Set("Authorization", "secret")
-		o.ServeHTTP(bare, request)
-		if bare.Code != http.StatusUnauthorized {
-			t.Fatalf("status = %d, want 401 for the token without the Bearer scheme", bare.Code)
-		}
-		if len(store.Buckets(start)) != 1 {
-			t.Fatalf("buckets = %d, want only the authorised observation", len(store.Buckets(start)))
+
+		o.ServeHTTP(recorder, request)
+
+		if recorder.Code != http.StatusUnauthorized || len(store.Buckets(start)) != 0 {
+			t.Fatalf("status = %d buckets = %d, want 401 and nothing recorded", recorder.Code, len(store.Buckets(start)))
 		}
 	})
 

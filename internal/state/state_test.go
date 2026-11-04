@@ -157,32 +157,30 @@ func TestStore(t *testing.T) {
 	})
 
 	t.Run("keeps the 429 ratio and the longest retry-after over the last minute", func(t *testing.T) {
-		s := store(t, 0.5)
-		limited := success(0, 50*time.Millisecond)
-		limited.Status = http.StatusTooManyRequests
-		limited.HasUsage = false
-		for i := range 10 {
-			sample := success(1000, time.Second)
-			sample.At = now.Add(time.Duration(i) * 4 * time.Second)
-			s.End(key, sample)
-		}
-		limited.RetryAfter = 20 * time.Second
-		limited.At = now.Add(45 * time.Second)
-		s.End(key, limited)
-		limited.RetryAfter = 5 * time.Second
-		limited.At = now.Add(50 * time.Second)
-		s.End(key, limited)
+		s := minuteOfTraffic(t)
 
 		recent := bucketAt(t, s, now.Add(50*time.Second)).Recent
+
 		if recent.Responses != 12 || recent.RateLimited != 2 || recent.RetryAfter != 20*time.Second {
 			t.Fatalf("recent = %+v, want 12 responses, 2 limited, retry-after 20s", recent)
 		}
-		if recent := bucketAt(t, s, now.Add(2*time.Minute)).Recent; recent.Responses != 0 || recent.RateLimited != 0 {
-			t.Fatalf("recent = %+v, want the window empty a minute after the last response", recent)
-		}
+	})
 
+	t.Run("empties the 429 window a minute after the last response", func(t *testing.T) {
+		s := minuteOfTraffic(t)
+
+		recent := bucketAt(t, s, now.Add(2*time.Minute)).Recent
+
+		if recent.Responses != 0 || recent.RateLimited != 0 {
+			t.Fatalf("recent = %+v, want the window empty", recent)
+		}
+	})
+
+	t.Run("counts only the responses inside the last minute", func(t *testing.T) {
+		s := minuteOfTraffic(t)
 		late := success(1000, time.Second)
 		late.At = now.Add(2 * time.Minute)
+
 		s.End(key, late)
 
 		if recent := bucketAt(t, s, now.Add(2*time.Minute)).Recent; recent.Responses != 1 || recent.RateLimited != 0 {
@@ -542,6 +540,9 @@ func TestStore(t *testing.T) {
 			{Provider: "openai", Model: "gpt-4.1", Key: "a"},
 			{Provider: "openai", Model: "gpt-4.1", Key: "b"},
 		}
+		if len(all) != len(want) {
+			t.Fatalf("buckets = %d, want %d", len(all), len(want))
+		}
 		for i, b := range all {
 			if b.Key != want[i] {
 				t.Fatalf("bucket %d = %+v, want %+v", i, b.Key, want[i])
@@ -627,4 +628,21 @@ func TestBucketRefusedOnly(t *testing.T) {
 			}
 		})
 	}
+}
+
+func minuteOfTraffic(t *testing.T) *state.Store {
+	t.Helper()
+	s := store(t, 0.5)
+	for i := range 10 {
+		sample := success(1000, time.Second)
+		sample.At = now.Add(time.Duration(i) * 4 * time.Second)
+		s.End(key, sample)
+	}
+	limited := success(0, 50*time.Millisecond)
+	limited.Status, limited.HasUsage = http.StatusTooManyRequests, false
+	limited.RetryAfter, limited.At = 20*time.Second, now.Add(45*time.Second)
+	s.End(key, limited)
+	limited.RetryAfter, limited.At = 5*time.Second, now.Add(50*time.Second)
+	s.End(key, limited)
+	return s
 }
