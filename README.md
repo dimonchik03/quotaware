@@ -17,7 +17,8 @@ every response; nothing wires them to the autoscaler.
 
 Same queue, same fake provider limited to 600 requests per minute, same job
 schedule. Run A scales on queue depth alone; runs B and C cap the same trigger with
-the quotaware ceiling, at the default safety factor 0.85 and at 1.
+the quotaware ceiling, at the default safety factor 0.85 and at 1, both with
+`maxStepUp: "4"`, twice the default.
 
 ![worker replicas](bench/results/2026-11-02/replicas.svg)
 
@@ -42,8 +43,9 @@ the quotaware ceiling, at the default safety factor 0.85 and at 1.
 
 Read it as a trade-off set by `safety`. At 0.85 quotaware ends every 429 and cuts
 the pod-seconds by more than half, but leaves 20 % of the quota unused, so under
-sustained overload jobs wait 50 % longer. At 1 it matches the baseline's latency
-within 2 % with 43 % of the pod-seconds and 2 % of the 429s. `make bench` reproduces
+sustained overload jobs wait 50 % longer at p95 and twice as long at p50. At 1 it
+matches the baseline's p95 within 2 % and its p50 within 30 %, with 43 % of the
+pod-seconds and 2 % of the 429s. `make bench` reproduces
 all three runs on a laptop; `docs/benchmark.md` has the setup, the hypothesis
 written before the first run, the result against it and how each number is measured.
 
