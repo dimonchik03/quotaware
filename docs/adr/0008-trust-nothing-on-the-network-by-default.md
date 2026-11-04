@@ -47,4 +47,4 @@ and the scaler answers ResourceExhausted for a ScaledObject beyond the limit.
 A fresh install has one more value to set, and the demo and benchmark pass
 `observe.insecure=true` explicitly. Mode B needs the Redis address in two places,
 the trigger and the scaler flag, which is deliberate. The limits are high enough that
-a real deployment never meets them; the counters show when something does.
+a real deployment rarely meets them; the counters show when something does.

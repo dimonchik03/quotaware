@@ -34,4 +34,7 @@ floor is narrowed.
 A burst of open calls holds pods for at least one more evaluation. The proxy must
 track in-flight calls per bucket. If `concurrency` is configured lower than what
 the worker really runs, the floor is overestimated and pods linger; the trigger
-metadata has to match the worker.
+metadata has to match the worker. The floor bounds the ceiling, not the scale-down:
+in the two-trigger mode the queue term of the formula can still go lower (ADR 0005),
+and Kubernetes picks which pods go, so workers still need a termination grace period
+that covers a call.

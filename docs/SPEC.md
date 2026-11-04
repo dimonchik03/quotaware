@@ -1,4 +1,4 @@
-# quotaware — specification v0.1
+# quotaware — specification
 
 ## One-liner
 
@@ -65,7 +65,8 @@ Per response it records, keyed by bucket `(provider, model, api-key hash)`:
   client that leaves before the upstream answers is an abort, not an upstream error.
 
 The request body is read within `-read-body-timeout` (30 s, then 408) and handed to
-the transport as replayable, so a stale pooled connection is retried.
+the transport as replayable, so a pooled connection found dead before the request is
+written is retried.
 
 Collectors that remove the extra hop: a Go `http.RoundTripper` wrapper and a Python
 `httpx` event hook that post the same observation to `POST /v1/observe` on the admin
@@ -87,7 +88,7 @@ Per bucket, in memory (Redis backend in phase 2 for multi-replica proxies):
 - `limit_requests`, `remaining_requests`, `reset_requests_at`
 - `limit_tokens`, `remaining_tokens`, `reset_tokens_at` (Anthropic: input and output
   tracked separately as well)
-- EWMA of tokens per call (uncached input plus output), EWMA of latency
+- EWMA of tokens per call (uncached input plus cache writes plus output), EWMA of latency
 - in-flight calls, 429 count and ratio over the last window, last `retry-after`
 - `observed_at` for staleness
 
@@ -118,7 +119,9 @@ Guards:
 - Hysteresis: raise the ceiling by at most `max_step_up` pods per `step_interval`
   (default 2 per 15 s); lower it immediately.
 - Drain guard: never report a ceiling below `ceil(in_flight / k)`, capped at
-  `max_replicas`, so a scale-down does not kill pods mid-call.
+  `max_replicas`, so the ceiling itself never asks for fewer pods than the open calls
+  need; in the two-trigger mode the queue term can still go lower, and Kubernetes
+  picks which pods go.
 - Staleness: observations older than `stale_after` (default 120 s) freeze the last
   ceiling; older than `stale_hard` (default 10 min) fall back to `default_ceiling`.
 - `share`: fraction of the organization quota this workload may use (default 1.0).
@@ -137,7 +140,7 @@ malformed); otherwise add `aimdIncrease` (default 1) per
 `stepInterval` up to `maxReplicas`. Header mode and AIMD run together; AIMD acts as a
 guard even when headers exist (ADR 0006).
 
-### 4. Actuation: `quotaware scaler`
+### 4. Actuation: the scaler in `quotaware all`
 
 A gRPC server implementing KEDA's `ExternalScaler` service
 (`pkg/scalers/externalscaler/externalscaler.proto`, vendored):
@@ -158,8 +161,8 @@ A gRPC server implementing KEDA's `ExternalScaler` service
   however often KEDA polls, counted from the last change of the ceiling before the
   drain guard; a drop is immediate. The limit applies to each credential's ceiling and
   again to the value KEDA receives, so a credential seen for the first time, or the
-  switch from the default ceiling to the first answered one, cannot jump past it. Ceilings are evaluated under one lock
-  per ScaledObject and bucket, so concurrent polls cannot raise twice.
+  switch from the default ceiling to the first answered one, cannot jump past it. Ceilings are evaluated under the
+  store's lock, so concurrent polls cannot raise twice.
 
 Trigger metadata: `scalerAddress`, `bucket` (`openai/gpt-4.1-mini`), `concurrency` (k),
 and optionally `credential` (the hashed key label, to narrow a shared model to one
@@ -185,10 +188,10 @@ characters, at most `-max-scaled-objects` (1000) ceilings are tracked, one per
 ScaledObject, trigger and credential, and a poll that needs another gets
 ResourceExhausted, and single-trigger mode only dials the Redis addresses
 listed with `-redis-address`; any other `redisAddress` is PermissionDenied (ADR 0008).
-One gRPC connection may hold at most two streams per ScaledObject served, a parked
-`StreamIsActive` and a call in flight, because KEDA multiplexes every ScaledObject of
-a scaler address over one connection; a caller that parks streams cannot grow the
-process beyond that (ADR 0009). Editing a trigger's metadata starts its ceiling state
+One gRPC connection may hold at most 2 × `-max-scaled-objects` (2000) concurrent
+streams, room for a parked `StreamIsActive` and a call in flight per ScaledObject,
+because KEDA multiplexes every ScaledObject of a scaler address over one connection;
+a caller that parks streams cannot grow the process beyond that (ADR 0009). Editing a trigger's metadata starts its ceiling state
 afresh, as a new quotaware process would.
 
 ### 5. Combining with the existing queue trigger
@@ -203,8 +206,11 @@ jobs-per-replica division moves into the formula) and `ceiling` is this scaler's
 replica count. The full manifest is `deploy/examples/scaledobject-mode-a.yaml`. The
 ternary form is documented by KEDA; `min()` from the bundled expression language is
 not relied on until it is verified. With `scalingModifiers` the ScaledObject is active
-while the formula result is above `activationTarget`, so `minReplicaCount` should be
-at least one unless scaling to zero on an exhausted quota is intended.
+while the formula result is above `activationTarget`; an exhausted quota scales to
+zero only with `minReplicaCount: 0` and the trigger's `minReplicas: "0"`. The formula
+takes the queue term whenever it is lower, so the drain floor inside the ceiling does
+not protect calls in flight from a queue-driven scale-down in this mode; Mode B keeps
+it.
 
 Mode B, single trigger, for clusters where `scalingModifiers` is unavailable:
 quotaware reads the queue depth itself (Redis list in v0.1) and returns
@@ -242,8 +248,9 @@ Parsers live in `internal/headers/` with fixture tests over raw response heads.
 A malformed header never breaks scaling and never discards the rest of the response:
 an unparseable reset keeps its window without a reset, an unparseable limit or
 remaining leaves only that window unknown, and each one increments
-`quotaware_headers_malformed_total`. A response with no usable window switches the
-bucket to AIMD mode; one without any rate-limit header increments
+`quotaware_headers_malformed_total`. A response with no usable window leaves the last
+quotas in place, which freeze after `stale_after` and hand the bucket to AIMD after
+`stale_hard`; one without any rate-limit header increments
 `quotaware_headers_missing_total`.
 
 ## Benchmark
@@ -312,8 +319,8 @@ way. If B does not win, that is still the write-up, and a bug hunt.
 
 Dependency direction, inward only: `headroom` and `aimd` are the domain and import
 nothing from the repository; `state` is the application layer and depends on the
-domain; `headers`, `proxy`, `scaler` and `metrics` are adapters and depend on `state`
-and the domain, never on each other. `cmd/quotaware` wires them together.
+domain, as do `headers` and `usage`; `proxy`, `scaler`, `queue` and `metrics` are
+adapters and depend on the application and the domain, never on each other. `cmd/quotaware` wires them together.
 
 Tooling: Go 1.26 (pinned in `go.mod`), `google.golang.org/grpc`,
 `prometheus/client_golang`, standard library `httputil.ReverseProxy`, `golangci-lint`,
@@ -333,17 +340,15 @@ Tooling: Go 1.26 (pinned in `go.mod`), `google.golang.org/grpc`,
 5. Polish and release. README with the charts, `docs/design.md`, AIMD mode,
    Python and Go collector hooks, v0.1.0.
 
-## Architecture decisions to record in docs/adr (0002 onward)
+## Architecture decisions
 
-1. Cap via `scalingModifiers` versus computing the minimum inside one trigger.
-2. Proxy first, SDK hooks second.
-3. Report the replica count as the metric with `targetSize: 1` instead of raw headroom.
-4. Minimum of steady-state and instantaneous rate, and why either alone misbehaves.
-5. Count uncached input tokens for Anthropic; prompt caching as a scaling lever.
-6. AIMD fallback; TCP congestion control as the mental model.
-7. Drain guard: never scale below `in_flight / k`.
-8. Trust nothing on the network by default: observe token, queue allow list, bounded
-   store.
+Recorded in `docs/adr`: 0002 the minimum of steady and instantaneous rate, 0003 the
+drain guard, 0004 the proxy first, 0005 the cap through `scalingModifiers` (which also
+covers reporting the replica count with `targetSize: 1`), 0006 the AIMD fallback and
+guard, 0007 the observe protocol, 0008 and 0009 the network defaults, 0010 one quota
+across credentials, 0011 the errors discarded on purpose. Counting uncached input
+and cache writes for Anthropic is described above and in the README rather than in
+a record of its own.
 
 ## Risks and open questions
 

@@ -64,12 +64,16 @@ The cluster is the one `make demo` uses, with its own kubeconfig under `bench/ki
 `bench/results/2026-11-02/`, built from commit `bfffc1c` with no changes to tracked files, produced
 by `make bench` on a MacBook with 16 GB of memory, kind v0.33, KEDA 2.21.0, Go 1.26.5.
 Run A took 1091 s, run B 1352 s, run C 1128 s, including the drain after the schedule.
-Each variant ran once. The commits after `bfffc1c` changed the scaler only for
-credentials the provider has not answered yet, responses other than 2xx and 429, and
-gRPC callers other than KEDA's trigger (ADR 0009); of these only the first occurs,
-for the second or two before each run's first response. Later commits also count the
-step interval from the last change of the bound and add a NetworkPolicy and a gRPC
-probe peer to the kind setup, so a run on the current commit may step up differently.
+Each variant ran once. HPA behaviour was the same in every run: no stabilization
+window, scale up by up to 30 pods and down by up to 100 % per 10 s. The table and the
+retries chart were re-rendered from these series at `2022e38`, which plots retries
+instead of 429s per minute; no series changed.
+
+Later commits change the scaler in ways these runs exercise only in part: ADR 0009 and
+0010 change how unanswered and several credentials combine, which one pinned
+credential does not exercise beyond the first second; the step interval now counts
+from the last change of the bound and applies to the combined value; quotas are dated
+by their headers. A run on the current commit may step up differently.
 
 ![replicas](../bench/results/2026-11-02/replicas.svg)
 
@@ -98,8 +102,8 @@ probe peer to the kind setup, so a run on the current commit may step up differe
 
 - *Under quota both runs look the same.* Holds in the 0.5x phase. In the 1.0x phase B
   already falls behind: its ceiling of 8 pods completes about 480 jobs per minute
-  against 600 produced, so its queue grows from 55 to 417 while A's stays near 100.
-  C nearly keeps up: its queue grows from 87 to 124 while A's stays near 100.
+  against 600 produced, so its queue grows from 87 to 417 while A's goes from 93 to
+  101. C nearly keeps up: its queue grows from 87 to 124.
 - *Fewer 429s.* Holds. A 720, B 0, C 15.
 - *Fewer pod-seconds.* Holds. A 23580, B 10050, C 10125. A spent 13300 pod-seconds,
   more than half of its total, in backoff.
@@ -132,8 +136,8 @@ The fixed window also flatters the baseline. When A jumps to 30 pods it spends t
 rest of one window and all of the next back to back, up to 1026 completions in one
 minute against a quota of 600, and then front-loads every later window, because each
 429 carries a `retry-after` up to the reset and all of A's call slots wake together.
-That keeps A 140 to 500 jobs ahead of C through the burst, about the size of C's p50
-and drain gaps. The fake provider does not charge a rejected call against its window,
+A's queue runs about 180 to 480 jobs shorter than C's through the burst, some 40 of
+them jobs A holds in backoff, about the size of C's p50 and drain gaps. The fake provider does not charge a rejected call against its window,
 while OpenAI counts unsuccessful requests against the per-minute limit. A provider
 that refills continuously, or one with acceleration limits on, would remove A's head
 start and raise its 429 count; neither was run.
@@ -146,7 +150,9 @@ of 1.5: p95 values between 328 s and 493 s share one bucket, so differences of a
 percent inside it are not measured, while the three p50 values fall in three
 different buckets. Between buckets only the order is measured; the percentages above
 come from the interpolation. Pod-seconds integrate the replica series, which counts
-worker pods whose metrics endpoint is up, including the 15 s linger; idle pod-seconds are
+worker pods whose metrics endpoint is up, including the 15 s linger, and stops at
+the last sample, when A still had 23 pods up while B and C were back to one, so A's
+scale-down tail, about 1 % of its total, is not counted; idle pod-seconds are
 the seconds workers spent sleeping on a 429 divided by the two calls per pod. The
 drain time runs from the end of the 3x phase to the first empty queue, at the 15 s
 resolution of the export, so 450 s and 495 s are three samples apart. The 429 row

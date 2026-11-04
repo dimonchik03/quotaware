@@ -4,7 +4,8 @@ Date: 2026-11-01
 
 ## Status
 
-Accepted
+Accepted. ADR 0010 replaces the sum across credentials with one shared quota by
+default.
 
 ## Context
 
@@ -31,7 +32,7 @@ exhausted quota deactivates it; deployments that must stay warm keep
 offers a single-trigger mode in which it reads the queue depth itself and returns
 the minimum, with activation from the queue.
 
-Ceilings are computed per ScaledObject and per observed bucket under one lock, so
+Ceilings are computed per ScaledObject and per observed bucket under the store's lock, so
 hysteresis is tracked per consumer and concurrent polls (KEDA asks from its polling
 loop and from every HPA sync) cannot raise the ceiling twice. A raise is limited to
 `maxStepUp` per `stepInterval`, measured from the last change; a drop is immediate.
@@ -51,7 +52,10 @@ Ceilings are summed across credentials that share a model and clamped to
 
 ## Consequences
 
-Mode A needs KEDA 2.11 or newer for `scalingModifiers`. The formula names the
+Mode A needs KEDA 2.12 or newer for `scalingModifiers`. The formula takes the queue
+term whenever it is lower, so the drain floor inside the ceiling (ADR 0003) does not
+stop a queue-driven scale-down in this mode; Mode B applies it to the value it
+returns. The formula names the
 triggers, so both triggers must carry a `name`. In mode B quotaware depends on a
 queue client (Redis lists in v0.1). The ceiling series exported by the metrics
 endpoint is labelled by ScaledObject so operators can see which consumer a number

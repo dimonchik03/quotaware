@@ -4,7 +4,8 @@ Date: 2026-11-01
 
 ## Status
 
-Accepted
+Accepted. ADR 0008 makes the observe token required by default; an optional
+`headers_age_ms` field dates the headers of an observation.
 
 ## Context
 

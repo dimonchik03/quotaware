@@ -45,7 +45,7 @@ the quotaware ceiling, at the default safety factor 0.85 and at 1, both with
 Read it as a trade-off set by `safety`. At 0.85 quotaware ends every 429 and cuts
 the pod-seconds by more than half, but leaves 20 % of the quota unused, so under
 sustained overload jobs wait longer: about 50 % at p95 and twice as long at p50, as
-far as the latency histogram resolves. At 1 it ties the baseline's p95 within one
+far as the latency histogram resolves. At 1 it ties the baseline's p95 in the same
 histogram bucket, with 43 % of the pod-seconds and 2 % of the 429s, while its p50
 sits one bucket higher (about 29 %) and the burst takes 10 % longer to drain. The
 quota and the latency stay constant here, so a static `maxReplicaCount` of 10 would
@@ -53,7 +53,8 @@ likely do as well as C. The ceiling is meant for headroom that moves: the kind d
 below shows it following another credential's burst on the shared quota, a case the
 benchmark does not measure yet. The fixed window of the fake provider also hands the
 baseline a head start through the burst, about the size of C's p50 and drain gaps.
-`make bench` reproduces all three runs on a laptop; `docs/benchmark.md` has the
+`make bench` re-runs all three variants on a laptop, at the current commit rather than
+at `bfffc1c`; `docs/benchmark.md` has the
 setup, the hypothesis written before the first run (C was added after it), the result
 against it and how each number is measured.
 
@@ -121,7 +122,8 @@ Anthropic SDKs with `http://<proxy>:8080`, since they add `/v1` themselves.
 port serves `/metrics`, `/healthz` and `/v1/observe`; the last one needs a token (see
 below). A client that stalls while sending a request body gets 408 after
 `-read-body-timeout` (30 s); the buffered body is handed to the transport as
-replayable, so a stale pooled connection is retried instead of answered with 502.
+replayable, so a pooled connection found dead before the request is written is
+retried instead of answered with 502.
 
 To see it work without a provider account, `docker compose up --build` starts the
 proxy in front of `bench/fakeprovider`, a provider stand-in with real rate-limit
@@ -187,7 +189,7 @@ Install from a release tag: the chart's `appVersion` picks the image, and the ch
 on `main` may already pass flags that only the next release understands.
 
 The chart refuses to render without `observe.token`, `observe.existingSecret` or an
-explicit `observe.insecure=true`. The proxy, gRPC and admin ports carry no
+explicit `observe.insecure=true`. The proxy and gRPC ports and `/metrics` carry no
 authentication of their own, so the chart ships a NetworkPolicy, on by default, that
 admits KEDA's operator from the `keda` namespace to the gRPC port and the release
 namespace to the proxy and admin ports. Set `networkPolicy.keda.namespace` and
@@ -231,10 +233,14 @@ so both need the `<service>.<namespace>.svc` form. `bucket` is `provider/model`;
 `concurrency` is how many provider calls one worker pod
 keeps open; `maxReplicas` has to mirror `maxReplicaCount` by hand because KEDA does
 not pass it to external scalers. With `scalingModifiers` KEDA activates the
-ScaledObject when the formula result is above `activationTarget` (default 0), so an
-exhausted quota with `minReplicaCount: 0` scales to zero; keep `minReplicaCount` at
-one or more when the workers must stay warm. If quotaware is unreachable the HPA
-keeps the current replica count. Full manifests for this mode and for the
+ScaledObject when the formula result is above `activationTarget` (default 0); with
+`minReplicaCount: 0` and the trigger's `minReplicas: "0"` an exhausted quota scales to
+zero, while with the default `minReplicas` of 1 the ceiling never drops below one. In
+this mode the formula takes `demand / 10` whenever it is lower, so the drain floor
+inside the ceiling cannot stop a queue-driven scale-down from removing pods with calls
+open; give the workers a termination grace period and an HPA scale-down stabilization
+that cover a call, or use the single-trigger mode, which keeps the floor. If quotaware
+is unreachable the HPA keeps the current replica count. Full manifests for this mode and for the
 single-trigger mode (quotaware reads the Redis list itself and returns the minimum,
 never below the pods the open calls need)
 are in `deploy/examples/`. Single-trigger mode only reads the Redis addresses listed
@@ -342,7 +348,10 @@ pod, backing off on `retry-after`) scaled by the two-trigger ScaledObject in
 `bench/kind/manifests/40-scaledobject.yaml` against a fake provider limited to 600
 requests per minute in one window per model that every key shares; 200 queued jobs
 keep demand at 20. After 90 seconds a job with another credential bursts the shared
-quota for a minute:
+quota for a minute. The transcript below was recorded on 2026-11-01, before v0.1.0,
+and keeps only the lines where something changed; since then the step interval counts
+from the last change of the bound and limits the combined value, so a run today steps
+up a little later after the drop:
 
     time      replicas  desired  ceiling (quotaware log)
     21:40:33  -         -        0 -> 8 (headroom)
@@ -441,7 +450,11 @@ the chart refuses to render without `observe.token`, `observe.existingSecret` or
 default, so on a CNI that enforces it list workers, collectors and Prometheus from
 other namespaces under `networkPolicy.proxyFrom` and `networkPolicy.adminFrom`, and a
 KEDA outside the `keda` namespace under `networkPolicy.keda`. Single-trigger mode
-needs its Redis addresses in `redisAddresses`.
+needs its Redis addresses in `redisAddresses`. The credentials of a model now share
+one quota by default (ADR 0010); triggers whose keys belong to separate
+organizations set `quotaScope: credential`. Single-trigger mode stays active while
+calls are open, `credential` must be the 12-character key hash, and `maxStepUp` may
+not exceed `maxReplicas`.
 
 See `docs/design.md` for how the pieces fit and `docs/release.md` for how a release
 is cut. Specification in `docs/SPEC.md`, decisions in `docs/adr`.
