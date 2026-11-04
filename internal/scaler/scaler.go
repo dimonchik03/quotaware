@@ -600,8 +600,7 @@ func decide(t trigger, obs headroom.Observation, recent state.Recent, previous s
 	signal := aimd.Signal{Responses: recent.Responses, RateLimited: recent.RateLimited, RetryAfter: recent.RetryAfter}
 	aimdState := aimd.State{Ceiling: previous.Bound, Known: known && previous.Mode == state.ModeAIMD, ChangedAt: previous.BoundChangedAt, HoldUntil: previous.HoldUntil}
 	drainFloor := headroom.DrainFloor(t.cfg, obs)
-	usable := (obs.Requests.Known() || obs.Tokens.Known()) && !obs.ObservedAt.IsZero() && now.Sub(obs.ObservedAt) <= t.cfg.StaleHard
-	if !usable {
+	if !headroom.Usable(t.cfg, obs, now) {
 		step := aimd.Step(t.aimd, aimdState, signal, now)
 		return decision{value: max(step.Ceiling, drainFloor), bound: step.Ceiling, mode: state.ModeAIMD, reason: "aimd_" + string(step.Action), holdUntil: step.HoldUntil}
 	}

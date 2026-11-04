@@ -428,3 +428,28 @@ func TestLimitRaise(t *testing.T) {
 		})
 	}
 }
+
+func TestUsable(t *testing.T) {
+	cases := []struct {
+		name        string
+		observation headroom.Observation
+		want        bool
+	}{
+		{"a fresh request window is usable", observation(900, 500000, now.Add(30*time.Second)), true},
+		{"a token window without tokens per call is not usable", headroom.Observation{Tokens: headroom.Quota{Limit: 600000, Remaining: 500000}, Latency: time.Second, ObservedAt: now}, false},
+		{"an observation older than stale_hard is not usable", withObservedAt(observation(900, 500000, now.Add(30*time.Second)), now.Add(-11*time.Minute)), false},
+		{"nothing observed is not usable", headroom.Observation{}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := headroom.Usable(config(), tc.observation, now); got != tc.want {
+				t.Fatalf("usable = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func withObservedAt(obs headroom.Observation, at time.Time) headroom.Observation {
+	obs.ObservedAt = at
+	return obs
+}

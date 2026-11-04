@@ -300,6 +300,33 @@ func TestGetMetrics(t *testing.T) {
 		}
 	})
 
+	t.Run("hands a bucket with token windows but no usage yet to AIMD instead of the default", func(t *testing.T) {
+		f := newFixture(t)
+		tokensOnly := func() {
+			at := f.clock.Now()
+			f.store.Begin(bucketA, at)
+			f.store.End(bucketA, state.Sample{
+				Status:    http.StatusOK,
+				Complete:  true,
+				Headers:   state.HeadersPresent,
+				Quotas:    state.Quotas{Tokens: headroom.Quota{Limit: 600000, Remaining: 500000, ResetAt: at.Add(30 * time.Second)}},
+				Latency:   time.Second,
+				HeadersAt: at,
+				At:        at,
+			})
+		}
+		tokensOnly()
+		started := metric(t, f, capMetadata())
+		f.clock.Advance(20 * time.Second)
+		tokensOnly()
+
+		increased := metric(t, f, capMetadata())
+
+		if started != 1 || increased != 2 {
+			t.Fatalf("ceilings = %d then %d, want AIMD to start at 1 and add one after a clean interval", started, increased)
+		}
+	})
+
 	t.Run("takes one ceiling for credentials that share the model's quota", func(t *testing.T) {
 		f := newFixture(t)
 		f.observe(bucketA, 900, 500000)

@@ -163,6 +163,14 @@ func LimitRaise(cfg Config, previous Previous, ceiling int, now time.Time) (int,
 	return ceiling, false
 }
 
+func Usable(cfg Config, obs Observation, now time.Time) bool {
+	if obs.ObservedAt.IsZero() || now.Sub(obs.ObservedAt) > cfg.StaleHard {
+		return false
+	}
+	_, ok := steadyRate(cfg, obs, now)
+	return ok
+}
+
 func defaultResult(cfg Config) Result {
 	return Result{Ceiling: cfg.DefaultCeiling, Reason: ReasonDefault}
 }
