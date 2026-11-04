@@ -102,7 +102,7 @@ the drain guard that keeps pods alive for calls in flight, a frozen ceiling for
 stale observations, or the default when nothing usable was observed. In the run
 above the quota is spent at 18:00:59; after the window resets the raise waits out
 the step interval, the drain guard keeps two pods for the eight open calls, and at
-18:01:25 the ceiling climbs by two. `simulate` replays the headroom rules the scaler applies,
+18:01:25 the bound climbs from 1 to 3. `simulate` replays the headroom rules the scaler applies,
 without the AIMD guard, which needs the 429 history of a live bucket. Run with
 `-h` for every knob.
 
@@ -391,16 +391,26 @@ prints the build version.
 - The instant term reads `remaining / time to reset` as if the window were fixed.
   Both providers refill continuously, so near the limit the ceiling is lower and
   moves more than the refill rate alone would justify.
-- Usage is read from identity and gzip bodies only; a response compressed with `br`,
-  `zstd` or `deflate` counts in `quotaware_usage_missing_total` and leaves tokens per
-  call unknown, so only the request window bounds that bucket. A stream larger than
-  `-max-capture-bytes` loses its usage the same way, and every open call may hold up
-  to that much memory for the capture.
+- The proxy and the Go collector read usage from identity and gzip bodies only; a
+  response compressed with `br`, `zstd` or `deflate` counts in
+  `quotaware_usage_missing_total` and leaves tokens per call unknown, so only the
+  request window bounds that bucket. The Python hook reads any encoding httpx decodes
+  for a JSON body, and identity or gzip for a stream. A stream larger than
+  `-max-capture-bytes` loses its usage the same way.
+- Each open proxied call may buffer up to `-max-request-bytes` of request and
+  `-max-capture-bytes` of response, 12 MiB with the defaults, so size the chart's
+  256Mi memory limit for the calls you expect in flight or lower the two flags.
 - The proxy and the scaler run in one pod with in-memory state: a restart starts
-  every bucket afresh, and the proxy is in the path of every call it carries, so a
-  rolling update interrupts them. Run collectors instead of the proxy where that
-  matters.
-- Gemini and Azure OpenAI headers are not parsed; those buckets run on AIMD alone.
+  every bucket afresh, the proxy is in the path of every call it carries, and the
+  chart replaces the pod on every upgrade (`strategy: Recreate`), so an upgrade
+  interrupts proxied calls until the new pod is ready. Run collectors instead of the
+  proxy where that matters.
+- Only OpenAI- and Anthropic-shaped APIs are understood: the proxy serves its two
+  paths at the root of an origin, and the scaler and `/v1/observe` accept only the
+  openai and anthropic providers. Gemini's OpenAI-compatible endpoint sits under a
+  path, so it cannot be an upstream, and Azure OpenAI's deployment paths get 404; an
+  OpenAI-shaped gateway at the root of an origin works and is recorded as
+  `openai/<model>`.
 
 ## Non-goals
 
