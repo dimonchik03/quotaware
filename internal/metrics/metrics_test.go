@@ -18,7 +18,7 @@ var now = time.Date(2026, 11, 1, 18, 0, 0, 0, time.UTC)
 
 func populated(t *testing.T) *state.Store {
 	t.Helper()
-	s, err := state.New(0.5)
+	s, err := state.New(0.5, state.DefaultLimits())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -31,19 +31,20 @@ func populated(t *testing.T) *state.Store {
 	s.Begin(key, now)
 	s.Begin(key, now)
 	s.End(key, state.Sample{
-		Status:   http.StatusOK,
-		Complete: true,
-		Headers:  state.HeadersPresent,
-		Quotas:   quotas,
-		HasUsage: true,
-		Usage:    1200,
-		Latency:  1500 * time.Millisecond,
-		At:       now,
+		Status:    http.StatusOK,
+		Complete:  true,
+		Headers:   state.HeadersPresent,
+		Quotas:    quotas,
+		HasUsage:  true,
+		Usage:     1200,
+		Latency:   1500 * time.Millisecond,
+		HeadersAt: now,
+		At:        now,
 	})
 	quotas.Requests.Remaining = 0
 	quotas.Tokens.Remaining = 0
 	s.Begin(key, now)
-	s.End(key, state.Sample{Status: http.StatusTooManyRequests, Complete: true, Headers: state.HeadersPresent, Quotas: quotas, RetryAfter: 20 * time.Second, At: now})
+	s.End(key, state.Sample{Status: http.StatusTooManyRequests, Complete: true, Headers: state.HeadersPresent, Quotas: quotas, RetryAfter: 20 * time.Second, HeadersAt: now, At: now})
 	s.Begin(key, now)
 	s.Fail(key, now)
 	_, err = s.UpdateCeiling(state.Consumer{Namespace: "jobs", ScaledObject: "llm-workers", Trigger: "7c1d", Bucket: key}, func(state.Ceiling, bool) state.Ceiling {
@@ -57,7 +58,7 @@ func populated(t *testing.T) *state.Store {
 
 func TestCollector(t *testing.T) {
 	t.Run("exposes how many buckets and scaled objects are tracked and how many were refused", func(t *testing.T) {
-		s, err := state.NewWithLimits(0.5, state.Limits{Buckets: 1, Consumers: 1})
+		s, err := state.New(0.5, state.Limits{Buckets: 1, Consumers: 1})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -96,7 +97,7 @@ quotaware_scaled_objects_rejected_total 1
 # HELP quotaware_429_total Responses with status 429.
 # TYPE quotaware_429_total counter
 quotaware_429_total{key="ab12",model="gpt-4.1-mini",provider="openai"} 1
-# HELP quotaware_ceiling Replica ceiling of one bucket for a scaled object and trigger, before the credentials of the trigger are combined.
+# HELP quotaware_ceiling Replica ceiling of a scaled object and trigger: one series per credential bucket, and key="combined" for the value KEDA receives.
 # TYPE quotaware_ceiling gauge
 quotaware_ceiling{key="ab12",model="gpt-4.1-mini",namespace="jobs",provider="openai",scaledobject="llm-workers",trigger="7c1d"} 4
 # HELP quotaware_inflight Calls currently open through the proxy.
@@ -133,7 +134,7 @@ quotaware_retry_after_seconds{key="ab12",model="gpt-4.1-mini",provider="openai"}
 # HELP quotaware_tokens_per_call Smoothed tokens consumed per successful call.
 # TYPE quotaware_tokens_per_call gauge
 quotaware_tokens_per_call{key="ab12",model="gpt-4.1-mini",provider="openai"} 1200
-# HELP quotaware_upstream_errors_total Calls that never produced a provider response.
+# HELP quotaware_upstream_errors_total Calls the upstream failed: no response at all, or a body that broke mid-stream.
 # TYPE quotaware_upstream_errors_total counter
 quotaware_upstream_errors_total{key="ab12",model="gpt-4.1-mini",provider="openai"} 1
 # HELP quotaware_usage_missing_total Successful responses without a usable usage object.

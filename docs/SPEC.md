@@ -70,7 +70,15 @@ the transport as replayable, so a stale pooled connection is retried.
 Collectors that remove the extra hop: a Go `http.RoundTripper` wrapper and a Python
 `httpx` event hook that post the same observation to `POST /v1/observe` on the admin
 port behind a bearer token that is required unless `-observe-insecure` is passed
-(ADR 0007, ADR 0008).
+(ADR 0007, ADR 0008). An optional `headers_age_ms` says how long before the post the
+headers arrived, so the quotas and their duration resets are dated when the provider
+sent them.
+
+Quotas are dated by when their headers arrived, on the proxy as on the observe path,
+and a sample whose headers are older than the ones already applied leaves the quotas
+alone, so a long stream that ends after a short 429 cannot restore the remaining quota
+the 429 reported. Each window keeps the time it was last reported, and a window not
+reported for longer than `stale_after` stops bounding the ceiling.
 
 ### 2. State
 
@@ -124,7 +132,8 @@ Azure variants to be verified): classic congestion control. If the share of 429 
 the 2xx and 429 responses of the last minute exceeds `aimdThreshold` (default 0.02),
 multiply the ceiling by
 `aimdDecrease` (default 0.5) and hold it until the longest observed `retry-after`
-elapses, at least one minute; otherwise add `aimdIncrease` (default 1) per
+elapses, at least one minute and at most `staleHard` (a `retry-after` beyond a day is
+malformed); otherwise add `aimdIncrease` (default 1) per
 `stepInterval` up to `maxReplicas`. Header mode and AIMD run together; AIMD acts as a
 guard even when headers exist (ADR 0006).
 
@@ -134,18 +143,22 @@ A gRPC server implementing KEDA's `ExternalScaler` service
 (`pkg/scalers/externalscaler/externalscaler.proto`, vendored):
 
 - `GetMetricSpec` returns metric `quotaware-ceiling` with `targetSize: 1` (the
-  Prometheus series of the same number is `quotaware_ceiling`).
+  Prometheus series of the same number is `quotaware_ceiling{key="combined"}`; the
+  other `quotaware_ceiling` series are the per-credential ceilings it combines).
 - `GetMetrics` returns the ceiling as `metricValue`. With KEDA's default
   `AverageValue` semantics the HPA computes `ceil(metricValue / targetSize)`, so the
   returned number is the replica count itself.
 - `IsActive` is always false for a cap trigger, so activation stays with the demand
-  trigger; in single-trigger mode it is true while the queue has items.
+  trigger; in single-trigger mode it is true while the queue has items or calls are
+  open.
 - `StreamIsActive` sends the state once and, in single-trigger mode, pushes changes
   of the queue activity so the trigger can run as `external-push`. A push only
   re-runs activation; the HPA metric is still refreshed on its own cadence.
 - A raise of the ceiling is limited to `maxStepUp` per `stepInterval` (default 15 s)
   however often KEDA polls, counted from the last change of the ceiling before the
-  drain guard; a drop is immediate. Ceilings are evaluated under one lock
+  drain guard; a drop is immediate. The limit applies to each credential's ceiling and
+  again to the value KEDA receives, so a credential seen for the first time, or the
+  switch from the default ceiling to the first answered one, cannot jump past it. Ceilings are evaluated under one lock
   per ScaledObject and bucket, so concurrent polls cannot raise twice.
 
 Trigger metadata: `scalerAddress`, `bucket` (`openai/gpt-4.1-mini`), `concurrency` (k),

@@ -72,7 +72,7 @@ export_series() {
   range completed_per_minute 'sum(rate(worker_jobs_completed_total[1m])) * 60'
   range queue_length 'producer_queue_length'
   range multiplier 'producer_load_multiplier'
-  range ceiling 'sum(quotaware_ceiling)'
+  range ceiling 'sum(quotaware_ceiling{key="combined"})'
   range latency_p95_over_time 'histogram_quantile(0.95, sum(rate(worker_job_latency_seconds_bucket[2m])) by (le))'
   instant jobs_total 'max_over_time(producer_jobs_total['"$window"'s])'
   instant completed_total 'sum(max_over_time(worker_jobs_completed_total['"$window"'s]))'

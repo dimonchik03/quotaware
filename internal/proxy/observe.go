@@ -4,7 +4,6 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
-	"io"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -35,9 +34,13 @@ func (o *Observer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "observe token missing or wrong")
 		return
 	}
-	body, err := io.ReadAll(io.LimitReader(r.Body, o.maxBytes+1))
-	if err != nil || int64(len(body)) > o.maxBytes {
+	body, err := readBody(r, o.maxBytes)
+	switch {
+	case errors.Is(err, errTooLarge):
 		writeError(w, http.StatusRequestEntityTooLarge, "observation too large")
+		return
+	case err != nil:
+		writeError(w, http.StatusBadRequest, "observation body unreadable")
 		return
 	}
 	var observation usage.Observation
@@ -51,12 +54,13 @@ func (o *Observer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	provider := headers.Provider(observation.Provider)
 	now := o.now()
+	headersAt := now.Add(-time.Duration(observation.HeadersAgeMS * float64(time.Millisecond)))
 	h := http.Header{}
 	for name, value := range observation.Headers {
 		h.Set(name, value)
 	}
-	quotas, status := parseLimits(o.logger, provider, observation.Model, h, now)
-	retryAfter, err := headers.RetryAfter(h, now)
+	quotas, status := parseLimits(o.logger, provider, observation.Model, h, headersAt)
+	retryAfter, err := headers.RetryAfter(h, headersAt)
 	if err != nil {
 		o.logger.Warn("retry-after malformed", "provider", provider, "model", observation.Model, "error", err.Error())
 		retryAfter, status = 0, state.HeadersMalformed
@@ -68,14 +72,14 @@ func (o *Observer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		Quotas:     quotas,
 		Latency:    time.Duration(observation.LatencyMS * float64(time.Millisecond)),
 		RetryAfter: retryAfter,
+		HeadersAt:  headersAt,
 		At:         now,
 	}
 	if observation.Usage != nil && *observation.Usage > 0 {
 		sample.HasUsage, sample.Usage = true, *observation.Usage
 	}
 	key := state.Key{Provider: string(provider), Model: observation.Model, Key: observation.Credential}
-	o.store.Begin(key, now)
-	o.store.End(key, sample)
+	o.store.Observe(key, sample)
 	w.WriteHeader(http.StatusAccepted)
 }
 

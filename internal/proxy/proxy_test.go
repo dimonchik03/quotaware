@@ -99,7 +99,7 @@ func newHarnessWithOptions(t *testing.T, c *clock, upstream string, configure fu
 	if err != nil {
 		t.Fatal(err)
 	}
-	store, err := state.New(0.5)
+	store, err := state.New(0.5, state.DefaultLimits())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -337,6 +337,37 @@ func TestProxy(t *testing.T) {
 		rest, _ := io.ReadAll(reader)
 		if !strings.Contains(string(rest), "data: second") {
 			t.Fatalf("rest = %q, want the second event", rest)
+		}
+	})
+
+	t.Run("dates the quotas by when the headers arrived, not when the body ended", func(t *testing.T) {
+		release := make(chan struct{})
+		var once sync.Once
+		t.Cleanup(func() { once.Do(func() { close(release) }) })
+		c := &clock{now: start}
+		h := newHarnessWithHandler(t, c, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			rateLimitHeaders(w.Header())
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprint(w, "data: first\n\n")
+			w.(http.Flusher).Flush()
+			<-release
+			fmt.Fprint(w, "data: [DONE]\n\n")
+		}), 0)
+		response := h.request(t, context.Background(), "/v1/chat/completions", "sk-test", chat)
+		defer func() { _ = response.Body.Close() }()
+		reader := bufio.NewReader(response.Body)
+		if _, err := reader.ReadString('\n'); err != nil {
+			t.Fatal(err)
+		}
+
+		c.Advance(time.Minute)
+		once.Do(func() { close(release) })
+		_, _ = io.ReadAll(reader)
+
+		b := h.waitForIdle(t, "openai", "gpt-4.1-mini")
+		if !b.ObservedAt.Equal(start) {
+			t.Fatalf("observed at = %v, want %v when the headers arrived", b.ObservedAt, start)
 		}
 	})
 
@@ -616,7 +647,7 @@ func TestProxy(t *testing.T) {
 	})
 
 	t.Run("requires both upstreams", func(t *testing.T) {
-		store, _ := state.New(0.5)
+		store, _ := state.New(0.5, state.DefaultLimits())
 
 		if _, err := proxy.New(proxy.DefaultConfig(), store, time.Now); err == nil {
 			t.Fatal("expected an error without upstreams")

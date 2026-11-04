@@ -11,7 +11,7 @@ import (
 var now = time.Date(2026, 11, 1, 18, 0, 0, 0, time.UTC)
 
 func config() aimd.Config {
-	return aimd.Config{Threshold: 0.02, Decrease: 0.5, Increase: 1, Interval: 15 * time.Second, Window: time.Minute, Start: 4, Min: 1, Max: 20}
+	return aimd.Config{Threshold: 0.02, Decrease: 0.5, Increase: 1, Interval: 15 * time.Second, Window: time.Minute, MaxHold: 10 * time.Minute, Start: 4, Min: 1, Max: 20}
 }
 
 func settled(ceiling int) aimd.State {
@@ -52,6 +52,14 @@ func TestStep(t *testing.T) {
 
 		if !result.HoldUntil.Equal(now.Add(90 * time.Second)) {
 			t.Fatalf("hold until = %v, want the retry-after honoured", result.HoldUntil)
+		}
+	})
+
+	t.Run("a decrease never holds longer than max_hold", func(t *testing.T) {
+		result := aimd.Step(config(), settled(10), aimd.Signal{Responses: 100, RateLimited: 10, RetryAfter: 6 * time.Hour}, now)
+
+		if !result.HoldUntil.Equal(now.Add(10 * time.Minute)) {
+			t.Fatalf("hold until = %v, want the hold capped at ten minutes", result.HoldUntil)
 		}
 	})
 
@@ -112,8 +120,10 @@ func TestConfigValidate(t *testing.T) {
 		{"rejects a decrease that is not a number", func(c *aimd.Config) { c.Decrease = math.NaN() }},
 		{"rejects a decrease of one", func(c *aimd.Config) { c.Decrease = 1 }},
 		{"rejects a zero increase", func(c *aimd.Config) { c.Increase = 0 }},
+		{"rejects an increase above max", func(c *aimd.Config) { c.Increase = c.Max + 1 }},
 		{"rejects a zero interval", func(c *aimd.Config) { c.Interval = 0 }},
 		{"rejects a zero window", func(c *aimd.Config) { c.Window = 0 }},
+		{"rejects a max hold shorter than the window", func(c *aimd.Config) { c.MaxHold = 30 * time.Second }},
 		{"rejects max below min", func(c *aimd.Config) { c.Min, c.Max = 5, 3 }},
 		{"rejects a start outside the range", func(c *aimd.Config) { c.Start = 50 }},
 	}

@@ -24,6 +24,7 @@ import (
 	"github.com/dimonchik03/quotaware/internal/headroom"
 	"github.com/dimonchik03/quotaware/internal/scaler/externalscaler"
 	"github.com/dimonchik03/quotaware/internal/state"
+	"github.com/dimonchik03/quotaware/internal/usage"
 )
 
 const (
@@ -31,9 +32,11 @@ const (
 	streamsPerScaledObject = 2
 )
 
+const maxRequestBytes = 64 << 10
+
 func NewServer(maxScaledObjects int) *grpc.Server {
 	streams := min(int64(streamsPerScaledObject)*int64(maxScaledObjects), math.MaxUint32)
-	return grpc.NewServer(grpc.MaxConcurrentStreams(uint32(streams)))
+	return grpc.NewServer(grpc.MaxConcurrentStreams(uint32(streams)), grpc.MaxRecvMsgSize(maxRequestBytes))
 }
 
 type QueueDepth interface {
@@ -68,6 +71,8 @@ type Service struct {
 
 	mu          sync.Mutex
 	queueByAddr map[string]QueueDepth
+	stopping    chan struct{}
+	stopOnce    sync.Once
 }
 
 func New(cfg Config, store *state.Store, queues QueueFactory, now func() time.Time, logger *slog.Logger) (*Service, error) {
@@ -87,12 +92,18 @@ func New(cfg Config, store *state.Store, queues QueueFactory, now func() time.Ti
 	if err := cfg.AIMD.Validate(); err != nil {
 		return nil, fmt.Errorf("aimd defaults: %w", err)
 	}
-	return &Service{cfg: cfg, store: store, queues: queues, now: now, logger: logger, queueByAddr: map[string]QueueDepth{}}, nil
+	return &Service{cfg: cfg, store: store, queues: queues, now: now, logger: logger, queueByAddr: map[string]QueueDepth{}, stopping: make(chan struct{})}, nil
 }
 
 func (s *Service) Register(server *grpc.Server) {
 	externalscaler.RegisterExternalScalerServer(server, s)
 }
+
+func (s *Service) Shutdown() {
+	s.stopOnce.Do(func() { close(s.stopping) })
+}
+
+var errShuttingDown = status.Error(codes.Unavailable, "quotaware is shutting down")
 
 func (s *Service) Close() error {
 	s.mu.Lock()
@@ -143,6 +154,12 @@ func (s *Service) parse(ref *externalscaler.ScaledObjectRef) (trigger, error) {
 	if !ok || provider == "" || model == "" {
 		return trigger{}, status.Error(codes.InvalidArgument, `metadata "bucket" must be "provider/model"`)
 	}
+	if !usage.ValidProvider(provider) || len(model) > usage.MaxModelBytes {
+		return trigger{}, status.Errorf(codes.InvalidArgument, `metadata "bucket" must name openai or anthropic and a model of at most %d bytes`, usage.MaxModelBytes)
+	}
+	if credential, present := metadata["credential"]; present && !usage.ValidCredential(credential) {
+		return trigger{}, status.Error(codes.InvalidArgument, `metadata "credential" must be the 12-character key hash from the key label, or anonymous`)
+	}
 	cfg, err := s.parseConfig(metadata)
 	if err != nil {
 		return trigger{}, err
@@ -192,6 +209,7 @@ func appendField(encoded []byte, field string) []byte {
 func (s *Service) parseAIMD(metadata map[string]string, cfg headroom.Config) (aimd.Config, error) {
 	aimdConfig := s.cfg.AIMD
 	aimdConfig.Interval, aimdConfig.Window, aimdConfig.Min, aimdConfig.Max = cfg.StepInterval, state.WindowLength, cfg.MinReplicas, cfg.MaxReplicas
+	aimdConfig.MaxHold = max(cfg.StaleHard, state.WindowLength)
 	aimdConfig.Start = cfg.DefaultCeiling
 	floats := []floatField{{"aimdThreshold", &aimdConfig.Threshold}, {"aimdDecrease", &aimdConfig.Decrease}}
 	for _, field := range floats {
@@ -390,8 +408,12 @@ func (s *Service) StreamIsActive(ref *externalscaler.ScaledObjectRef, stream ext
 		return err
 	}
 	if t.queue == nil {
-		<-ctx.Done()
-		return nil
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-s.stopping:
+			return errShuttingDown
+		}
 	}
 	ticker := time.NewTicker(s.cfg.PushInterval)
 	defer ticker.Stop()
@@ -399,6 +421,8 @@ func (s *Service) StreamIsActive(ref *externalscaler.ScaledObjectRef, stream ext
 		select {
 		case <-ctx.Done():
 			return nil
+		case <-s.stopping:
+			return errShuttingDown
 		case <-ticker.C:
 			active, err := s.active(ctx, t)
 			if err != nil {
@@ -489,13 +513,38 @@ func (s *Service) ceiling(ref *externalscaler.ScaledObjectRef, t trigger, bucket
 		if err != nil {
 			return 0, err
 		}
-		return min(max(fallback.Value, floor), t.cfg.MaxReplicas), nil
+		return s.report(ref, t, fallback.Value, floor, now)
 	case t.scope == quotaPerCredential:
 		unanswered := headroom.DrainFloor(t.cfg, headroom.Observation{InFlight: waiting})
-		return min(sum+unanswered, t.cfg.MaxReplicas), nil
+		return s.report(ref, t, sum+unanswered, floor, now)
 	default:
-		return min(max(shared.bound(), floor), t.cfg.MaxReplicas), nil
+		return s.report(ref, t, shared.bound(), floor, now)
 	}
+}
+
+const CombinedKey = "combined"
+
+func (s *Service) report(ref *externalscaler.ScaledObjectRef, t trigger, bound, floor int, now time.Time) (int, error) {
+	consumer := state.Consumer{Namespace: ref.GetNamespace(), ScaledObject: ref.GetName(), Trigger: t.fingerprint, Bucket: state.Key{Provider: t.provider, Model: t.model, Key: CombinedKey}}
+	ceiling, err := s.store.UpdateCeiling(consumer, func(previous state.Ceiling, known bool) state.Ceiling {
+		limited, _ := headroom.LimitRaise(t.cfg, headroom.Previous{Ceiling: previous.Bound, Known: known, At: previous.BoundChangedAt}, min(bound, t.cfg.MaxReplicas), now)
+		next := state.Ceiling{Value: min(max(limited, floor), t.cfg.MaxReplicas), Bound: limited, Mode: state.ModeCombined, BoundChangedAt: previous.BoundChangedAt, Seen: now}
+		if !known || limited != previous.Bound {
+			next.BoundChangedAt = now
+		}
+		return next
+	})
+	if err != nil {
+		return 0, ceilingError(err)
+	}
+	return ceiling.Value, nil
+}
+
+func ceilingError(err error) error {
+	if errors.Is(err, state.ErrTooManyConsumers) {
+		return status.Error(codes.ResourceExhausted, err.Error())
+	}
+	return status.Error(codes.Internal, err.Error())
 }
 
 type sharedBound struct {
@@ -548,11 +597,8 @@ func (s *Service) evaluate(consumer state.Consumer, t trigger, obs headroom.Obse
 		}
 		return next
 	})
-	switch {
-	case errors.Is(err, state.ErrTooManyConsumers):
-		return state.Ceiling{}, status.Error(codes.ResourceExhausted, err.Error())
-	case err != nil:
-		return state.Ceiling{}, status.Error(codes.Internal, err.Error())
+	if err != nil {
+		return state.Ceiling{}, ceilingError(err)
 	}
 	if change != nil {
 		s.logger.Info("ceiling changed",
@@ -568,8 +614,7 @@ func decide(t trigger, obs headroom.Observation, recent state.Recent, previous s
 	signal := aimd.Signal{Responses: recent.Responses, RateLimited: recent.RateLimited, RetryAfter: recent.RetryAfter}
 	aimdState := aimd.State{Ceiling: previous.Bound, Known: known && previous.Mode == state.ModeAIMD, ChangedAt: previous.BoundChangedAt, HoldUntil: previous.HoldUntil}
 	drainFloor := headroom.DrainFloor(t.cfg, obs)
-	usable := (obs.Requests.Known() || obs.Tokens.Known()) && !obs.ObservedAt.IsZero() && now.Sub(obs.ObservedAt) <= t.cfg.StaleHard
-	if !usable {
+	if !headroom.Usable(t.cfg, obs, now) {
 		step := aimd.Step(t.aimd, aimdState, signal, now)
 		return decision{value: max(step.Ceiling, drainFloor), bound: step.Ceiling, mode: state.ModeAIMD, reason: "aimd_" + string(step.Action), holdUntil: step.HoldUntil}
 	}

@@ -146,7 +146,7 @@ func TestCollector(t *testing.T) {
 		if o.Provider != "openai" || o.Model != "gpt-4.1-mini" || o.Status != 200 || !o.Complete {
 			t.Fatalf("observation = %+v", o)
 		}
-		if o.Headers["x-ratelimit-remaining-requests"] != "59" || o.Usage == nil || *o.Usage != 150 || o.LatencyMS < 0 {
+		if o.Headers["x-ratelimit-remaining-requests"] != "59" || o.Usage == nil || *o.Usage != 150 || o.LatencyMS <= 0 {
 			t.Fatalf("observation = %+v, want the rate-limit headers, 150 tokens and a latency", o)
 		}
 		if len(o.Credential) != 12 || strings.Contains(o.Credential, "sk-") || s.tokens[0] != "Bearer secret" {
@@ -167,6 +167,30 @@ func TestCollector(t *testing.T) {
 
 		if o := s.all()[0]; o.Usage == nil || *o.Usage != 22 || !o.Complete {
 			t.Fatalf("observation = %+v, want 22 tokens from the final chunk", o)
+		}
+	})
+
+	t.Run("reports how long before the end of a stream its headers arrived", func(t *testing.T) {
+		s := newSink(t, false)
+		upstream := provider(t, func(w http.ResponseWriter, _ *http.Request) {
+			rateLimited(w)
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			w.(http.Flusher).Flush()
+			time.Sleep(60 * time.Millisecond)
+			_, _ = io.WriteString(w, "data: [DONE]\n\n")
+		})
+		c := newCollector(t, s.server.URL, nil)
+		client := &http.Client{Transport: c.Wrap(nil)}
+
+		mustCall(t, client, upstream.URL, chat)
+		if err := c.Close(); err != nil {
+			t.Fatal(err)
+		}
+
+		o := s.all()[0]
+		if o.HeadersAgeMS < 50 || o.HeadersAgeMS > o.LatencyMS {
+			t.Fatalf("headers age = %v ms latency = %v ms, want the 60 ms the body took after the headers", o.HeadersAgeMS, o.LatencyMS)
 		}
 	})
 
