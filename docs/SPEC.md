@@ -339,6 +339,18 @@ Tooling: Go 1.26 (pinned in `go.mod`), `google.golang.org/grpc`,
 - Gemini and Azure header semantics are unverified; AIMD covers them until then.
 - Header semantics can change. Fixture tests plus the unknown-header-to-AIMD rule keep
   that from breaking scaling.
+- OpenAI admits a call against its token limit on prompt plus `max_tokens`, not on
+  usage; tokens per call from usage under-states that charge for clients with a large
+  `max_tokens`.
+- Anthropic's input and output token windows are tracked but the formula bounds by the
+  combined `tokens-*` window over input plus output per call; a split bound needs
+  separate per-call averages for input and output.
+- The instant term models a fixed window while both providers refill continuously; a
+  token-bucket model would read the refill rate and other consumers from successive
+  `remaining` values.
+- Usage capture buffers up to `-max-capture-bytes` per open call and decodes only
+  identity and gzip; parsing SSE incrementally would bound memory and keep the usage of
+  long streams.
 
 ## References
 
