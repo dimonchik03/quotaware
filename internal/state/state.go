@@ -2,6 +2,7 @@ package state
 
 import (
 	"errors"
+	"math"
 	"net/http"
 	"sort"
 	"sync"
@@ -218,7 +219,7 @@ func New(alpha float64) (*Store, error) {
 
 func NewWithLimits(alpha float64, limits Limits) (*Store, error) {
 	switch {
-	case alpha <= 0 || alpha > 1:
+	case math.IsNaN(alpha) || alpha <= 0 || alpha > 1:
 		return nil, errors.New("alpha must be within (0, 1]")
 	case limits.Buckets <= 0 || limits.Consumers <= 0:
 		return nil, errors.New("bucket and scaled object limits must be positive")
