@@ -8,9 +8,14 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
@@ -21,6 +26,7 @@ jobs:
 
   lint:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
@@ -30,6 +36,13 @@ jobs:
         with:
           version: v2.12.2
       - run: go mod tidy && git diff --exit-code go.mod go.sum
+      - name: the image builds with the Go version go.mod names
+        run: |
+          want="$(sed -n 's/^go //p' go.mod)"
+          grep -q "golang:${want}-alpine" Dockerfile || { echo "Dockerfile does not build with Go ${want} from go.mod" >&2; exit 1; }
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310
+        with:
+          version: v4.3.1
       - run: helm lint deploy/helm/quotaware --set observe.insecure=true --strict
       - run: helm template quotaware deploy/helm/quotaware --set observe.token=example > /dev/null
       - run: helm template quotaware deploy/helm/quotaware --set observe.existingSecret=quotaware-observe > /dev/null
@@ -50,6 +63,7 @@ jobs:
 
   e2e:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
@@ -59,6 +73,7 @@ jobs:
 
   python-collector:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     strategy:
       matrix:
         python: ["3.10", "3.13"]
@@ -69,3 +84,26 @@ jobs:
           python-version: ${{ matrix.python }}
       - run: pip install ./collector/python pytest
       - run: python -m pytest -q collector/python
+
+  commits:
+    if: github.event_name == 'pull_request' && github.actor != 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: commit subjects follow Conventional Commits in at most 72 characters
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          bad=0
+          while IFS= read -r subject; do
+            if [ "${#subject}" -gt 72 ] || ! printf '%s' "$subject" | grep -qE '^(feat|fix|refactor|test|docs|chore|build|ci|perf)(\([a-z0-9-]+\))?: [a-z]'; then
+              echo "::error::$subject"
+              bad=1
+            fi
+          done < <(git log --no-merges --format=%s "$BASE..$HEAD")
+          exit "$bad"
