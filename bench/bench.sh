@@ -11,7 +11,7 @@ step=15
 local_port=19095
 commit=$(git rev-parse HEAD)
 dirty=false
-if [ -n "$(git status --porcelain --untracked-files=no)" ]; then dirty=true; fi
+if [ -n "$(git status --porcelain)" ]; then dirty=true; fi
 rpm=$(grep -o '"-rpm", "[0-9]*"' bench/kind/manifests/10-fakeprovider.yaml | grep -o '[0-9]*')
 
 ensure_cluster
@@ -128,7 +128,7 @@ go run ./bench/cmd/plot -results "$results" -concurrency "$concurrency" >/dev/nu
   echo
   echo "![replicas](replicas.svg)"
   echo
-  echo "![429 per minute](rate_limits.svg)"
+  echo "![retries per minute, each after a 429 in these runs](retries.svg)"
   echo
   echo "![queue](queue.svg)"
   echo

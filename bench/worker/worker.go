@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"log/slog"
 	"math"
@@ -97,6 +96,9 @@ func NewMetrics(registry prometheus.Registerer) *Metrics {
 		CallLatency: prometheus.NewHistogram(prometheus.HistogramOpts{Name: "worker_call_latency_seconds", Help: "Seconds per provider call attempt.", Buckets: prometheus.ExponentialBuckets(0.1, 1.5, 20)}),
 	}
 	registry.MustRegister(m.Completed, m.Failed, m.Abandoned, m.Calls, m.Retries, m.Backoff, m.InFlight, m.JobLatency, m.CallLatency)
+	for _, status := range []string{"200", "429", "error"} {
+		m.Calls.WithLabelValues(status)
+	}
 	return m
 }
 
@@ -266,8 +268,4 @@ func prompt(tokens int) string {
 		tokens = 1
 	}
 	return strings.TrimSpace(strings.Repeat("job ", tokens))
-}
-
-func (j Job) String() string {
-	return fmt.Sprintf("job %d enqueued %s", j.ID, j.EnqueuedAt.Format(time.RFC3339))
 }

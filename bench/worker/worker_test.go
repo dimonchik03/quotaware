@@ -56,8 +56,21 @@ type fixture struct {
 	registry   *prometheus.Registry
 	statuses   []int
 	retryAfter string
+	hold       time.Duration
 	calls      atomic.Int64
+	open       atomic.Int64
+	peak       atomic.Int64
 	server     *httptest.Server
+}
+
+func (f *fixture) enter() {
+	open := f.open.Add(1)
+	for {
+		peak := f.peak.Load()
+		if open <= peak || f.peak.CompareAndSwap(peak, open) {
+			return
+		}
+	}
 }
 
 func newFixture(t *testing.T, statuses ...int) *fixture {
@@ -65,6 +78,9 @@ func newFixture(t *testing.T, statuses ...int) *fixture {
 	registry := prometheus.NewRegistry()
 	f := &fixture{queue: &fakeQueue{}, metrics: worker.NewMetrics(registry), registry: registry, statuses: statuses, retryAfter: "0"}
 	f.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		f.enter()
+		defer f.open.Add(-1)
+		time.Sleep(f.hold)
 		index := int(f.calls.Add(1)) - 1
 		status := http.StatusOK
 		if index < len(f.statuses) {
@@ -221,10 +237,25 @@ func TestWorker(t *testing.T) {
 		for i := range 6 {
 			f.queue.push(t, worker.Job{ID: int64(i), EnqueuedAt: time.Now(), PromptTokens: 20})
 		}
+		f.hold = 50 * time.Millisecond
 		cfg := fastConfig()
 		cfg.Concurrency = 3
 
 		f.run(t, cfg, func() bool { return counter(f.metrics.Completed) == 6 })
+
+		if peak := f.peak.Load(); peak != 3 {
+			t.Fatalf("peak calls in flight = %d, want 3", peak)
+		}
+	})
+
+	t.Run("exports the call counters at zero before the first call so a rate sees the first 429", func(t *testing.T) {
+		registry := prometheus.NewRegistry()
+
+		metrics := worker.NewMetrics(registry)
+
+		if calls := testutil.CollectAndCount(metrics.Calls); calls != 3 {
+			t.Fatalf("call series = %d, want 200, 429 and error exported before any call", calls)
+		}
 	})
 
 	t.Run("rejects an invalid configuration", func(t *testing.T) {

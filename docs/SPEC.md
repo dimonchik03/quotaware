@@ -107,8 +107,8 @@ of the two is stable and honest.
 
 Guards:
 
-- Hysteresis: raise the ceiling by at most `max_step_up` pods per polling interval
-  (default 2); lower it immediately.
+- Hysteresis: raise the ceiling by at most `max_step_up` pods per `step_interval`
+  (default 2 per 15 s); lower it immediately.
 - Drain guard: never report a ceiling below `ceil(in_flight / k)`, capped at
   `max_replicas`, so a scale-down does not kill pods mid-call.
 - Staleness: observations older than `stale_after` (default 120 s) freeze the last
@@ -244,11 +244,11 @@ limits are the ones in `bench/` at that commit.
 Components under `bench/`:
 
 - `fakeprovider/` (Go): serves `/v1/chat/completions` and `/v1/messages`. Per-model
-  RPM and TPM limits in two modes, fixed window (OpenAI-like) and token bucket
+  RPM and TPM limits in two modes, fixed window (a simplification of OpenAI's limiter) and token bucket
   (Anthropic-like); correct headers in both formats; 429 plus `retry-after` when
   exhausted; optional acceleration 429 on steep ramps; configurable latency
   distribution (default 1.5 s with jitter); synthetic usage derived from request size
-  plus a fixed output size; deterministic by seed.
+  plus a fixed output size; latency jitter and response text seeded.
 - `producer/`: pushes jobs into a Redis list following a phased schedule: 0.5x quota
   for three minutes, 1.0x for three, a 3x burst for four, then four minutes idle. The
   job schedule and prompt sizes come from one seed, so every run sees the same jobs.
@@ -261,7 +261,7 @@ Components under `bench/`:
 - `plot/`: turns the Prometheus export into three SVG charts and a Markdown table,
   one column per run.
 
-Three runs, identical except for the ScaledObject:
+Three runs that differ by design only in the ScaledObject:
 
 - A, baseline: Redis list trigger only (`listLength: 10`).
 - B, quotaware: the same trigger capped by the quotaware ceiling (Mode A) at the

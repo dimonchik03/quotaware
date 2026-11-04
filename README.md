@@ -23,7 +23,7 @@ the quotaware ceiling, at the default safety factor 0.85 and at 1, both with
 
 ![worker replicas](bench/results/2026-11-02/replicas.svg)
 
-![429 responses per minute](bench/results/2026-11-02/rate_limits.svg)
+![retries per minute, each after a 429](bench/results/2026-11-02/retries.svg)
 
 | Metric | A (queue trigger) | B (queue trigger + quotaware, safety 0.85) | C (queue trigger + quotaware, safety 1) |
 |---|---|---|---|
@@ -34,7 +34,7 @@ the quotaware ceiling, at the default safety factor 0.85 and at 1, both with
 | Jobs unaccounted for | 0 | 0 | 0 |
 | 429 responses | 720 | 0 | 15 |
 | Retries | 720 | 0 | 15 |
-| Peak 429 per minute | 76 | 0 | 2 |
+| Peak retries per minute | 91 | 0 | 5 |
 | Job latency p50 | 128.1 s | 263.6 s | 164.8 s |
 | Job latency p95 | 457.7 s | 689.5 s | 463.1 s |
 | Peak replicas | 30 | 8 | 10 |
@@ -51,9 +51,11 @@ sits one bucket higher (about 29 %) and the burst takes 10 % longer to drain. Th
 quota and the latency stay constant here, so a static `maxReplicaCount` of 10 would
 likely do as well as C. The ceiling is meant for headroom that moves: the kind demo
 below shows it following another credential's burst on the shared quota, a case the
-benchmark does not measure yet. `make bench` reproduces all three runs on a laptop; `docs/benchmark.md` has
-the setup, the hypothesis written before the first run (C was added after it), the
-result against it and how each number is measured.
+benchmark does not measure yet. The fixed window of the fake provider also hands the
+baseline a head start through the burst, about the size of C's p50 and drain gaps.
+`make bench` reproduces all three runs on a laptop; `docs/benchmark.md` has the
+setup, the hypothesis written before the first run (C was added after it), the result
+against it and how each number is measured.
 
 ## How it works
 
@@ -120,8 +122,8 @@ replayable, so a stale pooled connection is retried instead of answered with 502
 
 To see it work without a provider account, `docker compose up --build` starts the
 proxy in front of `bench/fakeprovider`, a provider stand-in with real rate-limit
-headers in both formats, 429s with `retry-after`, SSE streams and a deterministic
-seed. The same stack backs `make e2e`. A session against a provider limited to
+headers in both formats, 429s with `retry-after`, SSE streams and seeded
+latency jitter and response text. The same stack backs `make e2e`. A session against a provider limited to
 three requests per minute:
 
     $ curl -si localhost:18080/v1/chat/completions -H "Authorization: Bearer sk-demo" \
@@ -313,26 +315,31 @@ ceiling, so a burst of 429s halves it even while the headers still look healthy.
 
 The demo creates a cluster with its own kubeconfig under `bench/kind/`, so your
 default context is never touched. Workers are curl loops (two calls in flight per
-pod, backing off on `retry-after`) scaled by the Mode A ScaledObject against a fake
-provider limited to 600 requests per minute; 200 queued jobs keep demand at 20. After
-90 seconds a job with another credential bursts the shared quota for a minute:
+pod, backing off on `retry-after`) scaled by the two-trigger ScaledObject in
+`bench/kind/manifests/40-scaledobject.yaml` against a fake provider limited to 600
+requests per minute in one window per model that every key shares; 200 queued jobs
+keep demand at 20. After 90 seconds a job with another credential bursts the shared
+quota for a minute:
 
-    time      replicas  desired  429/15s ceiling (quotaware log)
-    21:40:33  -         -        0      0 -> 8 (headroom)
-    21:40:49  8         8        0
-    21:41:50  8         8        0
+    time      replicas  desired  ceiling (quotaware log)
+    21:40:33  -         -        0 -> 8 (headroom)
+    21:40:49  8         8
+    21:41:50  8         8
     21:42:05  burst job started: 30 loops with another credential for 60s
-    21:42:21  8         7        0      8 -> 7 (drain)
-    21:43:07  7         1        0      3 -> 1 (clamped)
-    21:43:23  1         1        0
-    21:43:38  1         5        0      1 -> 5 (step_up)
-    21:43:53  5         8        0      5 -> 8 (headroom)
-    21:44:09  8         8        0
+    21:42:21  8         7        8 -> 7 (drain)
+    21:43:07  7         1        3 -> 1 (clamped)
+    21:43:23  1         1
+    21:43:38  1         5        1 -> 5 (step_up)
+    21:43:53  5         8        5 -> 8 (headroom)
+    21:44:09  8         8
 
-Eight replicas is what 600 requests per minute feeds at one call per second per pod
-with the safety factor applied; the workers never see a 429. When the burst drains
-the window, the ceiling drops and the HPA follows within a poll; after the window
-resets the ceiling steps back up by `maxStepUp` per interval.
+Eight replicas is what 600 requests per minute feeds at about one call per second per
+pod with the safety factor applied. Once the burst has spent the shared window, every
+call gets a 429 until the reset, the workers' included: the ceiling follows the
+remaining quota down, so fewer worker pods sit in backoff, and after the window resets
+it steps back up by `maxStepUp` per interval. The log shows the last ceiling change of
+each 15 s line only. The demo also prints the workers' 429s per line; this recording
+predates a fix to that count, so the column is left out.
 
 ## Command line
 
@@ -364,8 +371,9 @@ Not a gateway, not a rate limiter, not a cost dashboard. See `docs/SPEC.md`.
 ## Status
 
 v0.2.0 is the current release: binaries for Linux and macOS on the releases page, the
-image `ghcr.io/dimonchik03/quotaware:0.2.0`, everything in `docs/SPEC.md`
-implemented and benchmarked. Over v0.1.0 it adds the network defaults of ADR 0008
+image `ghcr.io/dimonchik03/quotaware:0.2.0`, the v0.x scope of `docs/SPEC.md`
+implemented, and the two-trigger mode benchmarked against a fixed-window fake
+provider. Over v0.1.0 it adds the network defaults of ADR 0008
 and 0009 (observe token, NetworkPolicy, Redis allow list, ceiling state bound to the
 trigger), the store limits, async hooks for the Python collector and the three-run
 benchmark above.

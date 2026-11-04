@@ -1,18 +1,22 @@
 # Benchmark
 
-Three runs on a laptop `kind` cluster, identical except for the ScaledObject, zero
-provider tokens spent. All scale the same worker deployment against the same fake
-provider with the same job schedule.
+Three runs on a laptop `kind` cluster, zero provider tokens spent. They share the
+workers, the producer schedule and seed and the HPA behaviour; only the ScaledObject
+differs by design. The fake provider and Prometheus ran on across the runs, so each run
+met the minute window at a different phase, and each variant ran once, in the order
+A, B, C.
 
 ## Setup
 
 - Provider: `bench/fakeprovider`, 600 requests and 2,000,000 tokens per minute for
-  the model, fixed window, 2 s latency with 200 ms jitter, OpenAI-style headers,
-  429 with `retry-after` when the window is spent.
+  the model in one fixed minute window that every key shares, 2 s latency with 200 ms
+  jitter, OpenAI-style headers, 429 with `retry-after` up to the reset when the window
+  is spent; a rejected call does not count against the window and acceleration
+  limits are off. Only the request limit binds: about 365 tokens per call.
 - Workers: `bench/worker`, two calls in flight per pod, SDK-style retry (exponential
   backoff from one second, capped at a minute, then ±25 % jitter, never before
   `retry-after`), six attempts per job, graceful shutdown on SIGTERM that counts the
-  jobs it had to abandon and lingers 15 s so the last counters are scraped.
+  jobs it had to abandon and lingers 15 s after SIGTERM so the last counters are scraped.
 - Producer: `bench/producer`, one process pushing jobs into a Redis list at a
   multiple of the provider quota (10 jobs per second): `half:3m:0.5`, `full:3m:1`,
   `burst:4m:3`, `idle:4m:0`. Prompt sizes vary within 200 ± 50 tokens from a fixed
@@ -50,24 +54,26 @@ failed and abandoned).
 ## Running it
 
     make bench          # full schedule, about an hour for the three runs
-    make bench-smoke    # two-minute schedule to check the pipeline
+    make bench-smoke    # short schedule, about three minutes per run, to check the pipeline
 
 The cluster is the one `make demo` uses, with its own kubeconfig under `bench/kind/`;
 `make demo-down` deletes it.
 
 ## Results, 2026-11-02
 
-`bench/results/2026-11-02/`, built from commit `bfffc1c` with a clean tree, produced
+`bench/results/2026-11-02/`, built from commit `bfffc1c` with no changes to tracked files, produced
 by `make bench` on a MacBook with 16 GB of memory, kind v0.33, KEDA 2.21.0, Go 1.26.5.
 Run A took 1091 s, run B 1352 s, run C 1128 s, including the drain after the schedule.
 Each variant ran once. The commits after `bfffc1c` changed the scaler only for
 credentials the provider has not answered yet, responses other than 2xx and 429, and
 gRPC callers other than KEDA's trigger (ADR 0009); of these only the first occurs,
-for the second or two before each run's first response.
+for the second or two before each run's first response. Later commits also count the
+step interval from the last change of the bound and add a NetworkPolicy and a gRPC
+probe peer to the kind setup, so a run on the current commit may step up differently.
 
 ![replicas](../bench/results/2026-11-02/replicas.svg)
 
-![429 per minute](../bench/results/2026-11-02/rate_limits.svg)
+![retries per minute, each after a 429](../bench/results/2026-11-02/retries.svg)
 
 ![queue length](../bench/results/2026-11-02/queue.svg)
 
@@ -80,7 +86,7 @@ for the second or two before each run's first response.
 | Jobs unaccounted for | 0 | 0 | 0 |
 | 429 responses | 720 | 0 | 15 |
 | Retries | 720 | 0 | 15 |
-| Peak 429 per minute | 76 | 0 | 2 |
+| Peak retries per minute | 91 | 0 | 5 |
 | Job latency p50 | 128.1 s | 263.6 s | 164.8 s |
 | Job latency p95 | 457.7 s | 689.5 s | 463.1 s |
 | Peak replicas | 30 | 8 | 10 |
@@ -93,7 +99,7 @@ for the second or two before each run's first response.
 - *Under quota both runs look the same.* Holds in the 0.5x phase. In the 1.0x phase B
   already falls behind: its ceiling of 8 pods completes about 480 jobs per minute
   against 600 produced, so its queue grows from 55 to 417 while A's stays near 100.
-  C keeps up with A.
+  C nearly keeps up: its queue grows from 87 to 124 while A's stays near 100.
 - *Fewer 429s.* Holds. A 720, B 0, C 15.
 - *Fewer pod-seconds.* Holds. A 23580, B 10050, C 10125. A spent 13300 pod-seconds,
   more than half of its total, in backoff.
@@ -119,21 +125,34 @@ What this benchmark does not show: the quota, the latency and the set of consume
 are constant, so a static `maxReplicaCount` of 10 on the queue trigger would likely
 match run C. The ceiling is meant for headroom that moves, for instance when another
 credential spends the shared quota; the kind demo in the README shows that case and
-a later benchmark run should measure it. The fake provider also does not charge a
-rejected call against its window, while OpenAI counts unsuccessful requests against
-the per-minute limit, so run A's retries cost it less here than they would against a
-real provider.
+a later benchmark run should measure it. B's ceiling sat at 8 from its first 30
+seconds to the end, so B behaved as a static cap of 8.
+
+The fixed window also flatters the baseline. When A jumps to 30 pods it spends the
+rest of one window and all of the next back to back, up to 1026 completions in one
+minute against a quota of 600, and then front-loads every later window, because each
+429 carries a `retry-after` up to the reset and all of A's call slots wake together.
+That keeps A 140 to 500 jobs ahead of C through the burst, about the size of C's p50
+and drain gaps. The fake provider does not charge a rejected call against its window,
+while OpenAI counts unsuccessful requests against the per-minute limit. A provider
+that refills continuously, or one with acceleration limits on, would remove A's head
+start and raise its 429 count; neither was run.
 
 Reading the table: totals are the per-pod maxima of each counter over the run, and
-the worker lingers 15 s after its last job so the final values are scraped, which is
+the worker lingers 15 s after SIGTERM so the final values are scraped, which is
 why every produced job is accounted for. Latencies are from enqueue to completion
 across the whole run, interpolated from a histogram whose buckets grow by a factor
 of 1.5: p95 values between 328 s and 493 s share one bucket, so differences of a few
 percent inside it are not measured, while the three p50 values fall in three
 different buckets. Between buckets only the order is measured; the percentages above
-come from the interpolation. Pod-seconds integrate the replica series; idle pod-seconds are
+come from the interpolation. Pod-seconds integrate the replica series, which counts
+worker pods whose metrics endpoint is up, including the 15 s linger; idle pod-seconds are
 the seconds workers spent sleeping on a 429 divided by the two calls per pod. The
-drain time runs from the end of the 3x phase to the first empty queue.
+drain time runs from the end of the 3x phase to the first empty queue, at the 15 s
+resolution of the export, so 450 s and 495 s are three samples apart. The 429 row
+counts each pod's 429 total; the per-minute row and chart use retries, because the
+429 series of a pod only appears at its first 429 and a rate misses that step. In
+these runs every retry followed a 429.
 
 ## Superseded results, 2026-11-01
 

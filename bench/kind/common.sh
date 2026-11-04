@@ -19,13 +19,12 @@ build_and_load() {
   log "building images"
   docker build -q -t quotaware:dev .
   docker build -q -t quotaware-fakeprovider:dev --build-arg CMD=./bench/cmd/fakeprovider .
-  local images="quotaware:dev quotaware-fakeprovider:dev"
+  local images=(quotaware:dev quotaware-fakeprovider:dev)
   for extra in "$@"; do
     docker build -q -t "quotaware-$extra:dev" --build-arg "CMD=./bench/cmd/$extra" .
-    images="$images quotaware-$extra:dev"
+    images+=("quotaware-$extra:dev")
   done
-  # shellcheck disable=SC2086
-  kind load docker-image --name "$cluster" $images
+  kind load docker-image --name "$cluster" "${images[@]}"
 }
 
 install_keda() {
