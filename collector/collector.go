@@ -55,7 +55,8 @@ type Collector struct {
 	failed     atomic.Int64
 	unobserved atomic.Int64
 	failing    atomic.Bool
-	closing    atomic.Bool
+	gate       sync.Mutex
+	closing    bool
 	stop       chan struct{}
 	wg         sync.WaitGroup
 	closed     sync.Once
@@ -106,8 +107,10 @@ var ErrUndelivered = errors.New("quotaware collector closed before every observa
 func (c *Collector) Close() error {
 	var err error
 	c.closed.Do(func() {
-		c.closing.Store(true)
+		c.gate.Lock()
+		c.closing = true
 		close(c.stop)
+		c.gate.Unlock()
 		done := make(chan struct{})
 		go func() {
 			c.wg.Wait()
@@ -123,7 +126,9 @@ func (c *Collector) Close() error {
 }
 
 func (c *Collector) enqueue(observation Observation) {
-	if c.closing.Load() {
+	c.gate.Lock()
+	defer c.gate.Unlock()
+	if c.closing {
 		c.dropped.Add(1)
 		return
 	}
@@ -241,6 +246,7 @@ func (r roundTripper) RoundTrip(request *http.Request) (*http.Response, error) {
 		c.unobserved.Add(1)
 		return nil, err
 	}
+	headersAt := time.Now()
 	observation := Observation{
 		Provider:   c.cfg.Provider,
 		Model:      payload.Model,
@@ -254,6 +260,7 @@ func (r roundTripper) RoundTrip(request *http.Request) (*http.Response, error) {
 	response.Body = usage.NewCapture(response.Body, c.cfg.MaxCaptureBytes, func(captured []byte, outcome usage.Outcome) {
 		complete := outcome == usage.Completed
 		observation.LatencyMS = float64(time.Since(started)) / float64(time.Millisecond)
+		observation.HeadersAgeMS = float64(time.Since(headersAt)) / float64(time.Millisecond)
 		observation.Complete = complete
 		if complete && succeeded {
 			if decoded, ok := usage.Decompress(encoding, captured, c.cfg.MaxCaptureBytes); ok {

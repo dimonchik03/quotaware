@@ -7,6 +7,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
+	"github.com/dimonchik03/quotaware/internal/aimd"
 	"github.com/dimonchik03/quotaware/internal/headroom"
 	"github.com/dimonchik03/quotaware/internal/state"
 )
@@ -63,12 +64,12 @@ func NewCollector(store *state.Store, now func() time.Time) *Collector {
 		rateLimitedRatio:  describe("rate_limited_ratio", "Share of 429 among the 2xx and 429 responses of the last minute."),
 		responses:         describe("responses_total", "Responses observed from the provider."),
 		rateLimited:       describe("429_total", "Responses with status 429."),
-		aborted:           describe("aborted_total", "Responses the client stopped reading before the end."),
-		upstreamErrors:    describe("upstream_errors_total", "Calls that never produced a provider response."),
+		aborted:           describe("aborted_total", "Calls the client gave up on, before the provider answered or while reading the answer."),
+		upstreamErrors:    describe("upstream_errors_total", "Calls the upstream failed: no response at all, or a body that broke mid-stream."),
 		headersMissing:    describe("headers_missing_total", "Responses that should carry rate-limit headers but did not."),
 		headersMalformed:  describe("headers_malformed_total", "Responses whose rate-limit headers could not be parsed."),
 		usageMissing:      describe("usage_missing_total", "Successful responses without a usable usage object."),
-		ceiling:           prometheus.NewDesc("quotaware_ceiling", "Replica ceiling of one bucket for a scaled object and trigger, before the credentials of the trigger are combined.", consumerLabels, nil),
+		ceiling:           prometheus.NewDesc("quotaware_ceiling", "Replica ceiling of a scaled object and trigger: one series per credential bucket, and key=\"combined\" for the value KEDA receives.", consumerLabels, nil),
 		buckets:           prometheus.NewDesc("quotaware_buckets", "Buckets currently tracked.", nil, nil),
 		consumers:         prometheus.NewDesc("quotaware_scaled_objects", "Ceilings currently tracked, one per scaled object, trigger and credential.", nil, nil),
 		bucketsRejected:   prometheus.NewDesc("quotaware_buckets_rejected_total", "Store updates on new buckets refused because the bucket limit was reached; a refused proxied call counts at its start and at its end.", nil, nil),
@@ -156,10 +157,7 @@ func (c *Collector) descs() []*prometheus.Desc {
 }
 
 func ratio(recent state.Recent) float64 {
-	if recent.Responses == 0 {
-		return 0
-	}
-	return float64(recent.RateLimited) / float64(recent.Responses)
+	return aimd.Signal{Responses: recent.Responses, RateLimited: recent.RateLimited}.Ratio()
 }
 
 func secondsUntil(q headroom.Quota, now time.Time) float64 {

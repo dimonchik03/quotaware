@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -9,13 +10,21 @@ import (
 )
 
 func TestNewServerBoundsHeaderReadsAndIdleConnections(t *testing.T) {
-	server := newServer(":0", http.NotFoundHandler())
+	server := newServer(endpoint{address: ":0", handler: http.NotFoundHandler()})
 
 	if server.ReadHeaderTimeout != 10*time.Second || server.IdleTimeout != 2*time.Minute {
 		t.Fatalf("timeouts = header %v idle %v, want 10s and 2m", server.ReadHeaderTimeout, server.IdleTimeout)
 	}
-	if server.WriteTimeout != 0 {
-		t.Fatalf("write timeout = %v, want none so streams are never cut", server.WriteTimeout)
+	if server.WriteTimeout != 0 || server.ReadTimeout != 0 {
+		t.Fatalf("write timeout = %v read timeout = %v, want none so proxied bodies and streams are never cut", server.WriteTimeout, server.ReadTimeout)
+	}
+}
+
+func TestNewServerBoundsTheWholeRequestReadOnTheAdminPort(t *testing.T) {
+	server := newServer(endpoint{address: ":0", handler: http.NotFoundHandler(), readTimeout: 30 * time.Second})
+
+	if server.ReadTimeout != 30*time.Second {
+		t.Fatalf("read timeout = %v, want 30s so a slow observation cannot hold a connection", server.ReadTimeout)
 	}
 }
 
@@ -168,11 +177,19 @@ func TestObserverFlags(t *testing.T) {
 		}
 	})
 
-	t.Run("rejects an upstream without a host", func(t *testing.T) {
-		_, err := parseObserverFlags("proxy", []string{"-openai-upstream", "fakeprovider:8081"}, &bytes.Buffer{}, false)
+	t.Run("rejects an upstream without a scheme", func(t *testing.T) {
+		_, err := parseObserverFlags("proxy", []string{"-openai-upstream", "fakeprovider:8081", "-observe-insecure"}, &bytes.Buffer{}, false)
 
-		if err == nil {
-			t.Fatal("expected an error for a bare host without scheme")
+		if err == nil || !strings.Contains(err.Error(), "scheme") {
+			t.Fatalf("err = %v, want a complaint about the scheme", err)
+		}
+	})
+
+	t.Run("rejects an upstream without a host", func(t *testing.T) {
+		_, err := parseObserverFlags("proxy", []string{"-openai-upstream", "http://", "-observe-insecure"}, &bytes.Buffer{}, false)
+
+		if err == nil || !strings.Contains(err.Error(), "host") {
+			t.Fatalf("err = %v, want a complaint about the host", err)
 		}
 	})
 
@@ -201,4 +218,17 @@ func TestObserverFlags(t *testing.T) {
 			t.Fatalf("exit = %d, stderr = %q, want 2 naming alpha", code, stderr.String())
 		}
 	})
+}
+
+func TestListeningAttributesRedactUpstreamPasswords(t *testing.T) {
+	options, err := parseObserverFlags("proxy", []string{"-openai-upstream", "https://user:s3cret@gateway.internal", "-observe-insecure"}, &bytes.Buffer{}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	attributes := fmt.Sprint(listeningAttributes("proxy", options))
+
+	if strings.Contains(attributes, "s3cret") || !strings.Contains(attributes, "gateway.internal") {
+		t.Fatalf("attributes = %s, want the upstream logged without its password", attributes)
+	}
 }

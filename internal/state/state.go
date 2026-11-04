@@ -47,6 +47,15 @@ func (q Quotas) merge(update Quotas) Quotas {
 	}
 }
 
+func (q Quotas) reportedAt(at time.Time) Quotas {
+	for _, window := range []*headroom.Quota{&q.Requests, &q.Tokens, &q.ProjectTokens, &q.InputTokens, &q.OutputTokens} {
+		if window.Known() {
+			window.ReportedAt = at
+		}
+	}
+	return q
+}
+
 func keep(current, update headroom.Quota) headroom.Quota {
 	if update.Known() {
 		return update
@@ -64,6 +73,7 @@ type Sample struct {
 	Usage      float64
 	Latency    time.Duration
 	RetryAfter time.Duration
+	HeadersAt  time.Time
 	At         time.Time
 }
 
@@ -113,8 +123,11 @@ type window struct {
 
 func (w *window) record(at time.Time, rateLimited bool, retryAfter time.Duration) {
 	slot := at.Unix() / binSeconds
-	b := &w.bins[slot%binCount]
-	if b.slot != slot {
+	b := &w.bins[(slot%binCount+binCount)%binCount]
+	switch {
+	case b.slot > slot:
+		return
+	case b.slot < slot:
 		*b = bin{slot: slot}
 	}
 	b.responses++
@@ -169,6 +182,7 @@ type Mode string
 const (
 	ModeHeadroom Mode = "headroom"
 	ModeAIMD     Mode = "aimd"
+	ModeCombined Mode = "combined"
 )
 
 type Ceiling struct {
@@ -214,11 +228,7 @@ type Store struct {
 	stats    Stats
 }
 
-func New(alpha float64) (*Store, error) {
-	return NewWithLimits(alpha, DefaultLimits())
-}
-
-func NewWithLimits(alpha float64, limits Limits) (*Store, error) {
+func New(alpha float64, limits Limits) (*Store, error) {
 	switch {
 	case math.IsNaN(alpha) || alpha <= 0 || alpha > 1:
 		return nil, errors.New("alpha must be within (0, 1]")
@@ -319,6 +329,20 @@ func (s *Store) End(key Key, sample Sample) {
 		return
 	}
 	b.InFlight = max(b.InFlight-1, 0)
+	s.record(key, b, sample)
+}
+
+func (s *Store) Observe(key Key, sample Sample) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	b, ok := s.bucket(key)
+	if !ok {
+		return
+	}
+	s.record(key, b, sample)
+}
+
+func (s *Store) record(key Key, b *Bucket, sample Sample) {
 	b.LastSeen = latest(b.LastSeen, sample.At)
 	b.Responses++
 	if succeeded(sample.Status) {
@@ -336,8 +360,7 @@ func (s *Store) End(key Key, sample Sample) {
 	}
 	switch sample.Headers {
 	case HeadersPresent:
-		b.Quotas = b.Quotas.merge(sample.Quotas)
-		b.ObservedAt = sample.At
+		b.apply(sample)
 	case HeadersMissing:
 		if carriesLimits(sample.Status) {
 			b.HeadersMissing++
@@ -345,8 +368,7 @@ func (s *Store) End(key Key, sample Sample) {
 	case HeadersMalformed:
 		b.HeadersMalformed++
 		if sample.Quotas.Usable() {
-			b.Quotas = b.Quotas.merge(sample.Quotas)
-			b.ObservedAt = sample.At
+			b.apply(sample)
 		}
 	}
 	if sample.Failed {
@@ -368,6 +390,14 @@ func (s *Store) End(key Key, sample Sample) {
 	}
 }
 
+func (b *Bucket) apply(sample Sample) {
+	if sample.HeadersAt.Before(b.ObservedAt) {
+		return
+	}
+	b.Quotas = b.Quotas.merge(sample.Quotas.reportedAt(sample.HeadersAt))
+	b.ObservedAt = sample.HeadersAt
+}
+
 func (s *Store) Evict(now time.Time, idleFor time.Duration) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -385,16 +415,6 @@ func (s *Store) Evict(now time.Time, idleFor time.Duration) int {
 		}
 	}
 	return evicted
-}
-
-func (s *Store) Bucket(key Key, now time.Time) (Bucket, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	b, ok := s.buckets[key]
-	if !ok {
-		return Bucket{}, false
-	}
-	return s.snapshot(b, now), true
 }
 
 func (s *Store) Buckets(now time.Time) []Bucket {

@@ -58,6 +58,8 @@ var (
 	ErrUnknownProvider = errors.New("unknown provider")
 
 	errAbsentCounterpart = errors.New("limit and remaining must be reported together")
+	errNotPositive       = errors.New("a limit must be positive")
+	errNegative          = errors.New("a remaining count must not be negative")
 )
 
 type MalformedError struct {
@@ -88,17 +90,32 @@ func Parse(provider Provider, h http.Header, now time.Time) (Limits, error) {
 	}
 }
 
+const MaxRetryAfter = 24 * time.Hour
+
+var errRetryAfterTooLong = errors.New("delay beyond a day")
+
 func RetryAfter(h http.Header, now time.Time) (time.Duration, error) {
 	value := strings.TrimSpace(h.Get("Retry-After"))
 	if value == "" {
 		return 0, nil
 	}
+	delay, err := retryAfterDelay(value, now)
+	if err != nil {
+		return 0, &MalformedError{Header: "Retry-After", Value: value, Err: err}
+	}
+	if delay > MaxRetryAfter {
+		return 0, &MalformedError{Header: "Retry-After", Value: value, Err: errRetryAfterTooLong}
+	}
+	return delay, nil
+}
+
+func retryAfterDelay(value string, now time.Time) (time.Duration, error) {
 	if seconds, err := strconv.ParseUint(value, 10, 32); err == nil {
 		return time.Duration(seconds) * time.Second, nil
 	}
 	at, err := http.ParseTime(value)
 	if err != nil {
-		return 0, &MalformedError{Header: "Retry-After", Value: value, Err: err}
+		return 0, err
 	}
 	return max(at.Sub(now), 0), nil
 }
@@ -128,6 +145,10 @@ func window(h http.Header, limitName, remainingName, resetName string, now time.
 		return Window{}, &MalformedError{Header: limitName, Err: errAbsentCounterpart}
 	case !remainingPresent:
 		return Window{}, &MalformedError{Header: remainingName, Err: errAbsentCounterpart}
+	case limit <= 0:
+		return Window{}, &MalformedError{Header: limitName, Value: strconv.FormatInt(limit, 10), Err: errNotPositive}
+	case remaining < 0:
+		return Window{}, &MalformedError{Header: remainingName, Value: strconv.FormatInt(remaining, 10), Err: errNegative}
 	}
 	parsed := Window{Limit: limit, Remaining: remaining}
 	value := strings.TrimSpace(h.Get(resetName))

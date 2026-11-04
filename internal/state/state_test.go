@@ -18,7 +18,7 @@ var (
 
 func store(t *testing.T, alpha float64) *state.Store {
 	t.Helper()
-	s, err := state.New(alpha)
+	s, err := state.New(alpha, state.DefaultLimits())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -34,14 +34,15 @@ func quotas() state.Quotas {
 
 func success(usage float64, latency time.Duration) state.Sample {
 	return state.Sample{
-		Status:   http.StatusOK,
-		Complete: true,
-		Headers:  state.HeadersPresent,
-		Quotas:   quotas(),
-		HasUsage: true,
-		Usage:    usage,
-		Latency:  latency,
-		At:       now,
+		Status:    http.StatusOK,
+		Complete:  true,
+		Headers:   state.HeadersPresent,
+		Quotas:    quotas(),
+		HasUsage:  true,
+		Usage:     usage,
+		Latency:   latency,
+		HeadersAt: now,
+		At:        now,
 	}
 }
 
@@ -61,11 +62,13 @@ func bucket(t *testing.T, s *state.Store) state.Bucket {
 
 func bucketAt(t *testing.T, s *state.Store, at time.Time) state.Bucket {
 	t.Helper()
-	b, ok := s.Bucket(key, at)
-	if !ok {
-		t.Fatal("bucket not found")
+	for _, b := range s.Buckets(at) {
+		if b.Key == key {
+			return b
+		}
 	}
-	return b
+	t.Fatal("bucket not found")
+	return state.Bucket{}
 }
 
 func TestStore(t *testing.T) {
@@ -81,6 +84,17 @@ func TestStore(t *testing.T) {
 
 		if got := bucket(t, s).InFlight; got != 1 {
 			t.Fatalf("in flight = %d, want 1", got)
+		}
+	})
+
+	t.Run("an observation applies its sample without a call in flight", func(t *testing.T) {
+		s := store(t, 0.5)
+
+		s.Observe(key, success(100, time.Second))
+
+		b := bucket(t, s)
+		if b.InFlight != 0 || b.Responses != 1 || b.TokensPerCall != 100 {
+			t.Fatalf("bucket = %+v, want the sample applied and nothing in flight", b)
 		}
 	})
 
@@ -128,7 +142,7 @@ func TestStore(t *testing.T) {
 		limited.HasUsage = false
 		limited.Quotas.Requests.Remaining = 0
 		limited.RetryAfter = 20 * time.Second
-		limited.At = now.Add(time.Second)
+		limited.HeadersAt, limited.At = now.Add(time.Second), now.Add(time.Second)
 
 		s.End(key, limited)
 
@@ -145,36 +159,61 @@ func TestStore(t *testing.T) {
 	})
 
 	t.Run("keeps the 429 ratio and the longest retry-after over the last minute", func(t *testing.T) {
-		s := store(t, 0.5)
-		limited := success(0, 50*time.Millisecond)
-		limited.Status = http.StatusTooManyRequests
-		limited.HasUsage = false
-		for i := range 10 {
-			sample := success(1000, time.Second)
-			sample.At = now.Add(time.Duration(i) * 4 * time.Second)
-			s.End(key, sample)
-		}
-		limited.RetryAfter = 20 * time.Second
-		limited.At = now.Add(45 * time.Second)
-		s.End(key, limited)
-		limited.RetryAfter = 5 * time.Second
-		limited.At = now.Add(50 * time.Second)
-		s.End(key, limited)
+		s := minuteOfTraffic(t)
 
 		recent := bucketAt(t, s, now.Add(50*time.Second)).Recent
+
 		if recent.Responses != 12 || recent.RateLimited != 2 || recent.RetryAfter != 20*time.Second {
 			t.Fatalf("recent = %+v, want 12 responses, 2 limited, retry-after 20s", recent)
 		}
-		if recent := bucketAt(t, s, now.Add(2*time.Minute)).Recent; recent.Responses != 0 || recent.RateLimited != 0 {
-			t.Fatalf("recent = %+v, want the window empty a minute after the last response", recent)
-		}
+	})
 
+	t.Run("empties the 429 window a minute after the last response", func(t *testing.T) {
+		s := minuteOfTraffic(t)
+
+		recent := bucketAt(t, s, now.Add(2*time.Minute)).Recent
+
+		if recent.Responses != 0 || recent.RateLimited != 0 {
+			t.Fatalf("recent = %+v, want the window empty", recent)
+		}
+	})
+
+	t.Run("counts only the responses inside the last minute", func(t *testing.T) {
+		s := minuteOfTraffic(t)
 		late := success(1000, time.Second)
 		late.At = now.Add(2 * time.Minute)
+
 		s.End(key, late)
 
 		if recent := bucketAt(t, s, now.Add(2*time.Minute)).Recent; recent.Responses != 1 || recent.RateLimited != 0 {
 			t.Fatalf("recent = %+v, want only the sample inside the last minute", recent)
+		}
+	})
+
+	t.Run("a response dated a window back never wipes the newer bin it maps to", func(t *testing.T) {
+		s := store(t, 0.5)
+		limited := success(0, time.Second)
+		limited.Status = http.StatusTooManyRequests
+		s.End(key, limited)
+		late := success(100, time.Second)
+		late.At = now.Add(-time.Minute)
+
+		s.End(key, late)
+
+		if b := bucketAt(t, s, now); b.Recent.Responses != 1 || b.Recent.RateLimited != 1 {
+			t.Fatalf("recent = %+v, want the 429 kept and the response from a window back ignored", b.Recent)
+		}
+	})
+
+	t.Run("records a response dated before 1970 without failing", func(t *testing.T) {
+		s := store(t, 0.5)
+		old := success(100, time.Second)
+		old.At = time.Unix(-7, 0)
+
+		s.End(key, old)
+
+		if b := bucket(t, s); b.Responses != 1 {
+			t.Fatalf("responses = %d, want the response counted", b.Responses)
 		}
 	})
 
@@ -190,6 +229,38 @@ func TestStore(t *testing.T) {
 		}
 		if b.Responses != 2 {
 			t.Fatalf("responses = %d, want both still counted as responses", b.Responses)
+		}
+	})
+
+	t.Run("headers older than the ones applied never replace them", func(t *testing.T) {
+		s := store(t, 0.5)
+		exhausted := success(100, time.Second)
+		exhausted.Quotas.Requests.Remaining = 0
+		exhausted.HeadersAt, exhausted.At = now.Add(50*time.Second), now.Add(51*time.Second)
+		older := success(100, time.Second)
+		older.At = now.Add(60 * time.Second)
+		s.Begin(key, now)
+		s.Begin(key, now)
+
+		s.End(key, exhausted)
+		s.End(key, older)
+
+		b := bucketAt(t, s, now.Add(60*time.Second))
+		if b.Quotas.Requests.Remaining != 0 || !b.ObservedAt.Equal(now.Add(50*time.Second)) {
+			t.Fatalf("remaining = %v observed at %v, want the newer headers kept and dated when they arrived", b.Quotas.Requests.Remaining, b.ObservedAt)
+		}
+	})
+
+	t.Run("dates each window by the headers that reported it", func(t *testing.T) {
+		s := store(t, 0.5)
+		sample := success(100, time.Second)
+		sample.HeadersAt = now.Add(-3 * time.Second)
+
+		s.End(key, sample)
+
+		b := bucket(t, s)
+		if !b.Quotas.Requests.ReportedAt.Equal(now.Add(-3*time.Second)) || !b.Quotas.Tokens.ReportedAt.Equal(now.Add(-3*time.Second)) || !b.Quotas.ProjectTokens.ReportedAt.IsZero() {
+			t.Fatalf("quotas = %+v, want the reported windows dated by their headers and the absent one left undated", b.Quotas)
 		}
 	})
 
@@ -283,7 +354,7 @@ func TestStore(t *testing.T) {
 	})
 
 	t.Run("refuses a new bucket beyond the limit and counts the rejection", func(t *testing.T) {
-		s, err := state.NewWithLimits(0.5, state.Limits{Buckets: 1, Consumers: 1})
+		s, err := state.New(0.5, state.Limits{Buckets: 1, Consumers: 1})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -293,7 +364,7 @@ func TestStore(t *testing.T) {
 		s.Begin(other, now)
 		s.End(other, success(1000, time.Second))
 
-		if _, ok := s.Bucket(other, now); ok {
+		if _, ok := lookup(s, other, now); ok {
 			t.Fatal("bucket beyond the limit was created")
 		}
 		if stats := s.Stats(); stats.Buckets != 1 || stats.RejectedBuckets != 2 {
@@ -306,7 +377,7 @@ func TestStore(t *testing.T) {
 	})
 
 	t.Run("refuses a new scaled object beyond the limit", func(t *testing.T) {
-		s, err := state.NewWithLimits(0.5, state.Limits{Buckets: 1, Consumers: 1})
+		s, err := state.New(0.5, state.Limits{Buckets: 1, Consumers: 1})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -331,7 +402,7 @@ func TestStore(t *testing.T) {
 	})
 
 	t.Run("rejects non-positive limits", func(t *testing.T) {
-		if _, err := state.NewWithLimits(0.5, state.Limits{Buckets: 0, Consumers: 1}); err == nil {
+		if _, err := state.New(0.5, state.Limits{Buckets: 0, Consumers: 1}); err == nil {
 			t.Fatal("expected an error for a zero bucket limit")
 		}
 	})
@@ -405,13 +476,13 @@ func TestStore(t *testing.T) {
 		if evicted != 1 {
 			t.Fatalf("evicted = %d, want 1", evicted)
 		}
-		if _, ok := s.Bucket(idle, now); ok {
+		if _, ok := lookup(s, idle, now); ok {
 			t.Fatal("idle bucket still present")
 		}
-		if _, ok := s.Bucket(busy, now); !ok {
+		if _, ok := lookup(s, busy, now); !ok {
 			t.Fatal("bucket with a call in flight was evicted")
 		}
-		if _, ok := s.Bucket(key, now); !ok {
+		if _, ok := lookup(s, key, now); !ok {
 			t.Fatal("recently seen bucket was evicted")
 		}
 	})
@@ -471,6 +542,9 @@ func TestStore(t *testing.T) {
 			{Provider: "openai", Model: "gpt-4.1", Key: "a"},
 			{Provider: "openai", Model: "gpt-4.1", Key: "b"},
 		}
+		if len(all) != len(want) {
+			t.Fatalf("buckets = %d, want %d", len(all), len(want))
+		}
 		for i, b := range all {
 			if b.Key != want[i] {
 				t.Fatalf("bucket %d = %+v, want %+v", i, b.Key, want[i])
@@ -496,7 +570,7 @@ func TestStore(t *testing.T) {
 
 	t.Run("rejects an alpha outside the unit interval", func(t *testing.T) {
 		for _, alpha := range []float64{0, -0.1, 1.5, math.NaN()} {
-			if _, err := state.New(alpha); err == nil {
+			if _, err := state.New(alpha, state.DefaultLimits()); err == nil {
 				t.Fatalf("alpha %v accepted", alpha)
 			}
 		}
@@ -556,4 +630,30 @@ func TestBucketRefusedOnly(t *testing.T) {
 			}
 		})
 	}
+}
+
+func minuteOfTraffic(t *testing.T) *state.Store {
+	t.Helper()
+	s := store(t, 0.5)
+	for i := range 10 {
+		sample := success(1000, time.Second)
+		sample.At = now.Add(time.Duration(i) * 4 * time.Second)
+		s.End(key, sample)
+	}
+	limited := success(0, 50*time.Millisecond)
+	limited.Status, limited.HasUsage = http.StatusTooManyRequests, false
+	limited.RetryAfter, limited.At = 20*time.Second, now.Add(45*time.Second)
+	s.End(key, limited)
+	limited.RetryAfter, limited.At = 5*time.Second, now.Add(50*time.Second)
+	s.End(key, limited)
+	return s
+}
+
+func lookup(s *state.Store, wanted state.Key, at time.Time) (state.Bucket, bool) {
+	for _, b := range s.Buckets(at) {
+		if b.Key == wanted {
+			return b, true
+		}
+	}
+	return state.Bucket{}, false
 }

@@ -84,7 +84,7 @@ func newFixture(t *testing.T) *fixture {
 
 func newFixtureWithLimits(t *testing.T, limits state.Limits) *fixture {
 	t.Helper()
-	store, err := state.NewWithLimits(0.5, limits)
+	store, err := state.New(0.5, limits)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -112,10 +112,11 @@ func (f *fixture) observe(key state.Key, remainingRequests, remainingTokens floa
 			Requests: headroom.Quota{Limit: 1000, Remaining: remainingRequests, ResetAt: at.Add(30 * time.Second)},
 			Tokens:   headroom.Quota{Limit: 600000, Remaining: remainingTokens, ResetAt: at.Add(30 * time.Second)},
 		},
-		HasUsage: true,
-		Usage:    1000,
-		Latency:  2 * time.Second,
-		At:       at,
+		HasUsage:  true,
+		Usage:     1000,
+		Latency:   2 * time.Second,
+		HeadersAt: at,
+		At:        at,
 	})
 }
 
@@ -131,6 +132,26 @@ func ref(metadata map[string]string) *externalscaler.ScaledObjectRef {
 
 func capMetadata() map[string]string {
 	return map[string]string{"bucket": "openai/gpt-4.1-mini", "concurrency": "4", "maxStepUp": "100", "defaultCeiling": "1"}
+}
+
+func bucketCeilings(f *fixture) []state.Ceiling {
+	var buckets []state.Ceiling
+	for _, c := range f.store.Ceilings() {
+		if c.Consumer.Bucket.Key != scaler.CombinedKey {
+			buckets = append(buckets, c)
+		}
+	}
+	return buckets
+}
+
+func combinedCeilings(f *fixture) []state.Ceiling {
+	var combined []state.Ceiling
+	for _, c := range f.store.Ceilings() {
+		if c.Consumer.Bucket.Key == scaler.CombinedKey {
+			combined = append(combined, c)
+		}
+	}
+	return combined
 }
 
 func perCredentialMetadata() map[string]string {
@@ -162,7 +183,7 @@ var bucketA = state.Key{Provider: "openai", Model: "gpt-4.1-mini", Key: "a"}
 
 func TestNew(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	store, _ := state.New(0.5)
+	store, _ := state.New(0.5, state.DefaultLimits())
 	cases := []struct {
 		name  string
 		store *state.Store
@@ -197,6 +218,9 @@ func TestMetadata(t *testing.T) {
 		{"rejects a safety factor above one", map[string]string{"bucket": "openai/gpt-4.1-mini", "concurrency": "4", "safety": "2"}, codes.InvalidArgument},
 		{"rejects an unparseable duration", map[string]string{"bucket": "openai/gpt-4.1-mini", "concurrency": "4", "staleAfter": "soon"}, codes.InvalidArgument},
 		{"rejects queue mode without a list name", map[string]string{"bucket": "openai/gpt-4.1-mini", "concurrency": "4", "redisAddress": "redis:6379"}, codes.InvalidArgument},
+		{"rejects a provider quotaware does not parse", map[string]string{"bucket": "gemini/gemini-2.5-pro", "concurrency": "4"}, codes.InvalidArgument},
+		{"rejects a model longer than the label limit", map[string]string{"bucket": "openai/" + strings.Repeat("m", 257), "concurrency": "4"}, codes.InvalidArgument},
+		{"rejects a credential that is not the hash of a key", map[string]string{"bucket": "openai/gpt-4.1-mini", "concurrency": "4", "credential": "sk-live-not-a-hash"}, codes.InvalidArgument},
 		{"rejects an unknown quota scope", map[string]string{"bucket": "openai/gpt-4.1-mini", "concurrency": "4", "quotaScope": "organisation"}, codes.InvalidArgument},
 		{"rejects a non-positive list length", map[string]string{"bucket": "openai/gpt-4.1-mini", "concurrency": "4", "redisAddress": "redis:6379", "listName": "jobs", "listLength": "0"}, codes.InvalidArgument},
 	}
@@ -213,7 +237,7 @@ func TestMetadata(t *testing.T) {
 	}
 
 	t.Run("refuses queue mode when no queue factory is configured", func(t *testing.T) {
-		store, _ := state.New(0.5)
+		store, _ := state.New(0.5, state.DefaultLimits())
 		service, err := scaler.New(scaler.DefaultConfig(), store, nil, time.Now, slog.New(slog.NewTextHandler(io.Discard, nil)))
 		if err != nil {
 			t.Fatal(err)
@@ -248,7 +272,7 @@ func TestGetMetrics(t *testing.T) {
 		if got := metric(t, f, capMetadata()); got != 1 {
 			t.Fatalf("ceiling = %d, want the default of 1", got)
 		}
-		if ceilings := f.store.Ceilings(); len(ceilings) != 1 || ceilings[0].Value != 1 || ceilings[0].Consumer.Bucket.Model != "gpt-4.1-mini" {
+		if ceilings := bucketCeilings(f); len(ceilings) != 1 || ceilings[0].Value != 1 || ceilings[0].Consumer.Bucket.Model != "gpt-4.1-mini" {
 			t.Fatalf("recorded = %+v, want the default ceiling recorded for the consumer", ceilings)
 		}
 	})
@@ -276,6 +300,33 @@ func TestGetMetrics(t *testing.T) {
 		}
 	})
 
+	t.Run("hands a bucket with token windows but no usage yet to AIMD instead of the default", func(t *testing.T) {
+		f := newFixture(t)
+		tokensOnly := func() {
+			at := f.clock.Now()
+			f.store.Begin(bucketA, at)
+			f.store.End(bucketA, state.Sample{
+				Status:    http.StatusOK,
+				Complete:  true,
+				Headers:   state.HeadersPresent,
+				Quotas:    state.Quotas{Tokens: headroom.Quota{Limit: 600000, Remaining: 500000, ResetAt: at.Add(30 * time.Second)}},
+				Latency:   time.Second,
+				HeadersAt: at,
+				At:        at,
+			})
+		}
+		tokensOnly()
+		started := metric(t, f, capMetadata())
+		f.clock.Advance(20 * time.Second)
+		tokensOnly()
+
+		increased := metric(t, f, capMetadata())
+
+		if started != 1 || increased != 2 {
+			t.Fatalf("ceilings = %d then %d, want AIMD to start at 1 and add one after a clean interval", started, increased)
+		}
+	})
+
 	t.Run("takes one ceiling for credentials that share the model's quota", func(t *testing.T) {
 		f := newFixture(t)
 		f.observe(bucketA, 900, 500000)
@@ -295,6 +346,73 @@ func TestGetMetrics(t *testing.T) {
 
 		if got := metric(t, f, capMetadata()); got != 1 {
 			t.Fatalf("ceiling = %d, want 1 from the exhausted quota the newer headers report", got)
+		}
+	})
+
+	t.Run("limits a raise of the value KEDA receives when a new credential reports more headroom", func(t *testing.T) {
+		f := newFixture(t)
+		metadata := capMetadata()
+		metadata["maxStepUp"] = "2"
+		f.observe(bucketA, 0, 0)
+		exhausted := metric(t, f, metadata)
+		f.clock.Advance(20 * time.Second)
+		f.observe(state.Key{Provider: "openai", Model: "gpt-4.1-mini", Key: "b"}, 900, 500000)
+
+		recovering := metric(t, f, metadata)
+
+		if exhausted != 1 || recovering != 3 {
+			t.Fatalf("ceilings = %d then %d, want 1 and then one step of 2, not the new credential's 4", exhausted, recovering)
+		}
+	})
+
+	t.Run("never raises twice when KEDA polls in parallel", func(t *testing.T) {
+		f := newFixture(t)
+		metadata := capMetadata()
+		metadata["maxStepUp"] = "2"
+		f.observe(bucketA, 0, 0)
+		metric(t, f, metadata)
+		f.clock.Advance(20 * time.Second)
+		f.observe(bucketA, 900, 500000)
+		results := make(chan *externalscaler.GetMetricsResponse, 16)
+		failures := make(chan error, 16)
+		var wg sync.WaitGroup
+
+		for range 16 {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				response, err := f.service.GetMetrics(context.Background(), &externalscaler.GetMetricsRequest{ScaledObjectRef: ref(metadata), MetricName: scaler.MetricName})
+				if err != nil {
+					failures <- err
+					return
+				}
+				results <- response
+			}()
+		}
+		wg.Wait()
+		close(results)
+		close(failures)
+
+		for err := range failures {
+			t.Fatal(err)
+		}
+		for response := range results {
+			if got := response.GetMetricValues()[0].GetMetricValue(); got != 3 {
+				t.Fatalf("ceiling = %d, want every parallel poll to see the one raise from 1 to 3", got)
+			}
+		}
+	})
+
+	t.Run("records the value KEDA receives under the combined key", func(t *testing.T) {
+		f := newFixture(t)
+		f.observe(bucketA, 900, 500000)
+		f.observe(state.Key{Provider: "openai", Model: "gpt-4.1-mini", Key: "b"}, 900, 500000)
+
+		metric(t, f, capMetadata())
+
+		combined := combinedCeilings(f)
+		if len(combined) != 1 || combined[0].Value != 4 || len(bucketCeilings(f)) != 2 {
+			t.Fatalf("combined = %+v buckets = %+v, want one combined ceiling of 4 beside the two bucket ceilings", combined, bucketCeilings(f))
 		}
 	})
 
@@ -331,10 +449,10 @@ func TestGetMetrics(t *testing.T) {
 			f.respond(state.Key{Provider: "openai", Model: "gpt-4.1-mini", Key: "b"}, http.StatusUnauthorized, state.HeadersMissing, 0)
 		}
 
-		if got := metric(t, f, capMetadata()); got != 4 {
+		if got := metric(t, f, perCredentialMetadata()); got != 4 {
 			t.Fatalf("ceiling = %d, want 4 with the refused credential ignored", got)
 		}
-		if ceilings := f.store.Ceilings(); len(ceilings) != 1 {
+		if ceilings := bucketCeilings(f); len(ceilings) != 1 {
 			t.Fatalf("recorded = %+v, want no ceiling tracked for the refused credential", ceilings)
 		}
 	})
@@ -429,7 +547,7 @@ func TestGetMetrics(t *testing.T) {
 		f.observe(bucketA, 900, 500000)
 		f.observe(state.Key{Provider: "openai", Model: "gpt-4.1-mini", Key: "b"}, 900, 500000)
 		metadata := perCredentialMetadata()
-		metadata["maxReplicas"] = "6"
+		metadata["maxReplicas"], metadata["maxStepUp"] = "6", "6"
 
 		if got := metric(t, f, metadata); got != 6 {
 			t.Fatalf("ceiling = %d, want the sum clamped to 6", got)
@@ -438,13 +556,14 @@ func TestGetMetrics(t *testing.T) {
 
 	t.Run("narrows to one credential when the metadata names it", func(t *testing.T) {
 		f := newFixture(t)
-		f.observe(bucketA, 900, 500000)
-		f.observe(state.Key{Provider: "openai", Model: "gpt-4.1-mini", Key: "b"}, 900, 500000)
+		f.observe(state.Key{Provider: "openai", Model: "gpt-4.1-mini", Key: "0123456789ab"}, 900, 500000)
+		f.clock.Advance(time.Second)
+		f.observe(state.Key{Provider: "openai", Model: "gpt-4.1-mini", Key: "ba9876543210"}, 0, 0)
 		metadata := capMetadata()
-		metadata["credential"] = "b"
+		metadata["credential"] = "0123456789ab"
 
 		if got := metric(t, f, metadata); got != 4 {
-			t.Fatalf("ceiling = %d, want 4 for one credential", got)
+			t.Fatalf("ceiling = %d, want 4 from the named credential, not 1 from the newer exhausted one", got)
 		}
 	})
 
@@ -454,7 +573,7 @@ func TestGetMetrics(t *testing.T) {
 
 		metric(t, f, capMetadata())
 
-		ceilings := f.store.Ceilings()
+		ceilings := bucketCeilings(f)
 		if len(ceilings) != 1 || ceilings[0].Value != 4 || ceilings[0].Consumer.ScaledObject != "llm-workers" || !ceilings[0].BoundChangedAt.Equal(now) {
 			t.Fatalf("recorded ceilings = %+v, want one for llm-workers at 4 changed now", ceilings)
 		}
@@ -516,23 +635,30 @@ func TestGetMetrics(t *testing.T) {
 		}
 	})
 
-	t.Run("keeps the ceiling of a trigger apart from a caller that sends other metadata for the same scaled object", func(t *testing.T) {
+	t.Run("gives a caller that sends other metadata for the same scaled object its own ceiling", func(t *testing.T) {
 		f := newFixture(t)
 		f.observe(bucketA, 900, 500000)
-		if got := metric(t, f, capMetadata()); got != 4 {
-			t.Fatalf("ceiling = %d, want 4 before the other caller", got)
-		}
+		metric(t, f, capMetadata())
 		other := capMetadata()
-		other["maxReplicas"] = "1"
+		other["maxReplicas"], other["maxStepUp"] = "1", "1"
 
-		if got := metric(t, f, other); got != 1 {
-			t.Fatalf("ceiling = %d, want the other caller clamped to its own maxReplicas", got)
+		got := metric(t, f, other)
+
+		if got != 1 || len(combinedCeilings(f)) != 2 {
+			t.Fatalf("ceiling = %d combined = %+v, want the other caller clamped to its own maxReplicas in an entry of its own", got, combinedCeilings(f))
 		}
+	})
+
+	t.Run("leaves the trigger's ceiling untouched by a caller that sends other metadata", func(t *testing.T) {
+		f := newFixture(t)
+		f.observe(bucketA, 900, 500000)
+		metric(t, f, capMetadata())
+		other := capMetadata()
+		other["maxReplicas"], other["maxStepUp"] = "1", "1"
+		metric(t, f, other)
+
 		if got := metric(t, f, capMetadata()); got != 4 {
-			t.Fatalf("ceiling = %d, want the trigger's own ceiling untouched by the other caller", got)
-		}
-		if ceilings := f.store.Ceilings(); len(ceilings) != 2 || ceilings[0].Consumer.Trigger == ceilings[1].Consumer.Trigger {
-			t.Fatalf("recorded = %+v, want one entry per trigger", ceilings)
+			t.Fatalf("ceiling = %d, want the trigger's own ceiling of 4", got)
 		}
 	})
 
@@ -544,7 +670,7 @@ func TestGetMetrics(t *testing.T) {
 
 		metric(t, f, resplit)
 
-		if ceilings := f.store.Ceilings(); len(ceilings) != 2 {
+		if ceilings := bucketCeilings(f); len(ceilings) != 2 {
 			t.Fatalf("recorded = %+v, want the re-split metadata kept in its own entry", ceilings)
 		}
 	})
@@ -595,7 +721,7 @@ func TestGetMetrics(t *testing.T) {
 	})
 
 	t.Run("answers ResourceExhausted once too many scaled objects track a ceiling", func(t *testing.T) {
-		f := newFixtureWithLimits(t, state.Limits{Buckets: state.DefaultMaxBuckets, Consumers: 1})
+		f := newFixtureWithLimits(t, state.Limits{Buckets: state.DefaultMaxBuckets, Consumers: 2})
 		f.observe(bucketA, 900, 500000)
 		if _, err := f.service.GetMetrics(context.Background(), &externalscaler.GetMetricsRequest{ScaledObjectRef: ref(capMetadata())}); err != nil {
 			t.Fatal(err)
@@ -802,7 +928,7 @@ func TestAIMD(t *testing.T) {
 		if inflated != 10 || stillHeld != 10 {
 			t.Fatalf("ceilings = %d then %d, want the drain floor of 10 reported while the guarded bound of 2 stays recorded", inflated, stillHeld)
 		}
-		if ceilings := f.store.Ceilings(); len(ceilings) != 1 || ceilings[0].Bound != 2 {
+		if ceilings := bucketCeilings(f); len(ceilings) != 1 || ceilings[0].Bound != 2 {
 			t.Fatalf("ceilings = %+v, want the halved value kept apart from the reported value", ceilings)
 		}
 	})
@@ -915,6 +1041,17 @@ func TestOverGRPC(t *testing.T) {
 	go func() { _ = server.Serve(listener) }()
 	t.Cleanup(server.Stop)
 	client := dial(t, listener)
+
+	t.Run("refuses a request larger than any trigger needs", func(t *testing.T) {
+		metadata := capMetadata()
+		metadata["padding"] = strings.Repeat("x", 256<<10)
+
+		_, err := client.GetMetrics(context.Background(), &externalscaler.GetMetricsRequest{ScaledObjectRef: ref(metadata)})
+
+		if code(err) != codes.ResourceExhausted {
+			t.Fatalf("code = %v (%v), want ResourceExhausted for a 256 KiB request", code(err), err)
+		}
+	})
 
 	t.Run("serves metrics over the wire", func(t *testing.T) {
 		response, err := client.GetMetrics(context.Background(), &externalscaler.GetMetricsRequest{ScaledObjectRef: ref(capMetadata())})
@@ -1050,5 +1187,28 @@ func park(t *testing.T, client externalscaler.ExternalScalerClient, ctx context.
 		if err != nil {
 			t.Fatalf("stream did not open: %v", err)
 		}
+	}
+}
+
+func TestShutdownEndsParkedStreams(t *testing.T) {
+	f := newFixture(t)
+	listener := bufconn.Listen(1 << 20)
+	server := scaler.NewServer(2)
+	f.service.Register(server)
+	go func() { _ = server.Serve(listener) }()
+	t.Cleanup(server.Stop)
+	client := dial(t, listener)
+	stream, err := client.StreamIsActive(context.Background(), ref(capMetadata()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := stream.Recv(); err != nil {
+		t.Fatal(err)
+	}
+
+	f.service.Shutdown()
+
+	if _, err := stream.Recv(); code(err) != codes.Unavailable {
+		t.Fatalf("err = %v, want the parked stream ended with Unavailable", err)
 	}
 }

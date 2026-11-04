@@ -7,13 +7,18 @@ import (
 )
 
 type Quota struct {
-	Limit     float64
-	Remaining float64
-	ResetAt   time.Time
+	Limit      float64
+	Remaining  float64
+	ResetAt    time.Time
+	ReportedAt time.Time
 }
 
 func (q Quota) Known() bool {
 	return q.Limit > 0
+}
+
+func (q Quota) current(cfg Config, now time.Time) bool {
+	return q.Known() && (q.ReportedAt.IsZero() || now.Sub(q.ReportedAt) <= cfg.StaleAfter)
 }
 
 type Observation struct {
@@ -56,10 +61,15 @@ func DefaultConfig() Config {
 	}
 }
 
+const (
+	MaxReplicaLimit = 100000
+	MaxConcurrency  = 1000000
+)
+
 func (c Config) Validate() error {
 	switch {
-	case c.Concurrency <= 0:
-		return errors.New("concurrency must be positive")
+	case c.Concurrency <= 0 || c.Concurrency > MaxConcurrency:
+		return errors.New("concurrency must be positive and at most 1000000")
 	case math.IsNaN(c.Safety) || c.Safety <= 0 || c.Safety > 1:
 		return errors.New("safety must be within (0, 1]")
 	case math.IsNaN(c.Share) || c.Share <= 0 || c.Share > 1:
@@ -68,10 +78,10 @@ func (c Config) Validate() error {
 		return errors.New("window must be positive")
 	case c.MinReplicas < 0:
 		return errors.New("min replicas must not be negative")
-	case c.MaxReplicas <= 0 || c.MaxReplicas < c.MinReplicas:
-		return errors.New("max replicas must be positive and at least min replicas")
-	case c.MaxStepUp <= 0:
-		return errors.New("max step up must be positive")
+	case c.MaxReplicas <= 0 || c.MaxReplicas < c.MinReplicas || c.MaxReplicas > MaxReplicaLimit:
+		return errors.New("max replicas must be positive, at least min replicas and at most 100000")
+	case c.MaxStepUp <= 0 || c.MaxStepUp > c.MaxReplicas:
+		return errors.New("max step up must be positive and at most max replicas")
 	case c.StepInterval <= 0:
 		return errors.New("step interval must be positive")
 	case c.StaleAfter <= 0 || c.StaleHard < c.StaleAfter:
@@ -134,17 +144,31 @@ func Compute(cfg Config, obs Observation, previous Previous, now time.Time) Resu
 	if float64(result.Ceiling) != raw {
 		result.Reason = ReasonClamped
 	}
-	if previous.Known && result.Ceiling > previous.Ceiling {
-		switch {
-		case now.Sub(previous.At) < cfg.StepInterval:
-			result.Ceiling = max(previous.Ceiling, cfg.MinReplicas)
-			result.Reason = ReasonStepUp
-		case result.Ceiling > previous.Ceiling+cfg.MaxStepUp:
-			result.Ceiling = max(previous.Ceiling+cfg.MaxStepUp, cfg.MinReplicas)
-			result.Reason = ReasonStepUp
-		}
+	if limited, held := LimitRaise(cfg, previous, result.Ceiling, now); held {
+		result.Ceiling, result.Reason = limited, ReasonStepUp
 	}
 	return guard(cfg, obs, result)
+}
+
+func LimitRaise(cfg Config, previous Previous, ceiling int, now time.Time) (int, bool) {
+	if !previous.Known || ceiling <= previous.Ceiling {
+		return ceiling, false
+	}
+	switch {
+	case now.Sub(previous.At) < cfg.StepInterval:
+		return max(previous.Ceiling, cfg.MinReplicas), true
+	case ceiling-previous.Ceiling > cfg.MaxStepUp:
+		return max(previous.Ceiling+cfg.MaxStepUp, cfg.MinReplicas), true
+	}
+	return ceiling, false
+}
+
+func Usable(cfg Config, obs Observation, now time.Time) bool {
+	if obs.ObservedAt.IsZero() || now.Sub(obs.ObservedAt) > cfg.StaleHard {
+		return false
+	}
+	_, ok := steadyRate(cfg, obs, now)
+	return ok
 }
 
 func defaultResult(cfg Config) Result {
@@ -173,45 +197,45 @@ func podRate(cfg Config, obs Observation) float64 {
 }
 
 func allowedRate(cfg Config, obs Observation, now time.Time) (float64, bool) {
-	rate, ok := steadyRate(cfg, obs)
+	rate, ok := steadyRate(cfg, obs, now)
 	if !ok {
 		return 0, false
 	}
-	if instant, ok := instantRate(obs, now); ok {
+	if instant, ok := instantRate(cfg, obs, now); ok {
 		rate = min(rate, instant)
 	}
 	return rate * cfg.Safety * cfg.Share, true
 }
 
-func steadyRate(cfg Config, obs Observation) (float64, bool) {
+func steadyRate(cfg Config, obs Observation, now time.Time) (float64, bool) {
 	window := cfg.Window.Seconds()
 	rate := math.Inf(1)
-	if obs.Requests.Known() {
+	if obs.Requests.current(cfg, now) {
 		rate = min(rate, obs.Requests.Limit/window)
 	}
 	for _, tokens := range []Quota{obs.Tokens, obs.ProjectTokens} {
-		if tokens.Known() && obs.TokensPerCall > 0 {
+		if tokens.current(cfg, now) && obs.TokensPerCall > 0 {
 			rate = min(rate, tokens.Limit/obs.TokensPerCall/window)
 		}
 	}
 	return rate, !math.IsInf(rate, 1)
 }
 
-func instantRate(obs Observation, now time.Time) (float64, bool) {
+func instantRate(cfg Config, obs Observation, now time.Time) (float64, bool) {
 	rate := math.Inf(1)
-	if requestRate, ok := quotaRate(obs.Requests, 1, now); ok {
+	if requestRate, ok := quotaRate(cfg, obs.Requests, 1, now); ok {
 		rate = min(rate, requestRate)
 	}
 	for _, tokens := range []Quota{obs.Tokens, obs.ProjectTokens} {
-		if tokenRate, ok := quotaRate(tokens, obs.TokensPerCall, now); ok {
+		if tokenRate, ok := quotaRate(cfg, tokens, obs.TokensPerCall, now); ok {
 			rate = min(rate, tokenRate)
 		}
 	}
 	return rate, !math.IsInf(rate, 1)
 }
 
-func quotaRate(q Quota, perCall float64, now time.Time) (float64, bool) {
-	if !q.Known() || perCall <= 0 || q.ResetAt.IsZero() {
+func quotaRate(cfg Config, q Quota, perCall float64, now time.Time) (float64, bool) {
+	if !q.current(cfg, now) || perCall <= 0 || q.ResetAt.IsZero() {
 		return 0, false
 	}
 	untilReset := q.ResetAt.Sub(now).Seconds()

@@ -89,8 +89,11 @@ Each input line is one JSON object describing a bucket at a point in time:
 `at` is the evaluation time. `observed_at` is optional and defaults to `at`; set it
 earlier to replay a stale bucket. `requests` and `tokens` carry the provider's
 limit, remaining and reset for the window; leave one out when the provider does
-not report it. `project_tokens` is the optional OpenAI project-level token window. `tokens_per_call` and `latency_ms` are the smoothed averages the
-proxy would hold, `in_flight` the calls currently open. Unknown keys are rejected.
+not report it. `project_tokens` is the optional OpenAI project-level token window.
+Each window may carry `reported_at`; one reported longer than `-stale-after` before
+`at` no longer bounds the ceiling, as with a project limit that was lifted.
+`tokens_per_call` and `latency_ms` are the smoothed averages the proxy would hold,
+`in_flight` the calls currently open. Unknown keys are rejected.
 
 Output is tab-separated. The reason column says which rule produced the number:
 the headroom formula, a clamp to `-min` or `-max`, the step-up rule (a raise waits
@@ -249,9 +252,13 @@ not to the key, so the credentials that match a trigger count as views of one qu
 the newest headers among them decide the ceiling, and one drain floor covers the calls
 open on all of them. A trigger whose keys each have a quota of their own, keys of
 separate organizations for instance, sets `quotaScope: credential` to add their
-ceilings up instead (ADR 0010). A key the provider has only answered with 401 or 403
-counts for nothing. Set `credential` when other teams' keys for the same model go
-through the same proxy, or their headers may be the newest.
+ceilings up instead (ADR 0010). `maxStepUp` limits the value KEDA receives as well as
+each credential's ceiling, so a new key cannot lift it past one step, and
+`quotaware_ceiling{key="combined"}` is that value next to the per-credential series. A key the provider has only answered with 401 or 403
+counts for nothing. Set `credential`, the 12-character hash in the `key` label, when other teams' keys for
+the same model go through the same proxy, or their headers may be the newest. The
+scaler rejects a provider other than openai or anthropic, a model longer than 256
+bytes, a `credential` that is not such a hash, and requests over 64 KiB.
 The remaining knobs (`credential`, `quotaScope`, `safety`, `share`,
 `maxStepUp`, `stepInterval`, `defaultCeiling`, `minReplicas`, `staleAfter`,
 `staleHard`, `window`) and their defaults are listed in `docs/SPEC.md`. A Grafana
@@ -319,8 +326,8 @@ headers or the last observation is older than `staleHard`, are driven by AIMD:
 start at `defaultCeiling`, add `aimdIncrease` per `stepInterval` of clean traffic,
 multiply by `aimdDecrease` (0.5) when more than `aimdThreshold` (2 %) of the last
 minute's accepted responses, 2xx and 429, were 429, then hold for the longest
-`retry-after` seen and at
-least one minute, so one burst is halved once. The same rule guards a header-derived
+`retry-after` seen, at least one minute and at most `staleHard`, so one burst is
+halved once; a `retry-after` beyond a day counts as malformed. The same rule guards a header-derived
 ceiling, so a burst of 429s halves it even while the headers still look healthy.
 `quotaware_rate_limited_ratio` shows the share the rule reacts to (ADR 0006).
 

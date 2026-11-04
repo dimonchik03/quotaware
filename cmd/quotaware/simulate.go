@@ -15,9 +15,10 @@ import (
 )
 
 type quotaLine struct {
-	Limit     float64   `json:"limit"`
-	Remaining float64   `json:"remaining"`
-	ResetAt   time.Time `json:"reset_at"`
+	Limit      float64   `json:"limit"`
+	Remaining  float64   `json:"remaining"`
+	ResetAt    time.Time `json:"reset_at"`
+	ReportedAt time.Time `json:"reported_at"`
 }
 
 type observationLine struct {
@@ -100,7 +101,9 @@ func openInput(path string, stdin io.Reader) (io.Reader, error) {
 func simulate(cfg headroom.Config, in io.Reader, out io.Writer) error {
 	scanner := bufio.NewScanner(in)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	fmt.Fprintln(out, "at\tceiling\treason\tallowed_rate\tpod_rate")
+	if _, err := fmt.Fprintln(out, "at\tceiling\treason\tallowed_rate\tpod_rate"); err != nil {
+		return fmt.Errorf("write: %w", err)
+	}
 	var previous headroom.Previous
 	number := 0
 	for scanner.Scan() {
@@ -114,8 +117,10 @@ func simulate(cfg headroom.Config, in io.Reader, out io.Writer) error {
 			return fmt.Errorf("line %d: %w", number, err)
 		}
 		result := headroom.Compute(cfg, line.observation(), previous, line.At)
-		fmt.Fprintf(out, "%s\t%d\t%s\t%.2f\t%.2f\n",
-			line.At.Format(time.RFC3339), result.Ceiling, result.Reason, result.AllowedRate, result.PodRate)
+		if _, err := fmt.Fprintf(out, "%s\t%d\t%s\t%.2f\t%.2f\n",
+			line.At.Format(time.RFC3339), result.Ceiling, result.Reason, result.AllowedRate, result.PodRate); err != nil {
+			return fmt.Errorf("write: %w", err)
+		}
 		if !previous.Known || previous.Ceiling != result.Bound {
 			previous.At = line.At
 		}

@@ -233,6 +233,14 @@ func TestCompute(t *testing.T) {
 			wantReason:  headroom.ReasonHeadroom,
 		},
 		{
+			name:        "a project token window not reported for longer than stale_after no longer bounds the ceiling",
+			config:      config(),
+			observation: withReportedAt(withProjectTokens(observation(900, 500000, midWindow), 300000, 300000, midWindow), now.Add(-5*time.Minute)),
+			now:         now,
+			wantCeiling: 4,
+			wantReason:  headroom.ReasonHeadroom,
+		},
+		{
 			name:        "a depleted project token window lowers the ceiling before the organization window does",
 			config:      config(),
 			observation: withProjectTokens(observation(900, 500000, midWindow), 600000, 240000, midWindow),
@@ -323,6 +331,9 @@ func TestConfigValidate(t *testing.T) {
 		{"rejects zero max replicas", func(c *headroom.Config) { c.MaxReplicas = 0 }},
 		{"rejects max replicas below min replicas", func(c *headroom.Config) { c.MinReplicas, c.MaxReplicas = 5, 3 }},
 		{"rejects a zero step up", func(c *headroom.Config) { c.MaxStepUp = 0 }},
+		{"rejects a step up above max replicas", func(c *headroom.Config) { c.MaxStepUp = c.MaxReplicas + 1 }},
+		{"rejects max replicas above the replica limit", func(c *headroom.Config) { c.MaxReplicas = headroom.MaxReplicaLimit + 1 }},
+		{"rejects a concurrency above the call limit", func(c *headroom.Config) { c.Concurrency = headroom.MaxConcurrency + 1 }},
 		{"rejects a zero step interval", func(c *headroom.Config) { c.StepInterval = 0 }},
 		{"rejects a zero stale_after", func(c *headroom.Config) { c.StaleAfter = 0 }},
 		{"rejects stale_hard below stale_after", func(c *headroom.Config) { c.StaleHard = time.Minute }},
@@ -381,4 +392,64 @@ func withShare(c headroom.Config, share float64) headroom.Config {
 func withMinReplicas(c headroom.Config, minReplicas int) headroom.Config {
 	c.MinReplicas = minReplicas
 	return c
+}
+
+func withReportedAt(obs headroom.Observation, at time.Time) headroom.Observation {
+	obs.ProjectTokens.ReportedAt = at
+	return obs
+}
+
+func TestLimitRaise(t *testing.T) {
+	cases := []struct {
+		name      string
+		maxStepUp int
+		previous  headroom.Previous
+		ceiling   int
+		want      int
+		held      bool
+	}{
+		{"lets the first ceiling through", 2, headroom.Previous{}, 40, 40, false},
+		{"lets a drop through", 2, changedAt(known(10), now), 3, 3, false},
+		{"holds a raise within the step interval", 2, changedAt(known(4), now.Add(-5*time.Second)), 9, 4, true},
+		{"caps a raise after the step interval at max_step_up", 2, changedAt(known(4), now.Add(-time.Minute)), 9, 6, true},
+		{"lets a raise within max_step_up through", 2, changedAt(known(4), now.Add(-time.Minute)), 6, 6, false},
+		{"never overflows on a huge max_step_up", math.MaxInt, changedAt(known(4), now.Add(-time.Minute)), 9, 9, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := config()
+			cfg.MaxStepUp = tc.maxStepUp
+
+			got, held := headroom.LimitRaise(cfg, tc.previous, tc.ceiling, now)
+
+			if got != tc.want || held != tc.held {
+				t.Fatalf("LimitRaise = %d, %v, want %d, %v", got, held, tc.want, tc.held)
+			}
+		})
+	}
+}
+
+func TestUsable(t *testing.T) {
+	cases := []struct {
+		name        string
+		observation headroom.Observation
+		want        bool
+	}{
+		{"a fresh request window is usable", observation(900, 500000, now.Add(30*time.Second)), true},
+		{"a token window without tokens per call is not usable", headroom.Observation{Tokens: headroom.Quota{Limit: 600000, Remaining: 500000}, Latency: time.Second, ObservedAt: now}, false},
+		{"an observation older than stale_hard is not usable", withObservedAt(observation(900, 500000, now.Add(30*time.Second)), now.Add(-11*time.Minute)), false},
+		{"nothing observed is not usable", headroom.Observation{}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := headroom.Usable(config(), tc.observation, now); got != tc.want {
+				t.Fatalf("usable = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func withObservedAt(obs headroom.Observation, at time.Time) headroom.Observation {
+	obs.ObservedAt = at
+	return obs
 }
