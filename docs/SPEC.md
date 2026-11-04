@@ -157,15 +157,19 @@ from is keyed by the namespace, the name and a hash of the trigger metadata, so 
 caller that sends other metadata for the same name evaluates its own entry and never
 moves the one KEDA's trigger reads (ADR 0009). They are summed across the matching
 credentials the provider has accepted at least once with a 2xx or a 429, so a key
-that only ever saw 401s is tracked but never scaled on, and clamped to
-`maxReplicas`. A cap trigger never reports `IsActive`;
+that only ever saw 401s is tracked but never scaled on; calls still open on a
+credential the provider has not answered yet add their drain floor. The total is
+clamped to `maxReplicas`. A cap trigger never reports `IsActive`;
 activation stays with the demand trigger. The scaler trusts nothing in the request
 beyond what it validates: ScaledObject names and namespaces are bounded to 253
 characters, at most `-max-scaled-objects` (1000) ScaledObjects are served and the
 rest get ResourceExhausted, and single-trigger mode only dials the Redis addresses
 listed with `-redis-address`; any other `redisAddress` is PermissionDenied (ADR 0008).
-One gRPC connection may hold at most 256 streams, so a caller that parks
-`StreamIsActive` streams cannot grow the process without bound (ADR 0009).
+One gRPC connection may hold at most two streams per ScaledObject served, a parked
+`StreamIsActive` and a call in flight, because KEDA multiplexes every ScaledObject of
+a scaler address over one connection; a caller that parks streams cannot grow the
+process beyond that (ADR 0009). Editing a trigger's metadata starts its ceiling state
+afresh, as a new quotaware process would.
 
 ### 5. Combining with the existing queue trigger
 
