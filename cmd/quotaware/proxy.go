@@ -27,8 +27,9 @@ import (
 )
 
 const (
-	evictEvery = time.Minute
-	evictAfter = 10 * time.Minute
+	evictEvery           = time.Minute
+	evictAfter           = 10 * time.Minute
+	observeTokenVariable = "QUOTAWARE_OBSERVE_TOKEN"
 )
 
 type observerOptions struct {
@@ -53,7 +54,7 @@ func parseObserverFlags(command string, args []string, stderr io.Writer, withSca
 	flags.StringVar(&options.listen, "listen", ":8080", "address the proxy listens on")
 	flags.StringVar(&options.admin, "admin", ":9100", "address that serves /metrics and /healthz")
 	flags.Float64Var(&options.alpha, "ewma-alpha", 0.2, "weight of the newest sample in the smoothed averages")
-	flags.StringVar(&options.observeToken, "observe-token", os.Getenv("QUOTAWARE_OBSERVE_TOKEN"), "bearer token collectors must present on /v1/observe")
+	flags.StringVar(&options.observeToken, "observe-token", "", "bearer token collectors must present on /v1/observe (falls back to $"+observeTokenVariable+")")
 	flags.BoolVar(&options.observeInsecure, "observe-insecure", false, "accept observations on /v1/observe without a token")
 	flags.IntVar(&options.limits.Buckets, "max-buckets", options.limits.Buckets, "most (provider, model, credential) buckets tracked at once")
 	flags.IntVar(&options.limits.Consumers, "max-scaled-objects", options.limits.Consumers, "most scaled objects served a ceiling at once")
@@ -68,6 +69,9 @@ func parseObserverFlags(command string, args []string, stderr io.Writer, withSca
 	}
 	if err := flags.Parse(args); err != nil {
 		return observerOptions{}, err
+	}
+	if !passed(flags, "observe-token") {
+		options.observeToken = os.Getenv(observeTokenVariable)
 	}
 	options.redisAddresses = splitAddresses(redisAddresses)
 	addresses := map[string]string{options.listen: "listen", options.admin: "admin"}
@@ -87,9 +91,17 @@ func parseObserverFlags(command string, args []string, stderr io.Writer, withSca
 		return observerOptions{}, fmt.Errorf("anthropic-upstream: %w", err)
 	}
 	if options.observeToken == "" && !options.observeInsecure {
-		return observerOptions{}, errors.New("observe token is required: set -observe-token or QUOTAWARE_OBSERVE_TOKEN, or pass -observe-insecure to accept unauthenticated observations")
+		return observerOptions{}, errors.New("observe token is required: set -observe-token or " + observeTokenVariable + ", or pass -observe-insecure to accept unauthenticated observations")
 	}
 	return options, nil
+}
+
+func passed(flags *flag.FlagSet, name string) bool {
+	found := false
+	flags.Visit(func(f *flag.Flag) {
+		found = found || f.Name == name
+	})
+	return found
 }
 
 func splitAddresses(raw string) []string {
