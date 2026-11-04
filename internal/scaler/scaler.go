@@ -71,6 +71,8 @@ type Service struct {
 
 	mu          sync.Mutex
 	queueByAddr map[string]QueueDepth
+	stopping    chan struct{}
+	stopOnce    sync.Once
 }
 
 func New(cfg Config, store *state.Store, queues QueueFactory, now func() time.Time, logger *slog.Logger) (*Service, error) {
@@ -90,12 +92,18 @@ func New(cfg Config, store *state.Store, queues QueueFactory, now func() time.Ti
 	if err := cfg.AIMD.Validate(); err != nil {
 		return nil, fmt.Errorf("aimd defaults: %w", err)
 	}
-	return &Service{cfg: cfg, store: store, queues: queues, now: now, logger: logger, queueByAddr: map[string]QueueDepth{}}, nil
+	return &Service{cfg: cfg, store: store, queues: queues, now: now, logger: logger, queueByAddr: map[string]QueueDepth{}, stopping: make(chan struct{})}, nil
 }
 
 func (s *Service) Register(server *grpc.Server) {
 	externalscaler.RegisterExternalScalerServer(server, s)
 }
+
+func (s *Service) Shutdown() {
+	s.stopOnce.Do(func() { close(s.stopping) })
+}
+
+var errShuttingDown = status.Error(codes.Unavailable, "quotaware is shutting down")
 
 func (s *Service) Close() error {
 	s.mu.Lock()
@@ -400,8 +408,12 @@ func (s *Service) StreamIsActive(ref *externalscaler.ScaledObjectRef, stream ext
 		return err
 	}
 	if t.queue == nil {
-		<-ctx.Done()
-		return nil
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-s.stopping:
+			return errShuttingDown
+		}
 	}
 	ticker := time.NewTicker(s.cfg.PushInterval)
 	defer ticker.Stop()
@@ -409,6 +421,8 @@ func (s *Service) StreamIsActive(ref *externalscaler.ScaledObjectRef, stream ext
 		select {
 		case <-ctx.Done():
 			return nil
+		case <-s.stopping:
+			return errShuttingDown
 		case <-ticker.C:
 			active, err := s.active(ctx, t)
 			if err != nil {

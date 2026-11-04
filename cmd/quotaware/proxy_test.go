@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -209,4 +210,17 @@ func TestObserverFlags(t *testing.T) {
 			t.Fatalf("exit = %d, stderr = %q, want 2 naming alpha", code, stderr.String())
 		}
 	})
+}
+
+func TestListeningAttributesRedactUpstreamPasswords(t *testing.T) {
+	options, err := parseObserverFlags("proxy", []string{"-openai-upstream", "https://user:s3cret@gateway.internal", "-observe-insecure"}, &bytes.Buffer{}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	attributes := fmt.Sprint(listeningAttributes("proxy", options))
+
+	if strings.Contains(attributes, "s3cret") || !strings.Contains(attributes, "gateway.internal") {
+		t.Fatalf("attributes = %s, want the upstream logged without its password", attributes)
+	}
 }

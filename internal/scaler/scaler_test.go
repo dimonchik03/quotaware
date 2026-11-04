@@ -1182,3 +1182,26 @@ func park(t *testing.T, client externalscaler.ExternalScalerClient, ctx context.
 		}
 	}
 }
+
+func TestShutdownEndsParkedStreams(t *testing.T) {
+	f := newFixture(t)
+	listener := bufconn.Listen(1 << 20)
+	server := scaler.NewServer(2)
+	f.service.Register(server)
+	go func() { _ = server.Serve(listener) }()
+	t.Cleanup(server.Stop)
+	client := dial(t, listener)
+	stream, err := client.StreamIsActive(context.Background(), ref(capMetadata()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := stream.Recv(); err != nil {
+		t.Fatal(err)
+	}
+
+	f.service.Shutdown()
+
+	if _, err := stream.Recv(); code(err) != codes.Unavailable {
+		t.Fatalf("err = %v, want the parked stream ended with Unavailable", err)
+	}
+}

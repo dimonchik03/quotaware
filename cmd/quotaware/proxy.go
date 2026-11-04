@@ -171,6 +171,7 @@ func runObserver(command string, args []string, stderr io.Writer, withScaler boo
 	})
 
 	var rpc *grpc.Server
+	stopStreams := func() {}
 	if withScaler {
 		cfg := scaler.DefaultConfig()
 		cfg.PushInterval = options.pushInterval
@@ -186,6 +187,7 @@ func runObserver(command string, args []string, stderr io.Writer, withScaler boo
 		}
 		rpc = scaler.NewServer(options.limits.Consumers)
 		service.Register(rpc)
+		stopStreams = service.Shutdown
 		defer func() {
 			if err := service.Close(); err != nil {
 				logger.Warn("closing queue clients", "error", err.Error())
@@ -196,14 +198,18 @@ func runObserver(command string, args []string, stderr io.Writer, withScaler boo
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	go evictIdleBuckets(ctx, store)
-	logger.Info("quotaware listening", "command", command, "listen", options.listen, "admin", options.admin, "grpc", options.grpc,
-		"openai", options.proxy.OpenAI.String(), "anthropic", options.proxy.Anthropic.String())
+	logger.Info("quotaware listening", listeningAttributes(command, options)...)
 	endpoints := []endpoint{{address: options.listen, handler: handler}, {address: options.admin, handler: admin, readTimeout: options.proxy.ReadBodyTimeout}}
-	if err := serve(ctx, endpoints, rpc, options.grpc); err != nil {
+	if err := serve(ctx, endpoints, rpc, options.grpc, stopStreams); err != nil {
 		fmt.Fprintf(stderr, "quotaware %s: %v\n", command, err)
 		return 1
 	}
 	return 0
+}
+
+func listeningAttributes(command string, options observerOptions) []any {
+	return []any{"command", command, "listen", options.listen, "admin", options.admin, "grpc", options.grpc,
+		"openai", options.proxy.OpenAI.Redacted(), "anthropic", options.proxy.Anthropic.Redacted()}
 }
 
 type endpoint struct {
@@ -229,7 +235,7 @@ func evictIdleBuckets(ctx context.Context, store *state.Store) {
 	}
 }
 
-func serve(ctx context.Context, endpoints []endpoint, rpc *grpc.Server, rpcAddress string) error {
+func serve(ctx context.Context, endpoints []endpoint, rpc *grpc.Server, rpcAddress string, stopStreams func()) error {
 	servers := make([]*http.Server, 0, len(endpoints))
 	failures := make(chan error, len(endpoints)+1)
 	for _, e := range endpoints {
@@ -265,6 +271,7 @@ func serve(ctx context.Context, endpoints []endpoint, rpc *grpc.Server, rpcAddre
 		failure = errors.Join(failure, server.Shutdown(shutdown))
 	}
 	if rpc != nil {
+		stopStreams()
 		stopped := make(chan struct{})
 		go func() {
 			rpc.GracefulStop()
