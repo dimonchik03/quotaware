@@ -13,6 +13,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: chart and package versions match the tag
+        run: |
+          expected="${GITHUB_REF_NAME#v}"
+          chart_version="$(sed -n 's/^version: \(.*\)$/\1/p' deploy/helm/quotaware/Chart.yaml)"
+          app_version="$(sed -n 's/^appVersion: "\(.*\)"$/\1/p' deploy/helm/quotaware/Chart.yaml)"
+          package_version="$(sed -n 's/^version = "\(.*\)"$/\1/p' collector/python/pyproject.toml)"
+          for found in "chart version:$chart_version" "chart appVersion:$app_version" "python package version:$package_version"; do
+            if [ "${found#*:}" != "$expected" ]; then
+              echo "${found%%:*} is '${found#*:}', the tag is $GITHUB_REF_NAME" >&2
+              exit 1
+            fi
+          done
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
