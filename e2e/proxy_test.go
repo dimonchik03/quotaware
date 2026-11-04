@@ -29,7 +29,7 @@ func waitUntilReady(t *testing.T, proxyURL, adminURL string) {
 		health, err := client.Get(adminURL + "/healthz")
 		if err == nil {
 			_ = health.Body.Close()
-			response, body, err := post(proxyURL+"/v1/chat/completions", "sk-ready", `{"model":"readiness-probe","messages":[]}`)
+			response, body, err := post(proxyURL+"/v1/chat/completions", "sk-ready", `{"model":"readiness-`+strings.ReplaceAll(t.Name(), "/", "-")+`","messages":[]}`)
 			if err == nil && response.StatusCode == http.StatusOK && strings.Contains(body, "usage") {
 				return
 			}
@@ -80,6 +80,36 @@ func metricsText(t *testing.T, adminURL string) string {
 		t.Fatal(err)
 	}
 	return string(raw)
+}
+
+func metricValueOr(exposition, name string, absent float64, labels ...string) float64 {
+	value, found := findMetric(exposition, name, labels)
+	if !found {
+		return absent
+	}
+	return value
+}
+
+func findMetric(exposition, name string, labels []string) (float64, bool) {
+	scanner := bufio.NewScanner(strings.NewReader(exposition))
+	for scanner.Scan() {
+		line := scanner.Text()
+		if !strings.HasPrefix(line, name+"{") || !containsAll(line, labels) {
+			continue
+		}
+		value, err := strconv.ParseFloat(line[strings.LastIndex(line, " ")+1:], 64)
+		return value, err == nil
+	}
+	return 0, false
+}
+
+func containsAll(line string, labels []string) bool {
+	for _, label := range labels {
+		if !strings.Contains(line, label) {
+			return false
+		}
+	}
+	return true
 }
 
 func metricValue(t *testing.T, exposition, name string, labels ...string) float64 {
@@ -151,6 +181,7 @@ func TestProxyAgainstTheFakeProvider(t *testing.T) {
 	})
 
 	t.Run("429s are counted once the request limit is exhausted and no call stays in flight", func(t *testing.T) {
+		before := metricValueOr(metricsText(t, adminURL), "quotaware_429_total", 0, `model="gpt-4.1"`)
 		limited := 0
 		for range 20 {
 			response, _ := mustPost(t, proxyURL+"/v1/chat/completions", "sk-burst", `{"model":"gpt-4.1","messages":[{"role":"user","content":"burst"}]}`)
@@ -163,8 +194,8 @@ func TestProxyAgainstTheFakeProvider(t *testing.T) {
 		}
 
 		exposition := metricsText(t, adminURL)
-		if counted := metricValue(t, exposition, "quotaware_429_total", `model="gpt-4.1"`); counted != float64(limited) {
-			t.Fatalf("quotaware_429_total = %v, want %d", counted, limited)
+		if counted := metricValue(t, exposition, "quotaware_429_total", `model="gpt-4.1"`) - before; counted != float64(limited) {
+			t.Fatalf("quotaware_429_total grew by %v, want %d", counted, limited)
 		}
 		if retryAfter := metricValue(t, exposition, "quotaware_retry_after_seconds", `model="gpt-4.1"`); retryAfter <= 0 {
 			t.Fatalf("retry-after = %v, want the provider's value", retryAfter)

@@ -5,7 +5,6 @@ package e2e
 import (
 	"context"
 	"net/http"
-	"strings"
 	"testing"
 	"time"
 
@@ -71,11 +70,8 @@ func TestScalerAgainstTheFakeProvider(t *testing.T) {
 		}
 		exposition := metricsText(t, adminURL)
 		credential := `key="` + usage.CredentialHash(http.Header{"Authorization": {"Bearer sk-scaler-e2e"}}) + `"`
-		if ceiling := metricValue(t, exposition, "quotaware_ceiling", `scaledobject="llm-workers"`, `model="gpt-4.1-scaler"`, credential); ceiling != 0 {
+		if ceiling := metricValue(t, exposition, "quotaware_ceiling", `namespace="e2e"`, `scaledobject="llm-workers"`, `model="gpt-4.1-scaler"`, credential); ceiling != 0 {
 			t.Fatalf("quotaware_ceiling = %v, want 0 on the bucket of the credential the proxy saw", ceiling)
-		}
-		if !strings.Contains(exposition, `namespace="e2e"`) {
-			t.Fatalf("exposition lacks the consumer namespace label:\n%s", exposition)
 		}
 	})
 
