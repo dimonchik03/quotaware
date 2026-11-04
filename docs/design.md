@@ -46,8 +46,8 @@ other; `cmd/quotaware` wires them.
    counter: completed, abandoned by the client (an abort), or broken by the upstream
    (an upstream error); a client that leaves before any response is an abort.
 4. KEDA asks the scaler for the ceiling of a ScaledObject. For every bucket that
-   matches the trigger metadata, the scaler evaluates the domain under one lock per
-   consumer: the headroom formula when a usable quota is known, AIMD otherwise, with
+   matches the trigger metadata, the scaler evaluates the domain under the store's
+   lock: the headroom formula when a usable quota is known, AIMD otherwise, with
    the AIMD guard on top while 429s exceed the threshold. Raises are limited to
    `maxStepUp` per `stepInterval` from the last change of the bound, the ceiling before
    the drain guard, so open calls moving the drain floor never delay a raise; drops are
@@ -89,8 +89,8 @@ bound next to the reported value (ADR 0006).
 The store is a mutex around plain maps. The proxy touches it twice per call, the
 scaler once per bucket per poll, the metrics collector once per scrape. Ceilings are
 updated with a closure under the same lock so KEDA's polling loop and the HPA sync
-cannot interleave. The in-memory store means one quotaware replica per cluster in
-v0.1; a shared backend is the planned step towards several.
+cannot interleave. The in-memory store means one quotaware replica per cluster; a
+shared backend is the planned step towards several.
 
 ## Trust boundaries
 
@@ -100,10 +100,12 @@ Trigger metadata may only point single-trigger mode at Redis addresses the opera
 listed. Ceiling state is keyed by a hash of the trigger metadata next to the
 ScaledObject, so a caller that sends other metadata for the same name evaluates its
 own entry and cannot move the one KEDA continues from, and one gRPC connection may
-hold at most two streams per ScaledObject it serves (ADR 0009). The store caps the
-buckets and the ScaledObjects it tracks, counts what it
-refused, and the scaler bounds the names it accepts, so an unauthenticated caller
-can exhaust neither memory nor label cardinality.
+hold at most two streams per ScaledObject it may serve (ADR 0009). The store caps the
+buckets and the ceilings it tracks and counts what it refused, and the scaler bounds
+the names, models, credentials and request sizes it accepts, so an unauthenticated
+caller cannot grow memory or label cardinality without limit. It can still fill both
+tables and lock new buckets or ScaledObjects out until eviction; the NetworkPolicy is
+the fence against that (ADR 0009).
 
 ## What is deliberately not here
 

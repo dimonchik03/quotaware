@@ -38,7 +38,8 @@ prefix on every key and value so no two metadata maps share it, and kept to 128 
 a call with different metadata evaluates its own entry and never moves the one KEDA's
 trigger reads, and the `quotaware_ceiling` series carries the hash as the `trigger`
 label. The gRPC server limits the streams one connection may hold to two per
-ScaledObject it serves, a parked `StreamIsActive` and a call in flight, because KEDA
+ScaledObject it may serve (2 × `-max-scaled-objects`), a parked `StreamIsActive` and a
+call in flight, because KEDA
 multiplexes every ScaledObject of a scaler address over one connection. The Helm
 chart ships a NetworkPolicy, on by default, that admits KEDA's operator to the gRPC
 port and the release namespace to the proxy and admin ports, with peer lists for
