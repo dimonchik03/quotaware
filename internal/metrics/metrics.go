@@ -68,7 +68,7 @@ func NewCollector(store *state.Store, now func() time.Time) *Collector {
 		headersMissing:    describe("headers_missing_total", "Responses that should carry rate-limit headers but did not."),
 		headersMalformed:  describe("headers_malformed_total", "Responses whose rate-limit headers could not be parsed."),
 		usageMissing:      describe("usage_missing_total", "Successful responses without a usable usage object."),
-		ceiling:           prometheus.NewDesc("quotaware_ceiling", "Replica ceiling last reported to KEDA for a scaled object, trigger and bucket.", consumerLabels, nil),
+		ceiling:           prometheus.NewDesc("quotaware_ceiling", "Replica ceiling of one bucket for a scaled object and trigger, before the sum KEDA receives.", consumerLabels, nil),
 		buckets:           prometheus.NewDesc("quotaware_buckets", "Buckets currently tracked.", nil, nil),
 		consumers:         prometheus.NewDesc("quotaware_scaled_objects", "Scaled objects currently tracking a ceiling.", nil, nil),
 		bucketsRejected:   prometheus.NewDesc("quotaware_buckets_rejected_total", "Calls on new buckets refused because the bucket limit was reached.", nil, nil),
