@@ -8,7 +8,7 @@ Schedule `half:3m:0.5,full:3m:1,burst:4m:3,idle:4m:0` against a fake provider li
 
 ![replicas](replicas.svg)
 
-![429 per minute](rate_limits.svg)
+![retries per minute, each after a 429 in these runs](retries.svg)
 
 ![queue](queue.svg)
 
@@ -21,7 +21,7 @@ Schedule `half:3m:0.5,full:3m:1,burst:4m:3,idle:4m:0` against a fake provider li
 | Jobs unaccounted for | 0 | 0 | 0 |
 | 429 responses | 720 | 0 | 15 |
 | Retries | 720 | 0 | 15 |
-| Peak 429 per minute | 76 | 0 | 2 |
+| Peak retries per minute | 91 | 0 | 5 |
 | Job latency p50 | 128.1 s | 263.6 s | 164.8 s |
 | Job latency p95 | 457.7 s | 689.5 s | 463.1 s |
 | Peak replicas | 30 | 8 | 10 |

@@ -42,7 +42,7 @@ func Build(baseline Run, capped []Run, concurrency int) Report {
 	})
 	measure("429 responses", func(r Run) string { return count(r.Totals["rate_limited_total"]) })
 	measure("Retries", func(r Run) string { return count(r.Totals["retries_total"]) })
-	measure("Peak 429 per minute", func(r Run) string { return fmt.Sprintf("%.0f", r.Series["rate_limited_per_minute"].Max()) })
+	measure("Peak retries per minute", func(r Run) string { return fmt.Sprintf("%.0f", r.Series["retries_per_minute"].Max()) })
 	measure("Job latency p50", func(r Run) string { return seconds(r.Totals["latency_p50"]) })
 	measure("Job latency p95", func(r Run) string { return seconds(r.Totals["latency_p95"]) })
 	measure("Peak replicas", func(r Run) string { return fmt.Sprintf("%.0f", r.Series["replicas"].Max()) })
@@ -152,20 +152,20 @@ func (r Report) Charts() map[string]string {
 	for i, band := range r.Phases {
 		bands[i] = Band{Label: band.Label, From: origin.Add(band.From.Sub(r.Baseline.Start)), To: origin.Add(band.To.Sub(r.Baseline.Start))}
 	}
-	var replicaLines, limitLines, queueLines []Line
+	var replicaLines, retryLines, queueLines []Line
 	for i, run := range r.runs() {
 		color := palette[i%len(palette)]
 		replicaLines = append(replicaLines, Line{Label: run.Name + " replicas", Color: color, Series: shifted(run.Series["replicas"], run.Start)})
 		if i > 0 {
 			replicaLines = append(replicaLines, Line{Label: run.Name + " ceiling", Color: color, Dashed: true, Series: shifted(run.Series["ceiling"], run.Start)})
 		}
-		limitLines = append(limitLines, Line{Label: run.Name, Color: color, Series: shifted(run.Series["rate_limited_per_minute"], run.Start)})
+		retryLines = append(retryLines, Line{Label: run.Name, Color: color, Series: shifted(run.Series["retries_per_minute"], run.Start)})
 		queueLines = append(queueLines, Line{Label: run.Name, Color: color, Series: shifted(run.Series["queue_length"], run.Start)})
 	}
 	replicas := Chart{Title: "Worker replicas", YLabel: "pods", Origin: origin, Bands: bands, Lines: replicaLines}
-	limits := Chart{Title: "429 responses per minute", YLabel: "429 / min", Origin: origin, Bands: bands, Lines: limitLines}
+	retries := Chart{Title: "Retries per minute", YLabel: "retries / min", Origin: origin, Bands: bands, Lines: retryLines}
 	queue := Chart{Title: "Queue length", YLabel: "jobs", Origin: origin, Bands: bands, Lines: queueLines}
-	return map[string]string{"replicas.svg": replicas.SVG(), "rate_limits.svg": limits.SVG(), "queue.svg": queue.SVG()}
+	return map[string]string{"replicas.svg": replicas.SVG(), "retries.svg": retries.SVG(), "queue.svg": queue.SVG()}
 }
 
 func (r Report) Write(dir string) error {
