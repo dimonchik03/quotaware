@@ -295,6 +295,29 @@ func TestGetMetrics(t *testing.T) {
 		}
 	})
 
+	t.Run("keeps the drain floor of calls open on a credential the provider has not answered yet", func(t *testing.T) {
+		f := newFixture(t)
+		for range 40 {
+			f.store.Begin(bucketA, f.clock.Now())
+		}
+
+		if got := metric(t, f, capMetadata()); got != 10 {
+			t.Fatalf("ceiling = %d, want ceil(40/4) = 10 pods for the open calls", got)
+		}
+	})
+
+	t.Run("adds the drain floor of an unanswered credential to the ceilings of the answered ones", func(t *testing.T) {
+		f := newFixture(t)
+		f.observe(bucketA, 900, 500000)
+		for range 40 {
+			f.store.Begin(state.Key{Provider: "openai", Model: "gpt-4.1-mini", Key: "b"}, f.clock.Now())
+		}
+
+		if got := metric(t, f, capMetadata()); got != 14 {
+			t.Fatalf("ceiling = %d, want 4 from the headers plus 10 for the open calls", got)
+		}
+	})
+
 	t.Run("counts a credential that only saw 429s", func(t *testing.T) {
 		f := newFixture(t)
 		f.observe(bucketA, 900, 500000)

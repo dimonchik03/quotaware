@@ -421,13 +421,13 @@ func (s *Service) queueDepth(ctx context.Context, q *queueTrigger) (int64, error
 
 func (s *Service) ceiling(ref *externalscaler.ScaledObjectRef, t trigger) (int, error) {
 	now := s.now()
-	total := 0
-	matched := 0
+	total, matched, unanswered := 0, 0, 0
 	for _, b := range s.store.Buckets(now) {
 		if b.Key.Provider != t.provider || b.Key.Model != t.model || (t.credential != "" && b.Key.Key != t.credential) {
 			continue
 		}
 		if !b.Accepted() {
+			unanswered += headroom.DrainFloor(t.cfg, b.Observation())
 			continue
 		}
 		matched++
@@ -440,9 +440,13 @@ func (s *Service) ceiling(ref *externalscaler.ScaledObjectRef, t trigger) (int, 
 	}
 	if matched == 0 {
 		consumer := state.Consumer{Namespace: ref.GetNamespace(), ScaledObject: ref.GetName(), Trigger: t.fingerprint, Bucket: state.Key{Provider: t.provider, Model: t.model, Key: t.credential}}
-		return s.evaluate(consumer, t, headroom.Observation{}, state.Recent{}, now)
+		fallback, err := s.evaluate(consumer, t, headroom.Observation{}, state.Recent{}, now)
+		if err != nil {
+			return 0, err
+		}
+		return min(max(fallback, unanswered), t.cfg.MaxReplicas), nil
 	}
-	return min(total, t.cfg.MaxReplicas), nil
+	return min(total+unanswered, t.cfg.MaxReplicas), nil
 }
 
 type decision struct {
