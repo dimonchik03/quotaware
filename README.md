@@ -235,11 +235,14 @@ the ceiling; give the collectors the same token.
 
     from quotaware_httpx import QuotawareHook
 
-    hook = QuotawareHook("http://quotaware:9100", "openai")
-    client = httpx.Client(base_url="https://api.openai.com", event_hooks=hook.hooks())
+    hook = QuotawareHook("http://quotaware:9100", "openai", token=os.environ["QUOTAWARE_OBSERVE_TOKEN"])
+    client = OpenAI(http_client=httpx.Client(event_hooks=hook.hooks()))
+    async_client = AsyncOpenAI(http_client=httpx.AsyncClient(event_hooks=hook.async_hooks()))
 
 The Python hook is one module in `collector/python/` with a `pyproject.toml`; copy
-the file or `pip install ./collector/python`. It reads usage from JSON responses;
+the file or `pip install ./collector/python`. `hooks()` is for `httpx.Client`,
+`async_hooks()` for `httpx.AsyncClient`; httpx awaits every hook of an async
+client, so the two cannot be swapped. It reads usage from JSON responses;
 a stream is observed when it is closed, with the latency measured to the end and
 `complete` false if the caller abandoned it. Collector traffic is not counted as in
 flight, so the drain guard only sees proxied calls (ADR 0007).

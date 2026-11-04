@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import json
 import threading
@@ -158,6 +159,102 @@ def test_drops_when_the_queue_is_full(sink):
     assert hook.dropped >= 3
     assert hook.dropped + len(Sink.received) == 5
     assert hook.failed == 0
+
+
+def async_client_with(hook, transport):
+    return httpx.AsyncClient(base_url="https://provider.test", transport=httpx.MockTransport(transport), event_hooks=hook.async_hooks())
+
+
+async def async_chat(client):
+    return await client.post("/v1/chat/completions", json={"model": "gpt-4.1-mini", "messages": []}, headers={"Authorization": "Bearer sk-test"})
+
+
+def test_async_hooks_post_an_observation_for_a_chat_completion(sink):
+    hook = QuotawareHook(sink, "openai", token="secret")
+
+    async def call():
+        async with async_client_with(hook, fake_openai) as client:
+            return await async_chat(client)
+
+    response = asyncio.run(call())
+    hook.close()
+
+    assert response.status_code == 200
+    assert hook.errors == 0
+    _, observation = Sink.received[0]
+    assert observation["model"] == "gpt-4.1-mini"
+    assert observation["usage"] == 150
+    assert observation["complete"] is True
+    assert observation["credential"] == hashlib.sha256(b"Bearer sk-test").hexdigest()[:12]
+
+
+def test_async_hooks_observe_a_stream_once_it_is_closed_and_measure_to_the_end(sink):
+    hook = QuotawareHook(sink, "openai")
+
+    async def call():
+        async with async_client_with(hook, fake_stream) as client:
+            async with client.stream("POST", "/v1/chat/completions", json={"model": "gpt-4.1-mini", "messages": []}) as response:
+                await asyncio.sleep(0.05)
+                chunks = [chunk async for chunk in response.aiter_bytes()]
+                assert Sink.received == []
+                return chunks
+
+    chunks = asyncio.run(call())
+    hook.close()
+
+    assert b"".join(chunks).endswith(b"[DONE]\n\n")
+    _, observation = Sink.received[0]
+    assert observation["complete"] is True
+    assert observation["usage"] is None
+    assert observation["latency_ms"] >= 50
+
+
+def test_async_hooks_observe_a_stream_read_in_one_go_as_complete(sink):
+    hook = QuotawareHook(sink, "openai")
+
+    async def call():
+        async with async_client_with(hook, fake_stream) as client:
+            return await async_chat(client)
+
+    response = asyncio.run(call())
+    hook.close()
+
+    assert response.content.endswith(b"[DONE]\n\n")
+    assert hook.errors == 0
+    _, observation = Sink.received[0]
+    assert observation["complete"] is True
+    assert observation["usage"] is None
+
+
+def test_async_hooks_mark_a_stream_the_caller_abandoned_as_incomplete(sink):
+    hook = QuotawareHook(sink, "openai")
+
+    async def call():
+        async with async_client_with(hook, fake_stream) as client:
+            async with client.stream("POST", "/v1/chat/completions", json={"model": "gpt-4.1-mini", "messages": []}):
+                pass
+
+    asyncio.run(call())
+    hook.close()
+
+    _, observation = Sink.received[0]
+    assert observation["complete"] is False
+    assert observation["usage"] is None
+
+
+def test_async_hooks_never_fail_the_call_on_a_broken_response(sink):
+    hook = QuotawareHook(sink, "openai")
+
+    async def call():
+        async with async_client_with(hook, fake_broken) as client:
+            return await async_chat(client)
+
+    response = asyncio.run(call())
+    hook.close()
+
+    assert response.status_code == 200
+    assert hook.errors == 1
+    assert Sink.received == []
 
 
 def test_counts_tokens_per_provider_and_tolerates_nulls():
