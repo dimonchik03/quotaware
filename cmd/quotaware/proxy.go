@@ -198,15 +198,22 @@ func runObserver(command string, args []string, stderr io.Writer, withScaler boo
 	go evictIdleBuckets(ctx, store)
 	logger.Info("quotaware listening", "command", command, "listen", options.listen, "admin", options.admin, "grpc", options.grpc,
 		"openai", options.proxy.OpenAI.String(), "anthropic", options.proxy.Anthropic.String())
-	if err := serve(ctx, map[string]http.Handler{options.listen: handler, options.admin: admin}, rpc, options.grpc); err != nil {
+	endpoints := []endpoint{{address: options.listen, handler: handler}, {address: options.admin, handler: admin, readTimeout: options.proxy.ReadBodyTimeout}}
+	if err := serve(ctx, endpoints, rpc, options.grpc); err != nil {
 		fmt.Fprintf(stderr, "quotaware %s: %v\n", command, err)
 		return 1
 	}
 	return 0
 }
 
-func newServer(address string, handler http.Handler) *http.Server {
-	return &http.Server{Addr: address, Handler: handler, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 2 * time.Minute}
+type endpoint struct {
+	address     string
+	handler     http.Handler
+	readTimeout time.Duration
+}
+
+func newServer(e endpoint) *http.Server {
+	return &http.Server{Addr: e.address, Handler: e.handler, ReadHeaderTimeout: 10 * time.Second, ReadTimeout: e.readTimeout, IdleTimeout: 2 * time.Minute}
 }
 
 func evictIdleBuckets(ctx context.Context, store *state.Store) {
@@ -222,11 +229,12 @@ func evictIdleBuckets(ctx context.Context, store *state.Store) {
 	}
 }
 
-func serve(ctx context.Context, handlers map[string]http.Handler, rpc *grpc.Server, rpcAddress string) error {
-	servers := make([]*http.Server, 0, len(handlers))
-	failures := make(chan error, len(handlers)+1)
-	for address, handler := range handlers {
-		server := newServer(address, handler)
+func serve(ctx context.Context, endpoints []endpoint, rpc *grpc.Server, rpcAddress string) error {
+	servers := make([]*http.Server, 0, len(endpoints))
+	failures := make(chan error, len(endpoints)+1)
+	for _, e := range endpoints {
+		address := e.address
+		server := newServer(e)
 		servers = append(servers, server)
 		go func() {
 			if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {

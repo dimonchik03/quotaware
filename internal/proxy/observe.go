@@ -4,7 +4,6 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
-	"io"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -35,9 +34,13 @@ func (o *Observer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "observe token missing or wrong")
 		return
 	}
-	body, err := io.ReadAll(io.LimitReader(r.Body, o.maxBytes+1))
-	if err != nil || int64(len(body)) > o.maxBytes {
+	body, err := readBody(r, o.maxBytes)
+	switch {
+	case errors.Is(err, errTooLarge):
 		writeError(w, http.StatusRequestEntityTooLarge, "observation too large")
+		return
+	case err != nil:
+		writeError(w, http.StatusBadRequest, "observation body unreadable")
 		return
 	}
 	var observation usage.Observation
@@ -76,8 +79,7 @@ func (o *Observer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		sample.HasUsage, sample.Usage = true, *observation.Usage
 	}
 	key := state.Key{Provider: string(provider), Model: observation.Model, Key: observation.Credential}
-	o.store.Begin(key, now)
-	o.store.End(key, sample)
+	o.store.Observe(key, sample)
 	w.WriteHeader(http.StatusAccepted)
 }
 

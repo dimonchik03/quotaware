@@ -330,6 +330,20 @@ func (s *Store) End(key Key, sample Sample) {
 		return
 	}
 	b.InFlight = max(b.InFlight-1, 0)
+	s.record(key, b, sample)
+}
+
+func (s *Store) Observe(key Key, sample Sample) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	b, ok := s.bucket(key)
+	if !ok {
+		return
+	}
+	s.record(key, b, sample)
+}
+
+func (s *Store) record(key Key, b *Bucket, sample Sample) {
 	b.LastSeen = latest(b.LastSeen, sample.At)
 	b.Responses++
 	if succeeded(sample.Status) {

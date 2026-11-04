@@ -9,13 +9,21 @@ import (
 )
 
 func TestNewServerBoundsHeaderReadsAndIdleConnections(t *testing.T) {
-	server := newServer(":0", http.NotFoundHandler())
+	server := newServer(endpoint{address: ":0", handler: http.NotFoundHandler()})
 
 	if server.ReadHeaderTimeout != 10*time.Second || server.IdleTimeout != 2*time.Minute {
 		t.Fatalf("timeouts = header %v idle %v, want 10s and 2m", server.ReadHeaderTimeout, server.IdleTimeout)
 	}
-	if server.WriteTimeout != 0 {
-		t.Fatalf("write timeout = %v, want none so streams are never cut", server.WriteTimeout)
+	if server.WriteTimeout != 0 || server.ReadTimeout != 0 {
+		t.Fatalf("write timeout = %v read timeout = %v, want none so proxied bodies and streams are never cut", server.WriteTimeout, server.ReadTimeout)
+	}
+}
+
+func TestNewServerBoundsTheWholeRequestReadOnTheAdminPort(t *testing.T) {
+	server := newServer(endpoint{address: ":0", handler: http.NotFoundHandler(), readTimeout: 30 * time.Second})
+
+	if server.ReadTimeout != 30*time.Second {
+		t.Fatalf("read timeout = %v, want 30s so a slow observation cannot hold a connection", server.ReadTimeout)
 	}
 }
 

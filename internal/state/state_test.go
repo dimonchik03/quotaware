@@ -85,6 +85,17 @@ func TestStore(t *testing.T) {
 		}
 	})
 
+	t.Run("an observation applies its sample without a call in flight", func(t *testing.T) {
+		s := store(t, 0.5)
+
+		s.Observe(key, success(100, time.Second))
+
+		b := bucket(t, s)
+		if b.InFlight != 0 || b.Responses != 1 || b.TokensPerCall != 100 {
+			t.Fatalf("bucket = %+v, want the sample applied and nothing in flight", b)
+		}
+	})
+
 	t.Run("end without begin never drives in-flight below zero", func(t *testing.T) {
 		s := store(t, 0.5)
 

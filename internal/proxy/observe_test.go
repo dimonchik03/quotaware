@@ -1,11 +1,13 @@
 package proxy_test
 
 import (
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	"github.com/dimonchik03/quotaware/internal/proxy"
@@ -59,6 +61,18 @@ func TestObserver(t *testing.T) {
 		b, ok := store.Bucket(state.Key{Provider: "openai", Model: "gpt-4.1-mini", Key: "ab12ab12ab12"}, start)
 		if !ok || b.Quotas.Requests.Remaining != 59 || b.TokensPerCall != 150 || b.Latency != 1200*time.Millisecond || b.InFlight != 0 {
 			t.Fatalf("bucket = %+v ok = %v, want the observation applied with no call left in flight", b, ok)
+		}
+	})
+
+	t.Run("answers 400 when the observation body cannot be read", func(t *testing.T) {
+		o, _ := observer(t)
+		recorder := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodPost, usage.ObservePath, iotest.ErrReader(errors.New("connection reset")))
+
+		o.ServeHTTP(recorder, request)
+
+		if recorder.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400 for an unreadable body", recorder.Code)
 		}
 	})
 
