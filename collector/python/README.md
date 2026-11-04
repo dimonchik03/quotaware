@@ -13,5 +13,7 @@ deployments without proxying the calls.
     client = OpenAI(http_client=DefaultHttpxClient(event_hooks=hook.hooks()))
     async_client = AsyncOpenAI(http_client=DefaultAsyncHttpxClient(event_hooks=hook.async_hooks()))
 
-The hook never blocks or fails the call it observes. See the quotaware README for what
-it reports and how quotaware uses it.
+The hook reads bodies as the caller consumes them. It captures up to 4 MiB and sends
+headers even when usage is unavailable. Header age includes time spent waiting for
+delivery. Call `hook.close()` when shutting down to drain queued observations.
+[Collector setup and metrics](https://github.com/dimonchik03/quotaware#without-the-proxy-hop).

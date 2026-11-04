@@ -211,7 +211,7 @@ func TestCollector(t *testing.T) {
 		}
 
 		o := s.all()[0]
-		if o.HeadersAgeMS < 50 || o.HeadersAgeMS > o.LatencyMS {
+		if o.HeadersAgeMS < 50 || o.LatencyMS < 50 {
 			t.Fatalf("headers age = %v ms latency = %v ms, want the 60 ms the body took after the headers", o.HeadersAgeMS, o.LatencyMS)
 		}
 	})
@@ -413,4 +413,22 @@ func (b *failingBody) Read([]byte) (int, error) {
 func (b *failingBody) Close() error {
 	b.closed = true
 	return nil
+}
+
+func TestHeaderAgeIncludesTimeInTheDeliveryQueue(t *testing.T) {
+	s := newSink(t, true)
+	upstream := provider(t, openAI)
+	c := newCollector(t, s.server.URL, nil)
+	client := &http.Client{Transport: c.Wrap(nil)}
+	mustCall(t, client, upstream.URL, chat)
+	mustCall(t, client, upstream.URL, chat)
+	time.Sleep(50 * time.Millisecond)
+	close(s.release)
+	if err := c.Close(); err != nil {
+		t.Fatal(err)
+	}
+	observations := s.all()
+	if len(observations) != 2 || observations[1].HeadersAgeMS < 50 {
+		t.Fatalf("delivered observations = %+v", observations)
+	}
 }
