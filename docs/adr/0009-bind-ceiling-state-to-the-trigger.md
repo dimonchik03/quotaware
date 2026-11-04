@@ -4,7 +4,8 @@ Date: 2026-11-02
 
 ## Status
 
-Accepted
+Accepted. ADR 0010 replaces the sum across credentials with one shared quota by
+default.
 
 ## Context
 
