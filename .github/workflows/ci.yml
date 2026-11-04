@@ -30,12 +30,20 @@ jobs:
       - run: helm lint deploy/helm/quotaware --set observe.insecure=true --strict
       - run: helm template quotaware deploy/helm/quotaware --set observe.token=example > /dev/null
       - run: helm template quotaware deploy/helm/quotaware --set observe.existingSecret=quotaware-observe > /dev/null
-      - run: "! helm template quotaware deploy/helm/quotaware > /dev/null 2>&1"
+      - run: |
+          if helm template quotaware deploy/helm/quotaware > "$RUNNER_TEMP/unauthenticated.log" 2>&1; then exit 1; fi
+          grep -q "refuses unauthenticated observations" "$RUNNER_TEMP/unauthenticated.log"
       - run: |
           helm template quotaware deploy/helm/quotaware --set observe.token=example > "$RUNNER_TEMP/with-policy.yaml"
           grep -q "kind: NetworkPolicy" "$RUNNER_TEMP/with-policy.yaml"
           helm template quotaware deploy/helm/quotaware --set observe.token=example --set networkPolicy.enabled=false > "$RUNNER_TEMP/without-policy.yaml"
           if grep -q NetworkPolicy "$RUNNER_TEMP/without-policy.yaml"; then exit 1; fi
+      - run: |
+          helm template quotaware deploy/helm/quotaware --set observe.token=example > "$RUNNER_TEMP/rendered.yaml"
+          for expected in "automountServiceAccountToken: false" "runAsNonRoot: true" "readOnlyRootFilesystem: true" "allowPrivilegeEscalation: false" "checksum/observe-token:"; do
+            grep -q "$expected" "$RUNNER_TEMP/rendered.yaml" || { echo "chart lacks $expected" >&2; exit 1; }
+          done
+          helm template quotaware deploy/helm/quotaware --set observe.token=example --set maxBuckets=2000000 | grep -q -- "-max-buckets=2000000"
 
   e2e:
     runs-on: ubuntu-latest
