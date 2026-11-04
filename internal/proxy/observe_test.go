@@ -104,8 +104,8 @@ func TestObserver(t *testing.T) {
 		if b.RateLimited != 1 || !strings.Contains(logs.String(), "retry-after malformed") {
 			t.Fatalf("bucket = %+v logs = %q, want the 429 kept and the header logged", b, logs.String())
 		}
-		if b.HeadersMalformed != 0 || !b.Quotas.Requests.Known() || b.Quotas.Requests.Remaining != 0 {
-			t.Fatalf("bucket = %+v, want the rate-limit window applied although retry-after was unreadable", b)
+		if b.HeadersMalformed != 1 || !b.Quotas.Requests.Known() || b.Quotas.Requests.Remaining != 0 {
+			t.Fatalf("bucket = %+v, want the malformed header counted and the rate-limit window applied", b)
 		}
 	})
 
@@ -118,6 +118,13 @@ func TestObserver(t *testing.T) {
 		}
 		if code := observeWith(o, body, "secret").Code; code != http.StatusAccepted {
 			t.Fatalf("status = %d, want 202 for the right token", code)
+		}
+		bare := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodPost, usage.ObservePath, strings.NewReader(body))
+		request.Header.Set("Authorization", "secret")
+		o.ServeHTTP(bare, request)
+		if bare.Code != http.StatusUnauthorized {
+			t.Fatalf("status = %d, want 401 for the token without the Bearer scheme", bare.Code)
 		}
 		if len(store.Buckets(start)) != 1 {
 			t.Fatalf("buckets = %d, want only the authorised observation", len(store.Buckets(start)))

@@ -2,6 +2,7 @@ apiVersion: keda.sh/v1alpha1
 kind: ScaledObject
 metadata:
   name: llm-workers
+  namespace: llm
 spec:
   scaleTargetRef:
     name: llm-workers
@@ -17,13 +18,13 @@ spec:
     - type: redis
       name: demand
       metadata:
-        address: redis:6379
+        address: redis.llm.svc:6379
         listName: jobs
         listLength: "10"
     - type: external
       name: ceiling
       metadata:
-        scalerAddress: quotaware:9090
+        scalerAddress: quotaware.llm.svc:9090
         bucket: openai/gpt-4.1-mini
         concurrency: "4"
         maxReplicas: "40"

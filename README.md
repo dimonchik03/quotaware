@@ -23,7 +23,7 @@ the quotaware ceiling, at the default safety factor 0.85 and at 1, both with
 
 ![worker replicas](bench/results/2026-11-02/replicas.svg)
 
-![429 responses per minute](bench/results/2026-11-02/rate_limits.svg)
+![retries per minute, each after a 429](bench/results/2026-11-02/retries.svg)
 
 | Metric | A (queue trigger) | B (queue trigger + quotaware, safety 0.85) | C (queue trigger + quotaware, safety 1) |
 |---|---|---|---|
@@ -34,7 +34,7 @@ the quotaware ceiling, at the default safety factor 0.85 and at 1, both with
 | Jobs unaccounted for | 0 | 0 | 0 |
 | 429 responses | 720 | 0 | 15 |
 | Retries | 720 | 0 | 15 |
-| Peak 429 per minute | 76 | 0 | 2 |
+| Peak retries per minute | 91 | 0 | 5 |
 | Job latency p50 | 128.1 s | 263.6 s | 164.8 s |
 | Job latency p95 | 457.7 s | 689.5 s | 463.1 s |
 | Peak replicas | 30 | 8 | 10 |
@@ -51,9 +51,11 @@ sits one bucket higher (about 29 %) and the burst takes 10 % longer to drain. Th
 quota and the latency stay constant here, so a static `maxReplicaCount` of 10 would
 likely do as well as C. The ceiling is meant for headroom that moves: the kind demo
 below shows it following another credential's burst on the shared quota, a case the
-benchmark does not measure yet. `make bench` reproduces all three runs on a laptop; `docs/benchmark.md` has
-the setup, the hypothesis written before the first run (C was added after it), the
-result against it and how each number is measured.
+benchmark does not measure yet. The fixed window of the fake provider also hands the
+baseline a head start through the burst, about the size of C's p50 and drain gaps.
+`make bench` reproduces all three runs on a laptop; `docs/benchmark.md` has the
+setup, the hypothesis written before the first run (C was added after it), the result
+against it and how each number is measured.
 
 ## How it works
 
@@ -105,10 +107,12 @@ without the AIMD guard, which needs the 429 history of a live bucket. Run with
 
 The proxy forwards `POST /v1/chat/completions` to OpenAI and `POST /v1/messages`
 to Anthropic without touching the request or the response, streams included, and
-records what it sees per `(provider, model, credential hash)`. Point your workers'
-`base_url` at it:
+records what it sees per `(provider, model, credential hash)`. Every other path,
+embeddings and the Responses API included, gets 404, so point only the clients that
+make those two calls at it: OpenAI SDKs with `base_url` `http://<proxy>:8080/v1`,
+Anthropic SDKs with `http://<proxy>:8080`, since they add `/v1` themselves.
 
-    quotaware proxy -listen :8080 -admin :9100
+    QUOTAWARE_OBSERVE_TOKEN="$(openssl rand -hex 16)" quotaware proxy -listen :8080 -admin :9100
 
 `-openai-upstream` and `-anthropic-upstream` default to the public APIs. The admin
 port serves `/metrics`, `/healthz` and `/v1/observe`; the last one needs a token (see
@@ -118,8 +122,8 @@ replayable, so a stale pooled connection is retried instead of answered with 502
 
 To see it work without a provider account, `docker compose up --build` starts the
 proxy in front of `bench/fakeprovider`, a provider stand-in with real rate-limit
-headers in both formats, 429s with `retry-after`, SSE streams and a deterministic
-seed. The same stack backs `make e2e`. A session against a provider limited to
+headers in both formats, 429s with `retry-after`, SSE streams and seeded
+latency jitter and response text. The same stack backs `make e2e`. A session against a provider limited to
 three requests per minute:
 
     $ curl -si localhost:18080/v1/chat/completions -H "Authorization: Bearer sk-demo" \
@@ -166,8 +170,15 @@ external scaler in one pod, from the image `ghcr.io/dimonchik03/quotaware` that
 every release publishes for linux/amd64 and linux/arm64:
 
     git clone --branch v0.2.0 https://github.com/dimonchik03/quotaware && cd quotaware
-    helm install quotaware deploy/helm/quotaware -n llm --create-namespace \
-      --set observe.token="$(openssl rand -hex 16)"
+    kubectl create namespace llm
+    kubectl -n llm create secret generic quotaware-observe \
+      --from-literal=observe-token="$(openssl rand -hex 16)"
+    helm install quotaware deploy/helm/quotaware -n llm \
+      --set observe.existingSecret=quotaware-observe
+
+Collectors read the same secret, so the token never passes through a values file.
+`--set observe.token=...` works too and lets the chart create the secret and roll the
+pod when the token changes; with `existingSecret` restart the pod after a rotation.
 
 Install from a release tag: the chart's `appVersion` picks the image, and the chart
 on `main` may already pass flags that only the next release understands.
@@ -177,13 +188,17 @@ explicit `observe.insecure=true`. The proxy, gRPC and admin ports carry no
 authentication of their own, so the chart ships a NetworkPolicy, on by default, that
 admits KEDA's operator from the `keda` namespace to the gRPC port and the release
 namespace to the proxy and admin ports. Set `networkPolicy.keda.namespace` and
-`networkPolicy.keda.podSelector` when KEDA runs elsewhere or under other labels. Peers
+`networkPolicy.keda.podLabels` when KEDA runs elsewhere or under other labels. Peers
 from other namespaces go under `networkPolicy.proxyFrom` for workers that call the
 proxy, `networkPolicy.adminFrom` for collectors posting to `/v1/observe` and for
 Prometheus, and `networkPolicy.grpcFrom` for anything besides KEDA that must reach
-the scaler. A CNI that does not enforce policies ignores it (ADR 0009).
+the scaler. A CNI that does not enforce policies ignores it (ADR 0009). The pod runs
+as a non-root user with a read-only root filesystem, no capabilities, the default
+seccomp profile and no service account token, so it fits the `restricted` Pod
+Security level; `podSecurityContext` and `securityContext` override that.
 
-Point your workers at `http://quotaware.llm.svc:8080` and add the ceiling as a second
+Point your workers at `http://quotaware.llm.svc:8080` (`/v1` appended for OpenAI
+SDKs) and add the ceiling as a second
 trigger next to your queue trigger. KEDA takes the largest value across triggers, so
 the two are combined with `scalingModifiers` into a minimum (ADR 0005). Inside a
 formula KEDA uses the raw trigger values and ignores each trigger's own target, so the
@@ -198,7 +213,7 @@ queue length is divided by the jobs-per-replica target in the formula itself:
       - type: redis
         name: demand
         metadata:
-          address: redis:6379
+          address: redis.llm.svc:6379
           listName: jobs
           listLength: "10"
       - type: external
@@ -208,27 +223,36 @@ queue length is divided by the jobs-per-replica target in the formula itself:
           bucket: openai/gpt-4.1-mini
           concurrency: "4"
 
-`bucket` is `provider/model`; `concurrency` is how many provider calls one worker pod
+KEDA's operator dials `scalerAddress` and the Redis `address` from its own namespace,
+so both need the `<service>.<namespace>.svc` form. `bucket` is `provider/model`;
+`concurrency` is how many provider calls one worker pod
 keeps open; `maxReplicas` has to mirror `maxReplicaCount` by hand because KEDA does
 not pass it to external scalers. With `scalingModifiers` KEDA activates the
 ScaledObject when the formula result is above `activationTarget` (default 0), so an
 exhausted quota with `minReplicaCount: 0` scales to zero; keep `minReplicaCount` at
 one or more when the workers must stay warm. If quotaware is unreachable the HPA
 keeps the current replica count. Full manifests for this mode and for the
-single-trigger mode (quotaware reads the Redis list itself and returns the minimum)
+single-trigger mode (quotaware reads the Redis list itself and returns the minimum,
+never below the pods the open calls need)
 are in `deploy/examples/`. Single-trigger mode only reads the Redis addresses listed
 in `redisAddresses` (the `-redis-address` flag); any other `redisAddress` in trigger
-metadata is answered with PermissionDenied. Each quotaware serves at most
-`-max-scaled-objects` (1000) ScaledObjects; the rest get ResourceExhausted. Ceiling
+metadata is answered with PermissionDenied; the reader connects without password or
+TLS, so keep that Redis inside the cluster network. Each quotaware tracks at most
+`-max-scaled-objects` (1000) ceilings, one per ScaledObject, trigger and credential;
+a poll that needs a new one beyond that gets ResourceExhausted. Ceiling
 state is kept per ScaledObject and trigger metadata, so a caller on the gRPC port
 that sends other metadata for the same name gets its own entry and cannot move yours.
 Editing the trigger metadata, to tune `safety` for instance, starts that state
 afresh: an AIMD ceiling restarts at `defaultCeiling` and a header ceiling skips the
-`maxStepUp` limit once. A credential enters the sum only once the provider has
-answered it with a 2xx or a 429, so a key it rejects with 401 or 403 adds nothing
-(ADR 0009). A 429 counts as an answer, including OpenAI's `insufficient_quota`, so
-set `credential` when other teams' keys go through the same proxy.
-The remaining knobs (`credential`, `safety`, `share`,
+`maxStepUp` limit once. Providers scope rate limits to the organization or project,
+not to the key, so the credentials that match a trigger count as views of one quota:
+the newest headers among them decide the ceiling, and one drain floor covers the calls
+open on all of them. A trigger whose keys each have a quota of their own, keys of
+separate organizations for instance, sets `quotaScope: credential` to add their
+ceilings up instead (ADR 0010). A key the provider has only answered with 401 or 403
+counts for nothing. Set `credential` when other teams' keys for the same model go
+through the same proxy, or their headers may be the newest.
+The remaining knobs (`credential`, `quotaScope`, `safety`, `share`,
 `maxStepUp`, `stepInterval`, `defaultCeiling`, `minReplicas`, `staleAfter`,
 `staleHard`, `window`) and their defaults are listed in `docs/SPEC.md`. A Grafana
 dashboard is in `deploy/grafana/`.
@@ -254,6 +278,10 @@ the ceiling; give the collectors the same token.
     defer c.Close()
     client := &http.Client{Transport: c.Wrap(http.DefaultTransport)}
 
+    import os
+
+    import httpx
+    from openai import AsyncOpenAI, OpenAI
     from quotaware_httpx import QuotawareHook
 
     hook = QuotawareHook("http://quotaware:9100", "openai", token=os.environ["QUOTAWARE_OBSERVE_TOKEN"])
@@ -263,10 +291,17 @@ the ceiling; give the collectors the same token.
 The Python hook is one module in `collector/python/` with a `pyproject.toml`; copy
 the file or `pip install ./collector/python`. `hooks()` is for `httpx.Client`,
 `async_hooks()` for `httpx.AsyncClient`; httpx awaits every hook of an async
-client, so the two cannot be swapped. It reads usage from JSON responses;
-a stream is observed when it is closed, with the latency measured to the end and
-`complete` false if the caller abandoned it. Collector traffic is not counted as in
-flight, so the drain guard only sees proxied calls (ADR 0007).
+client, so the two cannot be swapped. Both collectors read usage from JSON bodies and
+from SSE streams (OpenAI with `stream_options.include_usage`, Anthropic always),
+gzip included; a body that is not JSON still reports its headers. A stream is
+observed when it is closed, with the latency measured to the end and `complete`
+false if the caller abandoned it; a body that breaks reaches the caller with its own
+error. The Python hook logs through the `quotaware_httpx` logger when deliveries
+start failing and when they recover, restarts its delivery thread in a forked child
+(Celery prefork, gunicorn `--preload`), and `close()` returns how many observations
+it could not deliver; the Go collector's `Close` returns `ErrUndelivered` then.
+Collector traffic is not counted as in flight, so the drain guard only sees proxied
+calls (ADR 0007).
 
 ## When the headers are missing
 
@@ -287,26 +322,54 @@ ceiling, so a burst of 429s halves it even while the headers still look healthy.
 
 The demo creates a cluster with its own kubeconfig under `bench/kind/`, so your
 default context is never touched. Workers are curl loops (two calls in flight per
-pod, backing off on `retry-after`) scaled by the Mode A ScaledObject against a fake
-provider limited to 600 requests per minute; 200 queued jobs keep demand at 20. After
-90 seconds a job with another credential bursts the shared quota for a minute:
+pod, backing off on `retry-after`) scaled by the two-trigger ScaledObject in
+`bench/kind/manifests/40-scaledobject.yaml` against a fake provider limited to 600
+requests per minute in one window per model that every key shares; 200 queued jobs
+keep demand at 20. After 90 seconds a job with another credential bursts the shared
+quota for a minute:
 
-    time      replicas  desired  429/15s ceiling (quotaware log)
-    21:40:33  -         -        0      0 -> 8 (headroom)
-    21:40:49  8         8        0
-    21:41:50  8         8        0
+    time      replicas  desired  ceiling (quotaware log)
+    21:40:33  -         -        0 -> 8 (headroom)
+    21:40:49  8         8
+    21:41:50  8         8
     21:42:05  burst job started: 30 loops with another credential for 60s
-    21:42:21  8         7        0      8 -> 7 (drain)
-    21:43:07  7         1        0      3 -> 1 (clamped)
-    21:43:23  1         1        0
-    21:43:38  1         5        0      1 -> 5 (step_up)
-    21:43:53  5         8        0      5 -> 8 (headroom)
-    21:44:09  8         8        0
+    21:42:21  8         7        8 -> 7 (drain)
+    21:43:07  7         1        3 -> 1 (clamped)
+    21:43:23  1         1
+    21:43:38  1         5        1 -> 5 (step_up)
+    21:43:53  5         8        5 -> 8 (headroom)
+    21:44:09  8         8
 
-Eight replicas is what 600 requests per minute feeds at one call per second per pod
-with the safety factor applied; the workers never see a 429. When the burst drains
-the window, the ceiling drops and the HPA follows within a poll; after the window
-resets the ceiling steps back up by `maxStepUp` per interval.
+Eight replicas is what 600 requests per minute feeds at about one call per second per
+pod with the safety factor applied. Once the burst has spent the shared window, every
+call gets a 429 until the reset, the workers' included: the ceiling follows the
+remaining quota down, so fewer worker pods sit in backoff, and after the window resets
+it steps back up by `maxStepUp` per interval. The log shows the last ceiling change of
+each 15 s line only. The demo also prints the workers' 429s per line; this recording
+predates a fix to that count, so the column is left out.
+
+## Command line
+
+`quotaware proxy` runs the proxy and the admin port; `quotaware all` adds the KEDA
+scaler; `quotaware simulate -h` lists the knobs of the replay; `quotaware version`
+prints the build version.
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `-listen` | `:8080` | proxy address |
+| `-admin` | `:9100` | `/metrics`, `/healthz` and `/v1/observe` |
+| `-grpc` (`all`) | `:9090` | KEDA external scaler |
+| `-openai-upstream`, `-anthropic-upstream` | public APIs | origins the proxy forwards to |
+| `-observe-token` | `$QUOTAWARE_OBSERVE_TOKEN` | bearer token collectors present |
+| `-observe-insecure` | off | accept observations without a token |
+| `-ewma-alpha` | `0.2` | weight of the newest sample in tokens per call and latency |
+| `-max-buckets` | `10000` | `(provider, model, credential)` buckets tracked |
+| `-max-scaled-objects` | `1000` | `(ScaledObject, trigger, credential)` ceilings tracked |
+| `-max-request-bytes` | 8 MiB | largest request body accepted |
+| `-max-capture-bytes` | 4 MiB | largest response body read for usage |
+| `-read-body-timeout` | `30s` | time a client may take to send the request body |
+| `-redis-address` (`all`) | none | Redis addresses single-trigger mode may read |
+| `-push-interval` (`all`) | `5s` | how often `StreamIsActive` re-checks a queue |
 
 ## Known limitations
 
@@ -339,8 +402,9 @@ Not a gateway, not a rate limiter, not a cost dashboard. See `docs/SPEC.md`.
 ## Status
 
 v0.2.0 is the current release: binaries for Linux and macOS on the releases page, the
-image `ghcr.io/dimonchik03/quotaware:0.2.0`, everything in `docs/SPEC.md`
-implemented and benchmarked. Over v0.1.0 it adds the network defaults of ADR 0008
+image `ghcr.io/dimonchik03/quotaware:0.2.0`, the v0.x scope of `docs/SPEC.md`
+implemented, and the two-trigger mode benchmarked against a fixed-window fake
+provider. Over v0.1.0 it adds the network defaults of ADR 0008
 and 0009 (observe token, NetworkPolicy, Redis allow list, ceiling state bound to the
 trigger), the store limits, async hooks for the Python collector and the three-run
 benchmark above.

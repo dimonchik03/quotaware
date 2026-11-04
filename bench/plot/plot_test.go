@@ -40,9 +40,9 @@ func vectorJSON(t *testing.T, value float64) []byte {
 	return raw
 }
 
-func writeRun(t *testing.T, root, name string, replicas, limited, queue, multiplier, ceiling [][2]float64, totals map[string]float64) {
+func writeRun(t *testing.T, root, name string, replicas, retried, queue, multiplier, ceiling [][2]float64, totals map[string]float64) {
 	t.Helper()
-	writeRunAt(t, root, name, start, replicas, limited, queue, multiplier, ceiling, totals)
+	writeRunAt(t, root, name, start, replicas, retried, queue, multiplier, ceiling, totals)
 }
 
 func shift(values [][2]float64, seconds float64) [][2]float64 {
@@ -53,7 +53,7 @@ func shift(values [][2]float64, seconds float64) [][2]float64 {
 	return shifted
 }
 
-func writeRunAt(t *testing.T, root, name string, runStart time.Time, replicas, limited, queue, multiplier, ceiling [][2]float64, totals map[string]float64) {
+func writeRunAt(t *testing.T, root, name string, runStart time.Time, replicas, retried, queue, multiplier, ceiling [][2]float64, totals map[string]float64) {
 	t.Helper()
 	dir := filepath.Join(root, name)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -66,7 +66,7 @@ func writeRunAt(t *testing.T, root, name string, runStart time.Time, replicas, l
 	}
 	write("run.json", []byte(`{"start":`+strconvFloat(float64(runStart.Unix()))+`,"end":`+strconvFloat(float64(runStart.Add(4*time.Minute).Unix()))+`}`))
 	write("replicas.json", matrixJSON(t, replicas))
-	write("rate_limited_per_minute.json", matrixJSON(t, limited))
+	write("retries_per_minute.json", matrixJSON(t, retried))
 	write("queue_length.json", matrixJSON(t, queue))
 	write("multiplier.json", matrixJSON(t, multiplier))
 	write("ceiling.json", matrixJSON(t, ceiling))
@@ -122,7 +122,7 @@ func TestReport(t *testing.T) {
 
 	t.Run("summarises both runs in a table", func(t *testing.T) {
 		table := report.Markdown()
-		for _, want := range []string{"| Metric | A | B |", "| 429 responses | 500 | 0 |", "| Peak replicas | 12 | 8 |", "| Idle pod-seconds (in backoff) | 420 | 0 |", "| Job latency p95 | 60.0 s | 40.0 s |", "| Time to drain the burst | 60 s | 60 s |", "| Jobs unaccounted for | 0 | 0 |"} {
+		for _, want := range []string{"| Metric | A | B |", "| 429 responses | 500 | 0 |", "| Peak replicas | 12 | 8 |", "| Peak retries per minute | 300 | 0 |", "| Idle pod-seconds (in backoff) | 420 | 0 |", "| Job latency p95 | 60.0 s | 40.0 s |", "| Time to drain the burst | 60 s | 60 s |", "| Jobs unaccounted for | 0 | 0 |"} {
 			if !strings.Contains(table, want) {
 				t.Fatalf("table lacks %q:\n%s", want, table)
 			}
@@ -174,7 +174,7 @@ func TestReport(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		for _, name := range []string{"replicas.svg", "rate_limits.svg", "queue.svg", "summary.md"} {
+		for _, name := range []string{"replicas.svg", "retries.svg", "queue.svg", "summary.md"} {
 			raw, err := os.ReadFile(filepath.Join(out, name))
 			if err != nil {
 				t.Fatal(err)

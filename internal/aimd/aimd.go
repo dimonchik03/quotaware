@@ -23,9 +23,9 @@ func DefaultConfig() Config {
 
 func (c Config) Validate() error {
 	switch {
-	case c.Threshold < 0 || c.Threshold >= 1:
+	case math.IsNaN(c.Threshold) || c.Threshold < 0 || c.Threshold >= 1:
 		return errors.New("threshold must be within [0, 1)")
-	case c.Decrease <= 0 || c.Decrease >= 1:
+	case math.IsNaN(c.Decrease) || c.Decrease <= 0 || c.Decrease >= 1:
 		return errors.New("decrease must be within (0, 1)")
 	case c.Increase <= 0:
 		return errors.New("increase must be positive")

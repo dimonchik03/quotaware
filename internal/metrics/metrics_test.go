@@ -73,13 +73,13 @@ func TestCollector(t *testing.T) {
 # HELP quotaware_buckets Buckets currently tracked.
 # TYPE quotaware_buckets gauge
 quotaware_buckets 1
-# HELP quotaware_buckets_rejected_total Calls on new buckets refused because the bucket limit was reached.
+# HELP quotaware_buckets_rejected_total Store updates on new buckets refused because the bucket limit was reached; a refused proxied call counts at its start and at its end.
 # TYPE quotaware_buckets_rejected_total counter
 quotaware_buckets_rejected_total 1
-# HELP quotaware_scaled_objects Scaled objects currently tracking a ceiling.
+# HELP quotaware_scaled_objects Ceilings currently tracked, one per scaled object, trigger and credential.
 # TYPE quotaware_scaled_objects gauge
 quotaware_scaled_objects 1
-# HELP quotaware_scaled_objects_rejected_total Ceiling evaluations refused because the scaled object limit was reached.
+# HELP quotaware_scaled_objects_rejected_total Ceiling evaluations refused because the ceiling limit was reached.
 # TYPE quotaware_scaled_objects_rejected_total counter
 quotaware_scaled_objects_rejected_total 1
 `
@@ -96,7 +96,7 @@ quotaware_scaled_objects_rejected_total 1
 # HELP quotaware_429_total Responses with status 429.
 # TYPE quotaware_429_total counter
 quotaware_429_total{key="ab12",model="gpt-4.1-mini",provider="openai"} 1
-# HELP quotaware_ceiling Replica ceiling of one bucket for a scaled object and trigger, before the sum KEDA receives.
+# HELP quotaware_ceiling Replica ceiling of one bucket for a scaled object and trigger, before the credentials of the trigger are combined.
 # TYPE quotaware_ceiling gauge
 quotaware_ceiling{key="ab12",model="gpt-4.1-mini",namespace="jobs",provider="openai",scaledobject="llm-workers",trigger="7c1d"} 4
 # HELP quotaware_inflight Calls currently open through the proxy.

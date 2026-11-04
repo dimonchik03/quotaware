@@ -1,6 +1,10 @@
 import asyncio
+import gzip
 import hashlib
 import json
+import logging
+import os
+import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -129,14 +133,16 @@ def test_ignores_other_requests(sink):
     assert Sink.received == []
 
 
-def test_a_broken_response_never_fails_the_call(sink):
+def test_a_2xx_body_that_is_not_json_still_reports_its_headers(sink):
     hook = QuotawareHook(sink, "openai")
     response = chat(client_with(hook, fake_broken))
     hook.close()
 
     assert response.status_code == 200
-    assert hook.errors == 1
-    assert Sink.received == []
+    assert hook.errors == 0
+    _, observation = Sink.received[0]
+    assert observation["usage"] is None
+    assert observation["complete"] is True
 
 
 def test_counts_rejected_deliveries(sink):
@@ -242,7 +248,7 @@ def test_async_hooks_mark_a_stream_the_caller_abandoned_as_incomplete(sink):
     assert observation["usage"] is None
 
 
-def test_async_hooks_never_fail_the_call_on_a_broken_response(sink):
+def test_async_hooks_report_the_headers_of_a_2xx_body_that_is_not_json(sink):
     hook = QuotawareHook(sink, "openai")
 
     async def call():
@@ -253,8 +259,9 @@ def test_async_hooks_never_fail_the_call_on_a_broken_response(sink):
     hook.close()
 
     assert response.status_code == 200
-    assert hook.errors == 1
-    assert Sink.received == []
+    assert hook.errors == 0
+    _, observation = Sink.received[0]
+    assert observation["usage"] is None
 
 
 def test_counts_tokens_per_provider_and_tolerates_nulls():
@@ -275,3 +282,135 @@ def test_rejects_an_unknown_provider_and_a_bad_endpoint():
         QuotawareHook("http://quotaware:9100", "gemini")
     with pytest.raises(ValueError):
         QuotawareHook("not a url at all", "openai")
+
+
+OPENAI_STREAM = b'data: {"choices":[]}\n\ndata: {"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":5}}\n\ndata: [DONE]\n\n'
+ANTHROPIC_STREAM = (
+    b'event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":10,"cache_creation_input_tokens":2,"output_tokens":1}}}\n\n'
+    b'event: message_delta\ndata: {"type":"message_delta","usage":{"output_tokens":7}}\n\n'
+)
+
+
+def streaming(body, content_type="text/event-stream", encoding=None):
+    headers = {**RATE_LIMIT_HEADERS, "content-type": content_type}
+    if encoding:
+        headers["content-encoding"] = encoding
+    return lambda request: httpx.Response(200, headers=headers, stream=httpx.ByteStream(body))
+
+
+def test_reads_usage_from_an_openai_stream_that_includes_it(sink):
+    hook = QuotawareHook(sink, "openai")
+    chat(client_with(hook, streaming(OPENAI_STREAM)))
+    hook.close()
+
+    _, observation = Sink.received[0]
+    assert observation["usage"] == 15
+
+
+def test_recognises_a_stream_whatever_the_case_of_its_content_type(sink):
+    hook = QuotawareHook(sink, "openai")
+    chat(client_with(hook, streaming(OPENAI_STREAM, content_type="Text/Event-Stream")))
+    hook.close()
+
+    _, observation = Sink.received[0]
+    assert observation["usage"] == 15
+
+
+def test_reads_usage_from_a_gzip_stream(sink):
+    hook = QuotawareHook(sink, "openai")
+    response = chat(client_with(hook, streaming(gzip.compress(OPENAI_STREAM), encoding="gzip")))
+    hook.close()
+
+    assert response.content == OPENAI_STREAM
+    _, observation = Sink.received[0]
+    assert observation["usage"] == 15
+
+
+def test_async_hooks_read_usage_from_an_anthropic_stream(sink):
+    hook = QuotawareHook(sink, "anthropic")
+    transport = httpx.MockTransport(streaming(ANTHROPIC_STREAM))
+
+    async def call():
+        async with httpx.AsyncClient(base_url="https://provider.test", transport=transport, event_hooks=hook.async_hooks()) as client:
+            return await client.post("/v1/messages", json={"model": "claude-sonnet-4-5", "messages": []}, headers={"x-api-key": "sk-ant"})
+
+    asyncio.run(call())
+    hook.close()
+
+    _, observation = Sink.received[0]
+    assert observation["usage"] == 19
+
+
+class BreakingStream(httpx.SyncByteStream):
+    def __iter__(self):
+        yield b'{"usage":'
+        raise httpx.ReadError("connection reset")
+
+
+def breaking(request):
+    return httpx.Response(200, headers={"content-type": "application/json"}, stream=BreakingStream())
+
+
+def test_a_body_that_breaks_reaches_the_caller_with_its_own_error(sink):
+    hook = QuotawareHook(sink, "openai")
+
+    with pytest.raises(httpx.ReadError):
+        chat(client_with(hook, breaking))
+    hook.close()
+
+    _, observation = Sink.received[0]
+    assert observation["complete"] is False
+
+
+def wait_for(condition):
+    deadline = time.monotonic() + 5
+    while not condition() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert condition()
+
+
+def test_logs_once_when_deliveries_start_failing_and_once_when_they_recover(sink, caplog):
+    caplog.set_level(logging.INFO, logger="quotaware_httpx")
+    Sink.status = 401
+    hook = QuotawareHook(sink, "openai")
+    client = client_with(hook, fake_openai)
+    chat(client)
+    chat(client)
+    wait_for(lambda: hook.failed == 2)
+    Sink.status = 202
+    chat(client)
+    hook.close()
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert sum("not delivered" in message for message in messages) == 1
+    assert sum("delivered again" in message for message in messages) == 1
+
+
+def test_close_is_idempotent_and_counts_later_observations_as_dropped(sink):
+    hook = QuotawareHook(sink, "openai")
+    client = client_with(hook, fake_openai)
+
+    assert hook.close() == 0
+    assert hook.close() == 0
+    chat(client)
+
+    assert hook.dropped == 1
+    assert Sink.received == []
+
+
+@pytest.mark.skipif(not hasattr(os, "fork") or sys.platform == "darwin", reason="needs os.fork; macOS aborts a forked child of a threaded process that touches the Objective-C runtime")
+def test_keeps_reporting_from_a_process_forked_after_the_hook_was_created(sink):
+    hook = QuotawareHook(sink, "openai")
+    pid = os.fork()
+    if pid == 0:
+        code = 1
+        try:
+            chat(client_with(hook, fake_openai))
+            code = 0 if hook.close() == 0 else 1
+        finally:
+            os._exit(code)
+    _, status = os.waitpid(pid, 0)
+    hook.close()
+
+    assert os.waitstatus_to_exitcode(status) == 0
+    wait_for(lambda: len(Sink.received) == 1)

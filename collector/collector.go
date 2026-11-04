@@ -55,6 +55,7 @@ type Collector struct {
 	failed     atomic.Int64
 	unobserved atomic.Int64
 	failing    atomic.Bool
+	closing    atomic.Bool
 	stop       chan struct{}
 	wg         sync.WaitGroup
 	closed     sync.Once
@@ -100,8 +101,12 @@ func (c *Collector) Unobserved() int64 {
 	return c.unobserved.Load()
 }
 
+var ErrUndelivered = errors.New("quotaware collector closed before every observation was delivered")
+
 func (c *Collector) Close() error {
+	var err error
 	c.closed.Do(func() {
+		c.closing.Store(true)
 		close(c.stop)
 		done := make(chan struct{})
 		go func() {
@@ -111,13 +116,17 @@ func (c *Collector) Close() error {
 		select {
 		case <-done:
 		case <-time.After(c.cfg.CloseTimeout):
-			c.cfg.Logger.Warn("quotaware collector closed with observations still queued", "queued", len(c.queue))
+			err = fmt.Errorf("%w: %d still queued after %v", ErrUndelivered, len(c.queue), c.cfg.CloseTimeout)
 		}
 	})
-	return nil
+	return err
 }
 
 func (c *Collector) enqueue(observation Observation) {
+	if c.closing.Load() {
+		c.dropped.Add(1)
+		return
+	}
 	select {
 	case c.queue <- observation:
 	default:
@@ -204,6 +213,7 @@ func (r roundTripper) RoundTrip(request *http.Request) (*http.Response, error) {
 	}
 	prefix, err := io.ReadAll(io.LimitReader(request.Body, c.cfg.MaxRequestBytes+1))
 	if err != nil {
+		_ = request.Body.Close()
 		return nil, fmt.Errorf("quotaware collector: read request body: %w", err)
 	}
 	clone := request.Clone(request.Context())

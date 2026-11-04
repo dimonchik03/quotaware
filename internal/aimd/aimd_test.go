@@ -1,6 +1,7 @@
 package aimd_test
 
 import (
+	"math"
 	"testing"
 	"time"
 
@@ -107,6 +108,8 @@ func TestConfigValidate(t *testing.T) {
 		mutate func(*aimd.Config)
 	}{
 		{"rejects a threshold of one", func(c *aimd.Config) { c.Threshold = 1 }},
+		{"rejects a threshold that is not a number", func(c *aimd.Config) { c.Threshold = math.NaN() }},
+		{"rejects a decrease that is not a number", func(c *aimd.Config) { c.Decrease = math.NaN() }},
 		{"rejects a decrease of one", func(c *aimd.Config) { c.Decrease = 1 }},
 		{"rejects a zero increase", func(c *aimd.Config) { c.Increase = 0 }},
 		{"rejects a zero interval", func(c *aimd.Config) { c.Interval = 0 }},

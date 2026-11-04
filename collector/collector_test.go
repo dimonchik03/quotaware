@@ -283,24 +283,58 @@ func TestCollector(t *testing.T) {
 		}
 	})
 
-	t.Run("close returns within its deadline when quotaware hangs", func(t *testing.T) {
+	t.Run("close returns within its deadline when quotaware hangs and says it lost observations", func(t *testing.T) {
 		s := newSink(t, true)
 		upstream := provider(t, openAI)
 		c := newCollector(t, s.server.URL, func(cfg *collector.Config) {
-			cfg.PostTimeout = 200 * time.Millisecond
+			cfg.PostTimeout = time.Second
 			cfg.CloseTimeout = 300 * time.Millisecond
 		})
 		client := &http.Client{Transport: c.Wrap(nil)}
 		mustCall(t, client, upstream.URL, chat)
+		mustCall(t, client, upstream.URL, chat)
 
 		started := time.Now()
-		if err := c.Close(); err != nil {
-			t.Fatal(err)
-		}
+		err := c.Close()
 		close(s.release)
+
+		if !errors.Is(err, collector.ErrUndelivered) {
+			t.Fatalf("err = %v, want ErrUndelivered", err)
+		}
 
 		if elapsed := time.Since(started); elapsed > 2*time.Second {
 			t.Fatalf("close took %v, want it bounded by the timeouts", elapsed)
+		}
+	})
+
+	t.Run("counts an observation made after close as dropped", func(t *testing.T) {
+		s := newSink(t, false)
+		upstream := provider(t, openAI)
+		c := newCollector(t, s.server.URL, nil)
+		client := &http.Client{Transport: c.Wrap(nil)}
+		if err := c.Close(); err != nil {
+			t.Fatal(err)
+		}
+
+		mustCall(t, client, upstream.URL, chat)
+
+		if c.Dropped() != 1 || len(s.all()) != 0 {
+			t.Fatalf("dropped = %d delivered = %d, want the late observation dropped", c.Dropped(), len(s.all()))
+		}
+	})
+
+	t.Run("closes the request body when reading it fails", func(t *testing.T) {
+		c := newCollector(t, "http://127.0.0.1:1", nil)
+		body := &failingBody{}
+		request, err := http.NewRequest(http.MethodPost, "http://provider.test/v1/chat/completions", body)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		_, err = c.Wrap(nil).RoundTrip(request)
+
+		if err == nil || !body.closed {
+			t.Fatalf("err = %v closed = %v, want the read error and the body closed", err, body.closed)
 		}
 	})
 
@@ -320,4 +354,17 @@ func ExampleNew() {
 	client := &http.Client{Transport: c.Wrap(http.DefaultTransport)}
 	fmt.Println(client.Transport != nil)
 	// Output: true
+}
+
+type failingBody struct {
+	closed bool
+}
+
+func (b *failingBody) Read([]byte) (int, error) {
+	return 0, errors.New("client went away")
+}
+
+func (b *failingBody) Close() error {
+	b.closed = true
+	return nil
 }

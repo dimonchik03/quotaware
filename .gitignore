@@ -18,3 +18,5 @@ bench/kind/.kubeconfig
 bench/results/smoke/
 __pycache__/
 .pytest_cache/
+collector/python/build/
+*.egg-info/

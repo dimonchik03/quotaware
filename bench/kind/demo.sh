@@ -33,7 +33,11 @@ while [ $(( $(date +%s) - started )) -lt "$watch_seconds" ]; do
     printf '%-9s %s\n' "$(date +%H:%M:%S)" "burst job started: 30 loops with another credential for 60s"
   fi
   read -r current desired <<<"$(kubectl -n "$namespace" get hpa keda-hpa-llm-workers -o jsonpath='{.status.currentReplicas} {.status.desiredReplicas}' 2>/dev/null || echo "- -")"
-  limited=$(kubectl -n "$namespace" logs deploy/llm-workers --all-pods=true --since=15s 2>/dev/null | grep -cE '(^| )429$' || true)
+  if worker_logs=$(kubectl -n "$namespace" logs -l app=llm-workers --since=15s --max-log-requests=64 2>/dev/null); then
+    limited=$(grep -cE '^429$' <<<"$worker_logs" || true)
+  else
+    limited="?"
+  fi
   ceiling=$(kubectl -n "$namespace" logs deploy/quotaware --since=15s 2>/dev/null | grep 'ceiling changed' | tail -1 | sed -E 's/.*from=([0-9]+) to=([0-9]+)( mode=[a-z]+)? reason=([a-z_]+).*/\1 -> \2 (\4)/' || true)
   printf '%-9s %-9s %-8s %-6s %s\n' "$(date +%H:%M:%S)" "${current:--}" "${desired:--}" "${limited:-0}" "${ceiling}"
   sleep 15

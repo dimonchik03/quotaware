@@ -26,12 +26,25 @@ networkPolicy:
   enabled: true
   keda:
     namespace: keda
-    podSelector: {}
+    podLabels: {}
   grpcFrom: []
   proxyFrom: []
   adminFrom: []
 
 extraArgs: []
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: [ALL]
 
 resources:
   requests:

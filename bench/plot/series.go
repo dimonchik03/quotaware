@@ -171,28 +171,10 @@ func (s Series) Max() float64 {
 	return peak
 }
 
-func (s Series) FirstAbove(threshold float64, after time.Time) (time.Time, bool) {
-	for _, p := range s {
-		if !p.At.Before(after) && p.Value > threshold {
-			return p.At, true
-		}
-	}
-	return time.Time{}, false
-}
-
 func (s Series) FirstAtOrBelow(threshold float64, after time.Time) (time.Time, bool) {
 	for _, p := range s {
 		if !p.At.Before(after) && p.Value <= threshold {
 			return p.At, true
-		}
-	}
-	return time.Time{}, false
-}
-
-func (s Series) LastAbove(threshold float64) (time.Time, bool) {
-	for i := len(s) - 1; i >= 0; i-- {
-		if s[i].Value > threshold {
-			return s[i].At, true
 		}
 	}
 	return time.Time{}, false
