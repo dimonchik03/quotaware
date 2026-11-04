@@ -174,7 +174,7 @@ The chart runs `quotaware all`: the proxy, the metrics endpoint and the KEDA
 external scaler in one pod, from the image `ghcr.io/dimonchik03/quotaware` that
 every release publishes for linux/amd64 and linux/arm64:
 
-    git clone --branch v0.2.0 https://github.com/dimonchik03/quotaware && cd quotaware
+    git clone --branch v0.3.0 https://github.com/dimonchik03/quotaware && cd quotaware
     kubectl create namespace llm
     kubectl -n llm create secret generic quotaware-observe \
       --from-literal=observe-token="$(openssl rand -hex 16)"
@@ -436,25 +436,34 @@ Not a gateway, not a rate limiter, not a cost dashboard. See `docs/SPEC.md`.
 
 ## Status
 
-v0.2.0 is the current release: binaries for Linux and macOS on the releases page, the
-image `ghcr.io/dimonchik03/quotaware:0.2.0`, the v0.x scope of `docs/SPEC.md`
+v0.3.0 is the current release: binaries for Linux and macOS on the releases page, the
+image `ghcr.io/dimonchik03/quotaware:0.3.0`, the v0.x scope of `docs/SPEC.md`
 implemented, and the two-trigger mode benchmarked against a fixed-window fake
-provider. Over v0.1.0 it adds the network defaults of ADR 0008
-and 0009 (observe token, NetworkPolicy, Redis allow list, ceiling state bound to the
-trigger), the store limits, async hooks for the Python collector and the three-run
-benchmark above.
+provider. Over v0.2.0 it dates quotas by when their headers arrived, limits raises of
+the value KEDA receives as well as each credential's, bounds the trigger metadata and
+the settings, caps `retry-after`, hands buckets without a computable rate to AIMD,
+bounds what the Python collector reads, hardens the chart's arguments, and builds
+with Go 1.26.10. v0.2.0 added the network defaults of ADR 0008 and 0009, the store
+limits, async hooks for the Python collector, one shared quota across credentials
+(ADR 0010) and the three-run benchmark above.
 
-Upgrading from v0.1.0: quotaware now refuses to start without an observe token and
-the chart refuses to render without `observe.token`, `observe.existingSecret` or
+Upgrading from v0.2.0: the scaler now refuses trigger metadata it used to accept, so
+check each ScaledObject: `bucket` must name openai or anthropic and a model of at
+most 256 bytes, `credential` must be the 12-character key hash, `maxReplicas` at
+most 100000, `maxStepUp` and `aimdIncrease` at most `maxReplicas`, and `concurrency`
+at most 1000000. `quotaware_ceiling{key="combined"}` is the value KEDA receives; the
+dashboard's ceiling panel reads it. A `retry-after` beyond a day counts as malformed,
+and an unreadable observation body is now 400.
+
+Upgrading from v0.1.0: quotaware refuses to start without an observe token and the
+chart refuses to render without `observe.token`, `observe.existingSecret` or
 `observe.insecure=true`; give collectors the same token. The NetworkPolicy is on by
 default, so on a CNI that enforces it list workers, collectors and Prometheus from
 other namespaces under `networkPolicy.proxyFrom` and `networkPolicy.adminFrom`, and a
 KEDA outside the `keda` namespace under `networkPolicy.keda`. Single-trigger mode
-needs its Redis addresses in `redisAddresses`. The credentials of a model now share
-one quota by default (ADR 0010); triggers whose keys belong to separate
-organizations set `quotaScope: credential`. Single-trigger mode stays active while
-calls are open, `credential` must be the 12-character key hash, and `maxStepUp` may
-not exceed `maxReplicas`.
+needs its Redis addresses in `redisAddresses` and stays active while calls are open.
+The credentials of a model share one quota by default (ADR 0010); triggers whose keys
+belong to separate organizations set `quotaScope: credential`.
 
 See `docs/design.md` for how the pieces fit and `docs/release.md` for how a release
 is cut. Specification in `docs/SPEC.md`, decisions in `docs/adr`.
