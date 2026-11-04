@@ -32,7 +32,8 @@ const (
 )
 
 func NewServer(maxScaledObjects int) *grpc.Server {
-	return grpc.NewServer(grpc.MaxConcurrentStreams(uint32(streamsPerScaledObject * maxScaledObjects)))
+	streams := min(int64(streamsPerScaledObject)*int64(maxScaledObjects), math.MaxUint32)
+	return grpc.NewServer(grpc.MaxConcurrentStreams(uint32(streams)))
 }
 
 type QueueDepth interface {

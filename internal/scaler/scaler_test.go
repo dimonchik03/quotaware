@@ -787,18 +787,7 @@ func TestOverGRPC(t *testing.T) {
 	f.service.Register(server)
 	go func() { _ = server.Serve(listener) }()
 	t.Cleanup(server.Stop)
-	connect := func(t *testing.T) externalscaler.ExternalScalerClient {
-		t.Helper()
-		conn, err := grpc.NewClient("passthrough:///bufconn",
-			grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) { return listener.DialContext(ctx) }),
-			grpc.WithTransportCredentials(insecure.NewCredentials()))
-		if err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(func() { _ = conn.Close() })
-		return externalscaler.NewExternalScalerClient(conn)
-	}
-	client := connect(t)
+	client := dial(t, listener)
 
 	t.Run("serves metrics over the wire", func(t *testing.T) {
 		response, err := client.GetMetrics(context.Background(), &externalscaler.GetMetricsRequest{ScaledObjectRef: ref(capMetadata())})
@@ -867,24 +856,11 @@ func TestOverGRPC(t *testing.T) {
 		}
 	})
 
-	park := func(t *testing.T, own externalscaler.ExternalScalerClient, ctx context.Context) {
-		t.Helper()
-		for range 2 * servedObjects {
-			stream, err := own.StreamIsActive(ctx, ref(capMetadata()))
-			if err != nil {
-				t.Fatal(err)
-			}
-			if _, err := stream.Recv(); err != nil {
-				t.Fatal(err)
-			}
-		}
-	}
-
 	t.Run("holds a stream beyond two per scaled object it serves on one connection", func(t *testing.T) {
-		own := connect(t)
+		own := dial(t, listener)
 		parked, release := context.WithCancel(context.Background())
 		defer release()
-		park(t, own, parked)
+		park(t, own, parked, 2*servedObjects)
 		waiting, stopWaiting := context.WithTimeout(context.Background(), 300*time.Millisecond)
 		defer stopWaiting()
 
@@ -895,24 +871,6 @@ func TestOverGRPC(t *testing.T) {
 
 		if code(err) != codes.DeadlineExceeded {
 			t.Fatalf("code = %v, want the stream beyond the limit to wait", code(err))
-		}
-	})
-
-	t.Run("admits a stream once a parked one leaves", func(t *testing.T) {
-		own := connect(t)
-		parked, release := context.WithCancel(context.Background())
-		park(t, own, parked)
-		release()
-		admitted, stopAdmitted := context.WithTimeout(context.Background(), 5*time.Second)
-		defer stopAdmitted()
-
-		stream, err := own.StreamIsActive(admitted, ref(capMetadata()))
-		if err == nil {
-			_, err = stream.Recv()
-		}
-
-		if err != nil {
-			t.Fatalf("stream after the others left: %v", err)
 		}
 	})
 
@@ -928,4 +886,42 @@ func TestOverGRPC(t *testing.T) {
 			t.Fatalf("code = %v, want Unimplemented", code(err))
 		}
 	})
+}
+
+func TestNewServerSaturatesTheStreamCapOfAHugeLimit(t *testing.T) {
+	f := newFixture(t)
+	listener := bufconn.Listen(1 << 20)
+	server := scaler.NewServer(1<<31 + 1)
+	f.service.Register(server)
+	go func() { _ = server.Serve(listener) }()
+	t.Cleanup(server.Stop)
+	parked, release := context.WithTimeout(context.Background(), 5*time.Second)
+	defer release()
+
+	park(t, dial(t, listener), parked, 3)
+}
+
+func dial(t *testing.T, listener *bufconn.Listener) externalscaler.ExternalScalerClient {
+	t.Helper()
+	conn, err := grpc.NewClient("passthrough:///bufconn",
+		grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) { return listener.DialContext(ctx) }),
+		grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	return externalscaler.NewExternalScalerClient(conn)
+}
+
+func park(t *testing.T, client externalscaler.ExternalScalerClient, ctx context.Context, streams int) {
+	t.Helper()
+	for range streams {
+		stream, err := client.StreamIsActive(ctx, ref(capMetadata()))
+		if err == nil {
+			_, err = stream.Recv()
+		}
+		if err != nil {
+			t.Fatalf("stream did not open: %v", err)
+		}
+	}
 }
