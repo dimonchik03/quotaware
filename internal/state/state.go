@@ -244,13 +244,6 @@ func (s *Store) UpdateCeiling(consumer Consumer, update func(previous Ceiling, k
 	return next, nil
 }
 
-func (s *Store) Ceiling(consumer Consumer) (Ceiling, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	c, ok := s.ceilings[consumer]
-	return c, ok
-}
-
 func (s *Store) Ceilings() []Ceiling {
 	s.mu.Lock()
 	defer s.mu.Unlock()

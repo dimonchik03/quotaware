@@ -437,7 +437,7 @@ func TestStore(t *testing.T) {
 
 		s.Evict(now.Add(12*time.Minute), 10*time.Minute)
 
-		if _, ok := s.Ceiling(consumer); ok || len(s.Ceilings()) != 0 {
+		if len(s.Ceilings()) != 0 {
 			t.Fatal("ceiling survived although its consumer stopped polling")
 		}
 	})
