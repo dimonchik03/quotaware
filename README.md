@@ -317,8 +317,8 @@ headers or the last observation is older than `staleHard`, are driven by AIMD:
 start at `defaultCeiling`, add `aimdIncrease` per `stepInterval` of clean traffic,
 multiply by `aimdDecrease` (0.5) when more than `aimdThreshold` (2 %) of the last
 minute's accepted responses, 2xx and 429, were 429, then hold for the longest
-`retry-after` seen and at
-least one minute, so one burst is halved once. The same rule guards a header-derived
+`retry-after` seen, at least one minute and at most `staleHard`, so one burst is
+halved once; a `retry-after` beyond a day counts as malformed. The same rule guards a header-derived
 ceiling, so a burst of 429s halves it even while the headers still look healthy.
 `quotaware_rate_limited_ratio` shows the share the rule reacts to (ADR 0006).
 

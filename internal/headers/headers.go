@@ -88,17 +88,32 @@ func Parse(provider Provider, h http.Header, now time.Time) (Limits, error) {
 	}
 }
 
+const MaxRetryAfter = 24 * time.Hour
+
+var errRetryAfterTooLong = errors.New("delay beyond a day")
+
 func RetryAfter(h http.Header, now time.Time) (time.Duration, error) {
 	value := strings.TrimSpace(h.Get("Retry-After"))
 	if value == "" {
 		return 0, nil
 	}
+	delay, err := retryAfterDelay(value, now)
+	if err != nil {
+		return 0, &MalformedError{Header: "Retry-After", Value: value, Err: err}
+	}
+	if delay > MaxRetryAfter {
+		return 0, &MalformedError{Header: "Retry-After", Value: value, Err: errRetryAfterTooLong}
+	}
+	return delay, nil
+}
+
+func retryAfterDelay(value string, now time.Time) (time.Duration, error) {
 	if seconds, err := strconv.ParseUint(value, 10, 32); err == nil {
 		return time.Duration(seconds) * time.Second, nil
 	}
 	at, err := http.ParseTime(value)
 	if err != nil {
-		return 0, &MalformedError{Header: "Retry-After", Value: value, Err: err}
+		return 0, err
 	}
 	return max(at.Sub(now), 0), nil
 }

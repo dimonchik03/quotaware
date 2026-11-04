@@ -201,6 +201,7 @@ func appendField(encoded []byte, field string) []byte {
 func (s *Service) parseAIMD(metadata map[string]string, cfg headroom.Config) (aimd.Config, error) {
 	aimdConfig := s.cfg.AIMD
 	aimdConfig.Interval, aimdConfig.Window, aimdConfig.Min, aimdConfig.Max = cfg.StepInterval, state.WindowLength, cfg.MinReplicas, cfg.MaxReplicas
+	aimdConfig.MaxHold = max(cfg.StaleHard, state.WindowLength)
 	aimdConfig.Start = cfg.DefaultCeiling
 	floats := []floatField{{"aimdThreshold", &aimdConfig.Threshold}, {"aimdDecrease", &aimdConfig.Decrease}}
 	for _, field := range floats {

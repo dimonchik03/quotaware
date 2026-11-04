@@ -308,6 +308,28 @@ func TestRetryAfter(t *testing.T) {
 		}
 	})
 
+	t.Run("rejects a delay of more than a day", func(t *testing.T) {
+		h := http.Header{}
+		h.Set("Retry-After", "4294967295")
+
+		_, err := headers.RetryAfter(h, now)
+
+		if malformed := malformedHeader(t, err); malformed.Header != "Retry-After" {
+			t.Fatalf("malformed = %+v, want the Retry-After header named", malformed)
+		}
+	})
+
+	t.Run("rejects a date more than a day ahead", func(t *testing.T) {
+		h := http.Header{}
+		h.Set("Retry-After", now.Add(48*time.Hour).UTC().Format(http.TimeFormat))
+
+		_, err := headers.RetryAfter(h, now)
+
+		if malformed := malformedHeader(t, err); malformed.Header != "Retry-After" {
+			t.Fatalf("malformed = %+v, want the Retry-After header named", malformed)
+		}
+	})
+
 	t.Run("rejects a negative number of seconds", func(t *testing.T) {
 		h := http.Header{}
 		h.Set("Retry-After", "-5")

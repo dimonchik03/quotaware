@@ -132,7 +132,8 @@ Azure variants to be verified): classic congestion control. If the share of 429 
 the 2xx and 429 responses of the last minute exceeds `aimdThreshold` (default 0.02),
 multiply the ceiling by
 `aimdDecrease` (default 0.5) and hold it until the longest observed `retry-after`
-elapses, at least one minute; otherwise add `aimdIncrease` (default 1) per
+elapses, at least one minute and at most `staleHard` (a `retry-after` beyond a day is
+malformed); otherwise add `aimdIncrease` (default 1) per
 `stepInterval` up to `maxReplicas`. Header mode and AIMD run together; AIMD acts as a
 guard even when headers exist (ADR 0006).
 

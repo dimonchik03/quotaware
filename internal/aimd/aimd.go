@@ -12,13 +12,14 @@ type Config struct {
 	Increase  int
 	Interval  time.Duration
 	Window    time.Duration
+	MaxHold   time.Duration
 	Start     int
 	Min       int
 	Max       int
 }
 
 func DefaultConfig() Config {
-	return Config{Threshold: 0.02, Decrease: 0.5, Increase: 1, Interval: 15 * time.Second, Window: time.Minute, Start: 1, Min: 1, Max: 100}
+	return Config{Threshold: 0.02, Decrease: 0.5, Increase: 1, Interval: 15 * time.Second, Window: time.Minute, MaxHold: 10 * time.Minute, Start: 1, Min: 1, Max: 100}
 }
 
 func (c Config) Validate() error {
@@ -31,6 +32,8 @@ func (c Config) Validate() error {
 		return errors.New("increase must be positive")
 	case c.Interval <= 0 || c.Window <= 0:
 		return errors.New("interval and window must be positive")
+	case c.MaxHold < c.Window:
+		return errors.New("max hold must be at least the window")
 	case c.Min < 0 || c.Max <= 0 || c.Max < c.Min:
 		return errors.New("min must not be negative and max must be positive and at least min")
 	case c.Start < c.Min || c.Start > c.Max:
@@ -105,7 +108,7 @@ func Guard(cfg Config, ceiling int, state State, signal Signal, now time.Time) (
 }
 
 func hold(cfg Config, signal Signal) time.Duration {
-	return max(signal.RetryAfter, cfg.Interval, cfg.Window)
+	return min(max(signal.RetryAfter, cfg.Interval, cfg.Window), cfg.MaxHold)
 }
 
 func clamp(cfg Config, v int) int {
