@@ -528,3 +528,31 @@ func TestBucketAccepted(t *testing.T) {
 		})
 	}
 }
+
+func TestBucketRefusedOnly(t *testing.T) {
+	cases := []struct {
+		name     string
+		statuses []int
+		want     bool
+	}{
+		{"a bucket answered only with 401 and 403 is refused", []int{http.StatusUnauthorized, http.StatusForbidden}, true},
+		{"a bucket answered only with a 5xx is not refused", []int{http.StatusServiceUnavailable}, false},
+		{"a bucket refused once and then accepted is not refused", []int{http.StatusUnauthorized, http.StatusOK}, false},
+		{"a bucket without any answer is not refused", nil, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := store(t, 0.5)
+			s.Begin(key, now)
+			for _, status := range tc.statuses {
+				s.End(key, state.Sample{Status: status, Complete: true, Headers: state.HeadersMissing, At: now})
+			}
+
+			got := bucketAt(t, s, now).RefusedOnly()
+
+			if got != tc.want {
+				t.Fatalf("refused only = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
