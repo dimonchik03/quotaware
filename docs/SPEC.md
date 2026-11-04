@@ -144,7 +144,8 @@ A gRPC server implementing KEDA's `ExternalScaler` service
   of the queue activity so the trigger can run as `external-push`. A push only
   re-runs activation; the HPA metric is still refreshed on its own cadence.
 - A raise of the ceiling is limited to `maxStepUp` per `stepInterval` (default 15 s)
-  however often KEDA polls; a drop is immediate. Ceilings are evaluated under one lock
+  however often KEDA polls, counted from the last change of the ceiling before the
+  drain guard; a drop is immediate. Ceilings are evaluated under one lock
   per ScaledObject and bucket, so concurrent polls cannot raise twice.
 
 Trigger metadata: `scalerAddress`, `bucket` (`openai/gpt-4.1-mini`), `concurrency` (k),

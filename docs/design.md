@@ -49,8 +49,9 @@ other; `cmd/quotaware` wires them.
    matches the trigger metadata, the scaler evaluates the domain under one lock per
    consumer: the headroom formula when a usable quota is known, AIMD otherwise, with
    the AIMD guard on top while 429s exceed the threshold. Raises are limited to
-   `maxStepUp` per `stepInterval` from the last change; drops are immediate; the drain
-   guard never reports fewer pods than the open calls need.
+   `maxStepUp` per `stepInterval` from the last change of the bound, the ceiling before
+   the drain guard, so open calls moving the drain floor never delay a raise; drops are
+   immediate; the drain guard never reports fewer pods than the open calls need.
 5. The ceilings are summed across the credentials of the model that the provider has
    accepted at least once with a 2xx or a 429, plus one drain floor over the calls
    still open on credentials it has not answered yet, clamped, and returned as a replica

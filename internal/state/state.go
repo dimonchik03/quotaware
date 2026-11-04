@@ -170,13 +170,13 @@ const (
 )
 
 type Ceiling struct {
-	Consumer  Consumer
-	Value     int
-	Bound     int
-	Mode      Mode
-	ChangedAt time.Time
-	Seen      time.Time
-	HoldUntil time.Time
+	Consumer       Consumer
+	Value          int
+	Bound          int
+	Mode           Mode
+	BoundChangedAt time.Time
+	Seen           time.Time
+	HoldUntil      time.Time
 }
 
 const (
