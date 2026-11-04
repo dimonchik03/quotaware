@@ -60,9 +60,9 @@ func (c Config) Validate() error {
 	switch {
 	case c.Concurrency <= 0:
 		return errors.New("concurrency must be positive")
-	case c.Safety <= 0 || c.Safety > 1:
+	case math.IsNaN(c.Safety) || c.Safety <= 0 || c.Safety > 1:
 		return errors.New("safety must be within (0, 1]")
-	case c.Share <= 0 || c.Share > 1:
+	case math.IsNaN(c.Share) || c.Share <= 0 || c.Share > 1:
 		return errors.New("share must be within (0, 1]")
 	case c.Window <= 0:
 		return errors.New("window must be positive")

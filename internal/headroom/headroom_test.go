@@ -1,6 +1,7 @@
 package headroom_test
 
 import (
+	"math"
 	"testing"
 	"time"
 
@@ -315,6 +316,8 @@ func TestConfigValidate(t *testing.T) {
 		{"rejects a zero safety factor", func(c *headroom.Config) { c.Safety = 0 }},
 		{"rejects a safety factor above one", func(c *headroom.Config) { c.Safety = 1.5 }},
 		{"rejects a zero share", func(c *headroom.Config) { c.Share = 0 }},
+		{"rejects a safety factor that is not a number", func(c *headroom.Config) { c.Safety = math.NaN() }},
+		{"rejects a share that is not a number", func(c *headroom.Config) { c.Share = math.NaN() }},
 		{"rejects a zero window", func(c *headroom.Config) { c.Window = 0 }},
 		{"rejects negative min replicas", func(c *headroom.Config) { c.MinReplicas = -1 }},
 		{"rejects zero max replicas", func(c *headroom.Config) { c.MaxReplicas = 0 }},

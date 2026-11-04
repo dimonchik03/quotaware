@@ -2,6 +2,7 @@ package state_test
 
 import (
 	"errors"
+	"math"
 	"net/http"
 	"testing"
 	"time"
@@ -494,7 +495,7 @@ func TestStore(t *testing.T) {
 	})
 
 	t.Run("rejects an alpha outside the unit interval", func(t *testing.T) {
-		for _, alpha := range []float64{0, -0.1, 1.5} {
+		for _, alpha := range []float64{0, -0.1, 1.5, math.NaN()} {
 			if _, err := state.New(alpha); err == nil {
 				t.Fatalf("alpha %v accepted", alpha)
 			}
