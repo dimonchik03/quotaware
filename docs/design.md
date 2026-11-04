@@ -84,6 +84,11 @@ header-derived ceiling: a burst of 429s halves it even when the headers still lo
 healthy. Both act on the ceiling before the drain guard, and the store keeps that
 bound next to the reported value (ADR 0006).
 
+The shared trigger also honors an active retry hold on any matching credential.
+An optional workload label identifies which open calls contribute to its drain floor.
+The combined gauge shows the available ceiling before the Redis demand cap.
+[ADR 0012](adr/0012-shared-holds-and-workload-drain.md) records both scopes.
+
 ## Concurrency model
 
 The store is a mutex around plain maps. The proxy touches it twice per call, the

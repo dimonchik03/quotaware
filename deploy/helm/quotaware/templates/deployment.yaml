@@ -1,3 +1,6 @@
+{{- if lt (.Values.maxScaledObjects | int) 2 }}
+{{- fail "maxScaledObjects must be at least 2 for one trigger and one credential" }}
+{{- end }}
 {{- if not (or .Values.observe.token .Values.observe.existingSecret .Values.observe.insecure) }}
 {{- fail "quotaware refuses unauthenticated observations: set observe.token, observe.existingSecret, or observe.insecure=true" }}
 {{- end }}

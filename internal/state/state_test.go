@@ -666,3 +666,27 @@ func TestRefusesASlotBudgetThatCannotServeOneTrigger(t *testing.T) {
 		t.Fatal("one slot accepted")
 	}
 }
+
+func TestFinishingACallReleasesOnlyItsWorkload(t *testing.T) {
+	cases := []struct {
+		name   string
+		finish func(*state.Store)
+	}{
+		{"response", func(s *state.Store) { s.End(key, success(100, time.Second), "indexer") }},
+		{"abort", func(s *state.Store) { s.Abort(key, now, "indexer") }},
+		{"transport failure", func(s *state.Store) { s.Fail(key, now, "indexer") }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := store(t, .5)
+			s.Begin(key, now, "indexer")
+			s.Begin(key, now, "summarizer")
+			before := s.Buckets(now)[0]
+			tc.finish(s)
+			after := s.Buckets(now)[0]
+			if before.OpenCalls("indexer") != 1 || after.OpenCalls("indexer") != 0 || after.OpenCalls("summarizer") != 1 || after.InFlight != 1 {
+				t.Fatalf("before=%+v after=%+v", before, after)
+			}
+		})
+	}
+}

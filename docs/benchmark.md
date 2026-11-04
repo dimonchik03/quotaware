@@ -160,6 +160,36 @@ counts each pod's 429 total; the per-minute row and chart use retries, because t
 429 series of a pod only appears at its first 429 and a rate misses that step. In
 these runs every retry followed a 429.
 
+## Changing-quota experiment
+
+`make bench-changing` compares three KEDA policies on the same Redis queue. A reads
+queue depth with a maximum of 30 workers. B reads the same queue with a static
+maximum of 10. C allows up to 30 workers and applies Quotaware with `safety: "1"`
+and `maxStepUp: "4"`. Ten workers match the nominal 600 RPM at two concurrent
+calls per worker and about two seconds per call.
+
+The producer enqueues 15 jobs per second for two minutes, then stops adding work.
+The fake provider starts its window clock on the first request for the model. It
+admits 600 requests in the first minute, 180 in the second, and 600 in every
+subsequent minute. Its token limit stays at two million per minute. The provider
+and scaler restart between arms, and each arm uses fresh workers, the same seed
+and the same HPA settings. The second pass reverses the order from A/B/C to C/B/A. On a Mac,
+`caffeinate -i make bench-changing` keeps the host awake for the experiment.
+The experiment changes the provider's advertised RPM directly. The kind demo in
+the README exercises a separate workload spending a shared quota.
+
+Prometheus scrapes every five seconds. The replica, queue, ceiling and observed
+provider RPM series are exported on a 15-second grid. Pod-seconds integrate live
+worker metrics endpoints, including their 15-second shutdown linger. Job latency
+includes queue wait and is interpolated from a histogram. With two repetitions per
+arm, report both observations and avoid extrapolating to production latency or cost.
+
+The worker pops jobs from Redis before processing them. It finishes a provider call
+already in progress, but SIGTERM interrupts a retry wait. A popped job can then
+be abandoned; the worker counts it separately. The retry and backoff counters
+are charged when a wait is scheduled. Only completed jobs enter the latency
+histogram. An open-call drain floor cannot protect a job that is between attempts.
+
 ## Superseded results, 2026-11-01
 
 `bench/results/2026-11-01/` is kept for the record and should not be quoted. The

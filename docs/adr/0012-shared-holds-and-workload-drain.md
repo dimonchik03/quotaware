@@ -4,7 +4,7 @@ Date: 2026-11-04
 
 ## Status
 
-Proposed. Extends ADRs 0003 and 0010.
+Accepted. Extends ADRs 0003 and 0010.
 
 ## Context
 

@@ -5,7 +5,8 @@ Date: 2026-11-01
 ## Status
 
 Accepted. ADR 0008 makes the observe token required by default; an optional
-`headers_age_ms` field dates the headers of an observation.
+`headers_age_ms` field dates the headers of an observation. Collectors measure
+this age immediately before posting, including any local delivery backlog.
 
 ## Context
 

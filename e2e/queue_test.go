@@ -4,6 +4,11 @@ package e2e
 
 import (
 	"context"
+	"io"
+	"net/http"
+	"os"
+	"os/exec"
+	"strings"
 	"testing"
 	"time"
 
@@ -88,8 +93,72 @@ func TestSingleTriggerModeAgainstRedis(t *testing.T) {
 			t.Fatal(err)
 		}
 
+		if cap := metricValue(t, metricsText(t, adminURL), "quotaware_ceiling", `scaledobject="queued-workers"`, `key="combined"`); cap != 7 {
+			t.Fatalf("pre-demand quota ceiling = %v, want 7", cap)
+		}
 		if value := metrics.GetMetricValues()[0].GetMetricValue(); value != 0 || active.GetResult() {
 			t.Fatalf("value = %d active = %v, want 0 and inactive", value, active.GetResult())
+		}
+	})
+
+	t.Run("keeps only the deployment with an open provider call active after its queue drains", func(t *testing.T) {
+		if os.Getenv("QUOTAWARE_E2E_OWNS_COMPOSE") != "1" {
+			t.Skip("requires the disposable provider started by make e2e")
+		}
+		request, err := http.NewRequestWithContext(ctx, http.MethodPost, proxyURL+"/v1/chat/completions", strings.NewReader(`{"model":"gpt-4.1-workload"}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		request.Header.Set("X-Quotaware-Workload", "indexer")
+		callDone := make(chan error, 1)
+		composeProvider(t, "pause")
+		t.Cleanup(func() {
+			select {
+			case err := <-callDone:
+				if err != nil {
+					t.Error(err)
+				}
+			case <-time.After(10 * time.Second):
+				t.Error("provider call did not finish")
+			}
+		})
+		go func() {
+			response, err := http.DefaultClient.Do(request)
+			if err == nil {
+				_, err = io.Copy(io.Discard, response.Body)
+				_ = response.Body.Close()
+			}
+			callDone <- err
+		}()
+		t.Cleanup(func() { composeProvider(t, "unpause") })
+
+		deadline := time.Now().Add(5 * time.Second)
+		for metricValueOr(metricsText(t, adminURL), "quotaware_inflight", 0, `model="gpt-4.1-workload"`) != 1 {
+			if time.Now().After(deadline) {
+				t.Fatal("call never entered the proxy")
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		for _, tc := range []struct {
+			label string
+			value int64
+		}{{"indexer", 1}, {"summarizer", 0}} {
+			worker := ref("redis:6379")
+			worker.Name = tc.label
+			worker.ScalerMetadata["bucket"] = "openai/gpt-4.1-workload"
+			worker.ScalerMetadata["workload"] = tc.label
+			worker.ScalerMetadata["listName"] = "e2e-" + tc.label
+			active, err := client.IsActive(ctx, worker)
+			if err != nil {
+				t.Fatal(err)
+			}
+			metric, err := client.GetMetrics(ctx, &externalscaler.GetMetricsRequest{ScaledObjectRef: worker})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := metric.GetMetricValues()[0].GetMetricValue(); got != tc.value || active.Result != (tc.value > 0) {
+				t.Fatalf("%s active=%v, replicas=%d; want %d", tc.label, active.Result, got, tc.value)
+			}
 		}
 	})
 
@@ -121,4 +190,15 @@ func TestSingleTriggerModeAgainstRedis(t *testing.T) {
 			t.Fatalf("code = %v (%v), want PermissionDenied", status.Code(err), err)
 		}
 	})
+}
+
+func composeProvider(t *testing.T, action string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "docker", "compose", action, "fakeprovider")
+	cmd.Dir = ".."
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("compose %s fakeprovider: %v: %s", action, err, out)
+	}
 }

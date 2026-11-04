@@ -225,8 +225,8 @@ func lookup(store *state.Store, wanted state.Key) (state.Bucket, bool) {
 }
 
 func TestObserverKeepsProjectTokensWithoutAnOrganizationWindow(t *testing.T) {
-	o, store := observer(t)
 	for _, extra := range []string{"", `,"x-ratelimit-limit-requests":"invalid"`} {
+		o, store := observer(t)
 		body := `{"provider":"openai","model":"m","credential":"anonymous","status":200,"complete":true,"usage":100,"headers":{"x-ratelimit-limit-project-tokens":"6000","x-ratelimit-remaining-project-tokens":"0","x-ratelimit-reset-project-tokens":"30s"` + extra + `}}`
 		if got := observe(o, body).Code; got != http.StatusAccepted {
 			t.Fatal(got)
