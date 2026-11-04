@@ -45,7 +45,7 @@ Detailed rules live in `.claude/rules`. The short version:
 - End to end through Docker Compose: `make e2e` (builds both images, runs the scenario in `e2e/`, tears down)
 - Python collector tests: `pip install -r collector/python/requirements.txt pytest && python -m pytest -q collector/python`
 - KEDA demo on kind: `make demo` (own kubeconfig under `bench/kind/`, never your default context), `make demo-down`
-- Benchmark on kind: `make bench` (two runs, queue trigger versus queue trigger capped by quotaware, results under `bench/results/<date>/`), `make bench-smoke` for a two-minute schedule
+- Benchmark on kind: `make bench` (three runs: the queue trigger alone and capped by quotaware at safety 0.85 and 1, results under `bench/results/<date>/`), `make bench-smoke` for a short schedule
 
 Never run two heavy commands (tests, lint, kind) at the same time on this machine.
 

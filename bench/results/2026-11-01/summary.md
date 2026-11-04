@@ -1,3 +1,5 @@
+Superseded by [2026-11-02](../2026-11-02/summary.md); kept for the record, do not quote.
+
 | Metric | A (queue trigger) | B (queue trigger + quotaware) |
 |---|---|---|
 | Jobs produced | 9900 | 9900 |
