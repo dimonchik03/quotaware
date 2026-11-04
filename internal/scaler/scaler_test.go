@@ -720,7 +720,8 @@ func TestOverGRPC(t *testing.T) {
 	f := newFixture(t)
 	f.observe(bucketA, 900, 500000)
 	listener := bufconn.Listen(1 << 20)
-	server := scaler.NewServer()
+	const servedObjects = 2
+	server := scaler.NewServer(servedObjects)
 	f.service.Register(server)
 	go func() { _ = server.Serve(listener) }()
 	t.Cleanup(server.Stop)
@@ -804,12 +805,10 @@ func TestOverGRPC(t *testing.T) {
 		}
 	})
 
-	t.Run("parks at most the stream limit on one connection and admits the next once one leaves", func(t *testing.T) {
-		own := connect(t)
-		parked, release := context.WithCancel(context.Background())
-		defer release()
-		for range scaler.MaxStreamsPerConnection {
-			stream, err := own.StreamIsActive(parked, ref(capMetadata()))
+	park := func(t *testing.T, own externalscaler.ExternalScalerClient, ctx context.Context) {
+		t.Helper()
+		for range 2 * servedObjects {
+			stream, err := own.StreamIsActive(ctx, ref(capMetadata()))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -817,6 +816,13 @@ func TestOverGRPC(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
+	}
+
+	t.Run("holds a stream beyond two per scaled object it serves on one connection", func(t *testing.T) {
+		own := connect(t)
+		parked, release := context.WithCancel(context.Background())
+		defer release()
+		park(t, own, parked)
 		waiting, stopWaiting := context.WithTimeout(context.Background(), 300*time.Millisecond)
 		defer stopWaiting()
 
@@ -828,14 +834,22 @@ func TestOverGRPC(t *testing.T) {
 		if code(err) != codes.DeadlineExceeded {
 			t.Fatalf("code = %v, want the stream beyond the limit to wait", code(err))
 		}
+	})
+
+	t.Run("admits a stream once a parked one leaves", func(t *testing.T) {
+		own := connect(t)
+		parked, release := context.WithCancel(context.Background())
+		park(t, own, parked)
 		release()
 		admitted, stopAdmitted := context.WithTimeout(context.Background(), 5*time.Second)
 		defer stopAdmitted()
+
 		stream, err := own.StreamIsActive(admitted, ref(capMetadata()))
-		if err != nil {
-			t.Fatal(err)
+		if err == nil {
+			_, err = stream.Recv()
 		}
-		if _, err := stream.Recv(); err != nil {
+
+		if err != nil {
 			t.Fatalf("stream after the others left: %v", err)
 		}
 	})

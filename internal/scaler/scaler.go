@@ -26,12 +26,12 @@ import (
 )
 
 const (
-	MetricName              = "quotaware-ceiling"
-	MaxStreamsPerConnection = 256
+	MetricName             = "quotaware-ceiling"
+	streamsPerScaledObject = 2
 )
 
-func NewServer() *grpc.Server {
-	return grpc.NewServer(grpc.MaxConcurrentStreams(MaxStreamsPerConnection))
+func NewServer(maxScaledObjects int) *grpc.Server {
+	return grpc.NewServer(grpc.MaxConcurrentStreams(uint32(streamsPerScaledObject * maxScaledObjects)))
 }
 
 type QueueDepth interface {
