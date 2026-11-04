@@ -12,7 +12,7 @@
   },
   "panels": [
     {"id": 1, "type": "timeseries", "title": "Replica ceiling", "gridPos": {"x": 0, "y": 0, "w": 12, "h": 8},
-     "targets": [{"expr": "quotaware_ceiling{model=~\"$model\"}", "legendFormat": "{{scaledobject}} {{model}}"}]},
+     "targets": [{"expr": "quotaware_ceiling{model=~\"$model\"}", "legendFormat": "{{scaledobject}} {{trigger}} {{model}}"}]},
     {"id": 2, "type": "timeseries", "title": "429 per minute", "gridPos": {"x": 12, "y": 0, "w": 12, "h": 8},
      "targets": [{"expr": "sum by (model) (rate(quotaware_429_total{model=~\"$model\"}[1m]) * 60)", "legendFormat": "{{model}}"}]},
     {"id": 3, "type": "timeseries", "title": "Remaining requests", "gridPos": {"x": 0, "y": 8, "w": 12, "h": 8},
