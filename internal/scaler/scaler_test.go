@@ -218,6 +218,9 @@ func TestMetadata(t *testing.T) {
 		{"rejects a safety factor above one", map[string]string{"bucket": "openai/gpt-4.1-mini", "concurrency": "4", "safety": "2"}, codes.InvalidArgument},
 		{"rejects an unparseable duration", map[string]string{"bucket": "openai/gpt-4.1-mini", "concurrency": "4", "staleAfter": "soon"}, codes.InvalidArgument},
 		{"rejects queue mode without a list name", map[string]string{"bucket": "openai/gpt-4.1-mini", "concurrency": "4", "redisAddress": "redis:6379"}, codes.InvalidArgument},
+		{"rejects a provider quotaware does not parse", map[string]string{"bucket": "gemini/gemini-2.5-pro", "concurrency": "4"}, codes.InvalidArgument},
+		{"rejects a model longer than the label limit", map[string]string{"bucket": "openai/" + strings.Repeat("m", 257), "concurrency": "4"}, codes.InvalidArgument},
+		{"rejects a credential that is not the hash of a key", map[string]string{"bucket": "openai/gpt-4.1-mini", "concurrency": "4", "credential": "sk-live-not-a-hash"}, codes.InvalidArgument},
 		{"rejects an unknown quota scope", map[string]string{"bucket": "openai/gpt-4.1-mini", "concurrency": "4", "quotaScope": "organisation"}, codes.InvalidArgument},
 		{"rejects a non-positive list length", map[string]string{"bucket": "openai/gpt-4.1-mini", "concurrency": "4", "redisAddress": "redis:6379", "listName": "jobs", "listLength": "0"}, codes.InvalidArgument},
 	}
@@ -526,13 +529,14 @@ func TestGetMetrics(t *testing.T) {
 
 	t.Run("narrows to one credential when the metadata names it", func(t *testing.T) {
 		f := newFixture(t)
-		f.observe(bucketA, 900, 500000)
-		f.observe(state.Key{Provider: "openai", Model: "gpt-4.1-mini", Key: "b"}, 900, 500000)
+		f.observe(state.Key{Provider: "openai", Model: "gpt-4.1-mini", Key: "0123456789ab"}, 900, 500000)
+		f.clock.Advance(time.Second)
+		f.observe(state.Key{Provider: "openai", Model: "gpt-4.1-mini", Key: "ba9876543210"}, 0, 0)
 		metadata := capMetadata()
-		metadata["credential"] = "b"
+		metadata["credential"] = "0123456789ab"
 
 		if got := metric(t, f, metadata); got != 4 {
-			t.Fatalf("ceiling = %d, want 4 for one credential", got)
+			t.Fatalf("ceiling = %d, want 4 from the named credential, not 1 from the newer exhausted one", got)
 		}
 	})
 
@@ -1003,6 +1007,17 @@ func TestOverGRPC(t *testing.T) {
 	go func() { _ = server.Serve(listener) }()
 	t.Cleanup(server.Stop)
 	client := dial(t, listener)
+
+	t.Run("refuses a request larger than any trigger needs", func(t *testing.T) {
+		metadata := capMetadata()
+		metadata["padding"] = strings.Repeat("x", 256<<10)
+
+		_, err := client.GetMetrics(context.Background(), &externalscaler.GetMetricsRequest{ScaledObjectRef: ref(metadata)})
+
+		if code(err) != codes.ResourceExhausted {
+			t.Fatalf("code = %v (%v), want ResourceExhausted for a 256 KiB request", code(err), err)
+		}
+	})
 
 	t.Run("serves metrics over the wire", func(t *testing.T) {
 		response, err := client.GetMetrics(context.Background(), &externalscaler.GetMetricsRequest{ScaledObjectRef: ref(capMetadata())})

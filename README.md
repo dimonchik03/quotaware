@@ -255,8 +255,10 @@ separate organizations for instance, sets `quotaScope: credential` to add their
 ceilings up instead (ADR 0010). `maxStepUp` limits the value KEDA receives as well as
 each credential's ceiling, so a new key cannot lift it past one step, and
 `quotaware_ceiling{key="combined"}` is that value next to the per-credential series. A key the provider has only answered with 401 or 403
-counts for nothing. Set `credential` when other teams' keys for the same model go
-through the same proxy, or their headers may be the newest.
+counts for nothing. Set `credential`, the 12-character hash in the `key` label, when other teams' keys for
+the same model go through the same proxy, or their headers may be the newest. The
+scaler rejects a provider other than openai or anthropic, a model longer than 256
+bytes, a `credential` that is not such a hash, and requests over 64 KiB.
 The remaining knobs (`credential`, `quotaScope`, `safety`, `share`,
 `maxStepUp`, `stepInterval`, `defaultCeiling`, `minReplicas`, `staleAfter`,
 `staleHard`, `window`) and their defaults are listed in `docs/SPEC.md`. A Grafana

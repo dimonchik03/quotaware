@@ -15,6 +15,14 @@ const (
 
 var credentialPattern = regexp.MustCompile(`^([0-9a-f]{12}|anonymous)$`)
 
+func ValidCredential(credential string) bool {
+	return credentialPattern.MatchString(credential)
+}
+
+func ValidProvider(provider string) bool {
+	return provider == "openai" || provider == "anthropic"
+}
+
 type Observation struct {
 	Provider     string            `json:"provider"`
 	Model        string            `json:"model"`
@@ -29,11 +37,11 @@ type Observation struct {
 
 func (o Observation) Validate() error {
 	switch {
-	case o.Provider != "openai" && o.Provider != "anthropic":
+	case !ValidProvider(o.Provider):
 		return errors.New("provider must be openai or anthropic")
 	case o.Model == "" || len(o.Model) > MaxModelBytes:
 		return errors.New("model is required and at most 256 bytes")
-	case !credentialPattern.MatchString(o.Credential):
+	case !ValidCredential(o.Credential):
 		return errors.New("credential must be the 12-character hash or anonymous")
 	case o.Status < 100 || o.Status > 599:
 		return errors.New("status must be an HTTP status code")

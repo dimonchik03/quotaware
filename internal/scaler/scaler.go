@@ -24,6 +24,7 @@ import (
 	"github.com/dimonchik03/quotaware/internal/headroom"
 	"github.com/dimonchik03/quotaware/internal/scaler/externalscaler"
 	"github.com/dimonchik03/quotaware/internal/state"
+	"github.com/dimonchik03/quotaware/internal/usage"
 )
 
 const (
@@ -31,9 +32,11 @@ const (
 	streamsPerScaledObject = 2
 )
 
+const maxRequestBytes = 64 << 10
+
 func NewServer(maxScaledObjects int) *grpc.Server {
 	streams := min(int64(streamsPerScaledObject)*int64(maxScaledObjects), math.MaxUint32)
-	return grpc.NewServer(grpc.MaxConcurrentStreams(uint32(streams)))
+	return grpc.NewServer(grpc.MaxConcurrentStreams(uint32(streams)), grpc.MaxRecvMsgSize(maxRequestBytes))
 }
 
 type QueueDepth interface {
@@ -142,6 +145,12 @@ func (s *Service) parse(ref *externalscaler.ScaledObjectRef) (trigger, error) {
 	provider, model, ok := strings.Cut(bucket, "/")
 	if !ok || provider == "" || model == "" {
 		return trigger{}, status.Error(codes.InvalidArgument, `metadata "bucket" must be "provider/model"`)
+	}
+	if !usage.ValidProvider(provider) || len(model) > usage.MaxModelBytes {
+		return trigger{}, status.Errorf(codes.InvalidArgument, `metadata "bucket" must name openai or anthropic and a model of at most %d bytes`, usage.MaxModelBytes)
+	}
+	if credential, present := metadata["credential"]; present && !usage.ValidCredential(credential) {
+		return trigger{}, status.Error(codes.InvalidArgument, `metadata "credential" must be the 12-character key hash from the key label, or anonymous`)
 	}
 	cfg, err := s.parseConfig(metadata)
 	if err != nil {
