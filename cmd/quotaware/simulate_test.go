@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -46,6 +47,16 @@ func TestSimulate(t *testing.T) {
 		lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
 		if code != 0 || len(lines) != 3 || !strings.HasPrefix(lines[1], "2026-11-01T18:00:00Z\t10\tdrain") || !strings.HasPrefix(lines[2], "2026-11-01T18:00:30Z\t6\tstep_up") {
 			t.Fatalf("exit = %d, stdout = %q, want the drain floor of 10 and then a raise from the bound of 4 by two to 6", code, stdout.String())
+		}
+	})
+
+	t.Run("fails with 1 when the output cannot be written", func(t *testing.T) {
+		var stderr bytes.Buffer
+
+		code := run([]string{"simulate", "-input", "testdata/observations.jsonl"}, strings.NewReader(""), failingWriter{}, &stderr)
+
+		if code != 1 || !strings.Contains(stderr.String(), "write") {
+			t.Fatalf("exit = %d, stderr = %q, want 1 naming the write", code, stderr.String())
 		}
 	})
 
@@ -154,4 +165,10 @@ func TestSimulate(t *testing.T) {
 			t.Fatalf("exit code = %d, want 1", code)
 		}
 	})
+}
+
+type failingWriter struct{}
+
+func (failingWriter) Write([]byte) (int, error) {
+	return 0, errors.New("no space left on device")
 }
