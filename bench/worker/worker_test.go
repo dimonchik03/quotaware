@@ -56,6 +56,7 @@ type fixture struct {
 	registry   *prometheus.Registry
 	statuses   []int
 	retryAfter string
+	breakFirst bool
 	hold       time.Duration
 	calls      atomic.Int64
 	open       atomic.Int64
@@ -82,6 +83,12 @@ func newFixture(t *testing.T, statuses ...int) *fixture {
 		defer f.open.Add(-1)
 		time.Sleep(f.hold)
 		index := int(f.calls.Add(1)) - 1
+		if index == 0 && f.breakFirst {
+			w.Header().Set("Content-Length", "100")
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, `{"usage":`)
+			return
+		}
 		status := http.StatusOK
 		if index < len(f.statuses) {
 			status = f.statuses[index]
@@ -204,6 +211,18 @@ func TestWorker(t *testing.T) {
 
 		if counter(f.metrics.Calls.WithLabelValues("503")) != 3 || counter(f.metrics.Completed) != 0 {
 			t.Fatalf("503s = %v completed = %v, want three attempts and no completion", counter(f.metrics.Calls.WithLabelValues("503")), counter(f.metrics.Completed))
+		}
+	})
+
+	t.Run("retries a success whose body broke before the end instead of counting the job done", func(t *testing.T) {
+		f := newFixture(t)
+		f.breakFirst = true
+		f.queue.push(t, worker.Job{ID: 5, EnqueuedAt: time.Now(), PromptTokens: 20})
+
+		f.run(t, fastConfig(), func() bool { return counter(f.metrics.Completed) == 1 })
+
+		if f.calls.Load() != 2 || counter(f.metrics.Retries) != 1 {
+			t.Fatalf("calls = %d retries = %v, want the broken body retried once", f.calls.Load(), counter(f.metrics.Retries))
 		}
 	})
 

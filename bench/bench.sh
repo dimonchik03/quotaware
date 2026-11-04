@@ -23,17 +23,30 @@ log "deploying Prometheus"
 kubectl apply -f bench/prometheus/prometheus.yaml >/dev/null
 kubectl -n "$namespace" rollout status deploy/prometheus --timeout 120s >/dev/null
 
+duration_seconds() {
+  local rest=$1 total=0
+  while [[ $rest =~ ^([0-9]+)([hms])(.*)$ ]]; do
+    case "${BASH_REMATCH[2]}" in
+      h) total=$(( total + BASH_REMATCH[1] * 3600 )) ;;
+      m) total=$(( total + BASH_REMATCH[1] * 60 )) ;;
+      s) total=$(( total + BASH_REMATCH[1] )) ;;
+    esac
+    rest=${BASH_REMATCH[3]}
+  done
+  if [ -n "$rest" ] || [ -z "$1" ]; then
+    echo "unsupported duration $1" >&2
+    exit 1
+  fi
+  echo "$total"
+}
+
 phase_seconds() {
-  local total=0
+  local total=0 seconds
   IFS=',' read -ra items <<<"$1"
   for item in "${items[@]}"; do
     IFS=':' read -r _ duration _ <<<"$item"
-    case "$duration" in
-      *h) total=$(( total + ${duration%h} * 3600 )) ;;
-      *m) total=$(( total + ${duration%m} * 60 )) ;;
-      *s) total=$(( total + ${duration%s} )) ;;
-      *) echo "unsupported duration $duration" >&2; exit 1 ;;
-    esac
+    seconds=$(duration_seconds "$duration") || exit 1
+    total=$(( total + seconds ))
   done
   echo "$total"
 }
@@ -53,10 +66,18 @@ export_series() {
   local dir=$1 start=$2 end=$3 window=$4 label=$5
   kubectl -n "$namespace" port-forward svc/prometheus "$local_port:9090" >/dev/null 2>&1 &
   forward_pid=$!
-  for i in $(seq 1 30); do
-    curl -sf "http://localhost:$local_port/-/ready" >/dev/null && break
+  local ready=false
+  for _ in $(seq 1 30); do
+    if curl -sf "http://localhost:$local_port/-/ready" >/dev/null; then
+      ready=true
+      break
+    fi
     sleep 1
   done
+  if [ "$ready" != true ]; then
+    echo "the Prometheus port-forward never became ready" >&2
+    exit 1
+  fi
   range() {
     curl -sf "http://localhost:$local_port/api/v1/query_range" \
       --data-urlencode "query=$2" --data-urlencode "start=$start" --data-urlencode "end=$end" --data-urlencode "step=$step" \

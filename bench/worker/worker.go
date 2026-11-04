@@ -116,8 +116,7 @@ func New(cfg Config, queue Queue, client *http.Client, metrics *Metrics, now fun
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
-	switch {
-	case queue == nil || client == nil || metrics == nil || now == nil || logger == nil:
+	if queue == nil || client == nil || metrics == nil || now == nil || logger == nil {
 		return nil, errors.New("queue, client, metrics, clock and logger are required")
 	}
 	return &Worker{cfg: cfg, queue: queue, client: client, metrics: metrics, now: now, sleep: sleepContext, logger: logger}, nil
@@ -232,7 +231,10 @@ func (w *Worker) call(job Job) outcome {
 		return outcome{retryable: true, status: "error"}
 	}
 	defer func() { _ = response.Body.Close() }()
-	_, _ = io.Copy(io.Discard, response.Body)
+	if _, err := io.Copy(io.Discard, response.Body); err != nil && response.StatusCode >= 200 && response.StatusCode < 300 {
+		w.metrics.Calls.WithLabelValues("error").Inc()
+		return outcome{retryable: true, status: "error"}
+	}
 	status := strconv.Itoa(response.StatusCode)
 	w.metrics.Calls.WithLabelValues(status).Inc()
 	switch {
