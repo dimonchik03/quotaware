@@ -1,6 +1,6 @@
 module github.com/dimonchik03/quotaware
 
-go 1.26.5
+go 1.26.10
 
 require (
 	github.com/prometheus/client_golang v1.25.0
