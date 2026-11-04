@@ -123,8 +123,11 @@ type window struct {
 
 func (w *window) record(at time.Time, rateLimited bool, retryAfter time.Duration) {
 	slot := at.Unix() / binSeconds
-	b := &w.bins[slot%binCount]
-	if b.slot != slot {
+	b := &w.bins[(slot%binCount+binCount)%binCount]
+	switch {
+	case b.slot > slot:
+		return
+	case b.slot < slot:
 		*b = bin{slot: slot}
 	}
 	b.responses++

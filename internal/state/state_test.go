@@ -190,6 +190,33 @@ func TestStore(t *testing.T) {
 		}
 	})
 
+	t.Run("a response dated a window back never wipes the newer bin it maps to", func(t *testing.T) {
+		s := store(t, 0.5)
+		limited := success(0, time.Second)
+		limited.Status = http.StatusTooManyRequests
+		s.End(key, limited)
+		late := success(100, time.Second)
+		late.At = now.Add(-time.Minute)
+
+		s.End(key, late)
+
+		if b := bucketAt(t, s, now); b.Recent.Responses != 1 || b.Recent.RateLimited != 1 {
+			t.Fatalf("recent = %+v, want the 429 kept and the response from a window back ignored", b.Recent)
+		}
+	})
+
+	t.Run("records a response dated before 1970 without failing", func(t *testing.T) {
+		s := store(t, 0.5)
+		old := success(100, time.Second)
+		old.At = time.Unix(-7, 0)
+
+		s.End(key, old)
+
+		if b := bucket(t, s); b.Responses != 1 {
+			t.Fatalf("responses = %d, want the response counted", b.Responses)
+		}
+	})
+
 	t.Run("the 429 window ignores responses the provider did not accept", func(t *testing.T) {
 		s := store(t, 0.5)
 
