@@ -105,14 +105,26 @@ func (s *Service) Close() error {
 	return failure
 }
 
+type quotaScope string
+
+const (
+	quotaShared        quotaScope = "shared"
+	quotaPerCredential quotaScope = "credential"
+)
+
 type trigger struct {
 	fingerprint string
 	provider    string
 	model       string
 	credential  string
+	scope       quotaScope
 	cfg         headroom.Config
 	aimd        aimd.Config
 	queue       *queueTrigger
+}
+
+func (t trigger) matches(key state.Key) bool {
+	return key.Provider == t.provider && key.Model == t.model && (t.credential == "" || key.Key == t.credential)
 }
 
 type queueTrigger struct {
@@ -143,7 +155,22 @@ func (s *Service) parse(ref *externalscaler.ScaledObjectRef) (trigger, error) {
 	if err != nil {
 		return trigger{}, err
 	}
-	return trigger{fingerprint: fingerprint(metadata), provider: provider, model: model, credential: metadata["credential"], cfg: cfg, aimd: fallback, queue: queue}, nil
+	scope, err := parseScope(metadata)
+	if err != nil {
+		return trigger{}, err
+	}
+	return trigger{fingerprint: fingerprint(metadata), provider: provider, model: model, credential: metadata["credential"], scope: scope, cfg: cfg, aimd: fallback, queue: queue}, nil
+}
+
+func parseScope(metadata map[string]string) (quotaScope, error) {
+	switch scope := quotaScope(metadata["quotaScope"]); scope {
+	case "", quotaShared:
+		return quotaShared, nil
+	case quotaPerCredential:
+		return quotaPerCredential, nil
+	default:
+		return "", status.Errorf(codes.InvalidArgument, `metadata "quotaScope" must be %q or %q`, quotaShared, quotaPerCredential)
+	}
 }
 
 const fingerprintBytes = 16
@@ -315,7 +342,9 @@ func (s *Service) GetMetrics(ctx context.Context, request *externalscaler.GetMet
 	if err != nil {
 		return nil, err
 	}
-	value, err := s.ceiling(ref, t)
+	now := s.now()
+	buckets := s.store.Buckets(now)
+	value, err := s.ceiling(ref, t, buckets, now)
 	if err != nil {
 		return nil, err
 	}
@@ -324,7 +353,7 @@ func (s *Service) GetMetrics(ctx context.Context, request *externalscaler.GetMet
 		if err != nil {
 			return nil, err
 		}
-		value = min(value, demand)
+		value = max(min(value, demand), drainFloor(t, buckets))
 	}
 	name := request.GetMetricName()
 	if name == "" {
@@ -394,7 +423,17 @@ func (s *Service) active(ctx context.Context, t trigger) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	return depth > 0, nil
+	return depth > 0 || drainFloor(t, s.store.Buckets(s.now())) > 0, nil
+}
+
+func drainFloor(t trigger, buckets []state.Bucket) int {
+	open := 0
+	for _, b := range buckets {
+		if t.matches(b.Key) && !b.RefusedOnly() {
+			open += b.InFlight
+		}
+	}
+	return headroom.DrainFloor(t.cfg, headroom.Observation{InFlight: open})
 }
 
 func (s *Service) demand(ctx context.Context, q *queueTrigger) (int, error) {
@@ -420,37 +459,69 @@ func (s *Service) queueDepth(ctx context.Context, q *queueTrigger) (int64, error
 	return depth, nil
 }
 
-func (s *Service) ceiling(ref *externalscaler.ScaledObjectRef, t trigger) (int, error) {
-	now := s.now()
-	total, matched, waiting := 0, 0, 0
-	for _, b := range s.store.Buckets(now) {
-		if b.Key.Provider != t.provider || b.Key.Model != t.model || (t.credential != "" && b.Key.Key != t.credential) {
+func (s *Service) ceiling(ref *externalscaler.ScaledObjectRef, t trigger, buckets []state.Bucket, now time.Time) (int, error) {
+	sum, matched, waiting := 0, 0, 0
+	var shared sharedBound
+	for _, b := range buckets {
+		if !t.matches(b.Key) {
 			continue
 		}
 		if !b.Accepted() {
-			if !b.Answered() {
+			if !b.RefusedOnly() {
 				waiting += b.InFlight
 			}
 			continue
 		}
 		matched++
 		consumer := state.Consumer{Namespace: ref.GetNamespace(), ScaledObject: ref.GetName(), Trigger: t.fingerprint, Bucket: b.Key}
-		value, err := s.evaluate(consumer, t, b.Observation(), b.Recent, now)
+		ceiling, err := s.evaluate(consumer, t, b.Observation(), b.Recent, now)
 		if err != nil {
 			return 0, err
 		}
-		total += value
+		sum += ceiling.Value
+		shared = shared.add(b.ObservedAt, ceiling.Bound)
 	}
-	unanswered := headroom.DrainFloor(t.cfg, headroom.Observation{InFlight: waiting})
-	if matched == 0 {
+	floor := drainFloor(t, buckets)
+	switch {
+	case matched == 0:
 		consumer := state.Consumer{Namespace: ref.GetNamespace(), ScaledObject: ref.GetName(), Trigger: t.fingerprint, Bucket: state.Key{Provider: t.provider, Model: t.model, Key: t.credential}}
 		fallback, err := s.evaluate(consumer, t, headroom.Observation{}, state.Recent{}, now)
 		if err != nil {
 			return 0, err
 		}
-		return min(max(fallback, unanswered), t.cfg.MaxReplicas), nil
+		return min(max(fallback.Value, floor), t.cfg.MaxReplicas), nil
+	case t.scope == quotaPerCredential:
+		unanswered := headroom.DrainFloor(t.cfg, headroom.Observation{InFlight: waiting})
+		return min(sum+unanswered, t.cfg.MaxReplicas), nil
+	default:
+		return min(max(shared.bound(), floor), t.cfg.MaxReplicas), nil
 	}
-	return min(total+unanswered, t.cfg.MaxReplicas), nil
+}
+
+type sharedBound struct {
+	freshestAt    time.Time
+	freshest      int
+	largest       int
+	headerDerived bool
+}
+
+func (s sharedBound) add(observedAt time.Time, bound int) sharedBound {
+	s.largest = max(s.largest, bound)
+	switch {
+	case observedAt.IsZero():
+	case !s.headerDerived || observedAt.After(s.freshestAt):
+		s.freshestAt, s.freshest, s.headerDerived = observedAt, bound, true
+	case observedAt.Equal(s.freshestAt):
+		s.freshest = max(s.freshest, bound)
+	}
+	return s
+}
+
+func (s sharedBound) bound() int {
+	if s.headerDerived {
+		return s.freshest
+	}
+	return s.largest
 }
 
 type decision struct {
@@ -463,7 +534,7 @@ type decision struct {
 	podRate     float64
 }
 
-func (s *Service) evaluate(consumer state.Consumer, t trigger, obs headroom.Observation, recent state.Recent, now time.Time) (int, error) {
+func (s *Service) evaluate(consumer state.Consumer, t trigger, obs headroom.Observation, recent state.Recent, now time.Time) (state.Ceiling, error) {
 	var change *decision
 	var from int
 	ceiling, err := s.store.UpdateCeiling(consumer, func(previous state.Ceiling, known bool) state.Ceiling {
@@ -479,9 +550,9 @@ func (s *Service) evaluate(consumer state.Consumer, t trigger, obs headroom.Obse
 	})
 	switch {
 	case errors.Is(err, state.ErrTooManyConsumers):
-		return 0, status.Error(codes.ResourceExhausted, err.Error())
+		return state.Ceiling{}, status.Error(codes.ResourceExhausted, err.Error())
 	case err != nil:
-		return 0, status.Error(codes.Internal, err.Error())
+		return state.Ceiling{}, status.Error(codes.Internal, err.Error())
 	}
 	if change != nil {
 		s.logger.Info("ceiling changed",
@@ -490,7 +561,7 @@ func (s *Service) evaluate(consumer state.Consumer, t trigger, obs headroom.Obse
 			"from", from, "to", change.value, "mode", string(change.mode), "reason", change.reason,
 			"allowed_rate", change.allowedRate, "pod_rate", change.podRate)
 	}
-	return ceiling.Value, nil
+	return ceiling, nil
 }
 
 func decide(t trigger, obs headroom.Observation, recent state.Recent, previous state.Ceiling, known bool, now time.Time) decision {

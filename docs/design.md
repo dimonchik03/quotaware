@@ -52,10 +52,11 @@ other; `cmd/quotaware` wires them.
    `maxStepUp` per `stepInterval` from the last change of the bound, the ceiling before
    the drain guard, so open calls moving the drain floor never delay a raise; drops are
    immediate; the drain guard never reports fewer pods than the open calls need.
-5. The ceilings are summed across the credentials of the model that the provider has
-   accepted at least once with a 2xx or a 429, plus one drain floor over the calls
-   still open on credentials it has not answered yet, clamped, and returned as a replica
-   count. KEDA's `scalingModifiers` take the minimum of the queue demand
+5. The credentials of the model that the provider has accepted at least once with a
+   2xx or a 429 are views of one quota: the bound of the one with the newest headers
+   is the ceiling, raised to one drain floor over the calls open on every credential
+   the provider has not refused, clamped, and returned as a replica count. With
+   `quotaScope: credential` the ceilings are summed instead (ADR 0010). KEDA's `scalingModifiers` take the minimum of the queue demand
    and the ceiling (ADR 0005); the metrics endpoint exposes every number along the way.
 
 ## The ceiling in one formula

@@ -150,18 +150,21 @@ A gRPC server implementing KEDA's `ExternalScaler` service
 
 Trigger metadata: `scalerAddress`, `bucket` (`openai/gpt-4.1-mini`), `concurrency` (k),
 and optionally `credential` (the hashed key label, to narrow a shared model to one
-key), `safety` (0.85), `share` (1), `maxStepUp` (2), `stepInterval` (15s),
+key), `quotaScope` (`shared`, or `credential` when every key has a quota of its own),
+`safety` (0.85), `share` (1), `maxStepUp` (2), `stepInterval` (15s),
 `defaultCeiling` (1), `minReplicas` (1), `maxReplicas` (100, mirror
 `maxReplicaCount` by hand), `staleAfter` (2m), `staleHard` (10m), `window` (1m),
 `aimdThreshold` (0.02), `aimdDecrease` (0.5), `aimdIncrease` (1).
 Ceilings are computed per ScaledObject, trigger and bucket: the state a poll continues
 from is keyed by the namespace, the name and a hash of the trigger metadata, so a
 caller that sends other metadata for the same name evaluates its own entry and never
-moves the one KEDA's trigger reads (ADR 0009). They are summed across the matching
-credentials the provider has accepted at least once with a 2xx or a 429, so a key
-that only ever saw 401s is tracked but never scaled on; calls still open on
-credentials the provider has not answered yet add one drain floor across all of
-them. The total is
+moves the one KEDA's trigger reads (ADR 0009). Only credentials the provider has
+accepted at least once with a 2xx or a 429 are scaled on. By default they are views
+of one quota, since providers scope limits to the organization or project: the
+bound of the bucket with the newest headers is the ceiling, raised to one drain floor
+over the calls open on every matching credential the provider has not refused with
+only 401s and 403s. With `quotaScope: credential` the ceilings are summed instead,
+plus one drain floor for credentials not answered yet (ADR 0010). The result is
 clamped to `maxReplicas`. A cap trigger never reports `IsActive`;
 activation stays with the demand trigger. The scaler trusts nothing in the request
 beyond what it validates: ScaledObject names and namespaces are bounded to 253
@@ -191,7 +194,8 @@ at least one unless scaling to zero on an exhausted quota is intended.
 
 Mode B, single trigger, for clusters where `scalingModifiers` is unavailable:
 quotaware reads the queue depth itself (Redis list in v0.1) and returns
-`min(demand_replicas, ceiling)`; activation follows the queue. The manifest is
+`max(min(demand_replicas, ceiling), drain_floor)`; activation follows the queue and
+the calls still open. The manifest is
 `deploy/examples/scaledobject-mode-b.yaml`.
 
 ### 6. Metrics
