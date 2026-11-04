@@ -19,6 +19,9 @@ spec:
           podSelector:
             matchLabels:
               {{- toYaml .Values.networkPolicy.keda.podSelector | nindent 14 }}
+        {{- with .Values.networkPolicy.grpcFrom }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
       ports:
         - port: {{ .Values.ports.grpc }}
           protocol: TCP

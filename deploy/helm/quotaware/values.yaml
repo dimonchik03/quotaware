@@ -28,6 +28,7 @@ networkPolicy:
     namespace: keda
     podSelector:
       app: keda-operator
+  grpcFrom: []
   proxyFrom: []
   adminFrom: []
 
