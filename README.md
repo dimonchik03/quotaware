@@ -76,8 +76,9 @@ algorithm and prints the replica ceiling it would report for each one:
     2026-11-01T18:00:20Z  3        headroom  7.44          2.00
     2026-11-01T18:00:55Z  3        headroom  6.80          2.00
     2026-11-01T18:00:59Z  3        drain     0.00          2.00
-    2026-11-01T18:01:05Z  4        headroom  8.50          2.00
-    2026-11-01T18:04:00Z  4        frozen    0.00          0.00
+    2026-11-01T18:01:05Z  2        drain     8.50          2.00
+    2026-11-01T18:01:25Z  3        step_up   8.50          2.00
+    2026-11-01T18:04:00Z  3        frozen    0.00          0.00
 
 Each input line is one JSON object describing a bucket at a point in time:
 
@@ -90,10 +91,15 @@ not report it. `project_tokens` is the optional OpenAI project-level token windo
 proxy would hold, `in_flight` the calls currently open. Unknown keys are rejected.
 
 Output is tab-separated. The reason column says which rule produced the number:
-the headroom formula, a clamp to `-min` or `-max`, the `-max-step-up` cap on
-raises, the drain guard that keeps pods alive for calls in flight, a frozen
-ceiling for stale observations, or the default when nothing usable was observed.
-Run with `-h` for every knob.
+the headroom formula, a clamp to `-min` or `-max`, the step-up rule (a raise waits
+`-step-interval` after the last change and then climbs by at most `-max-step-up`),
+the drain guard that keeps pods alive for calls in flight, a frozen ceiling for
+stale observations, or the default when nothing usable was observed. In the run
+above the quota is spent at 18:00:59; after the window resets the raise waits out
+the step interval, the drain guard keeps two pods for the eight open calls, and at
+18:01:25 the ceiling climbs by two. `simulate` replays the headroom rules the scaler applies,
+without the AIMD guard, which needs the 429 history of a live bucket. Run with
+`-h` for every knob.
 
 ## Run the proxy
 
