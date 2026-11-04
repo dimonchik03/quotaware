@@ -119,8 +119,9 @@ Guards:
   says otherwise is rejected instead of clamped.
 
 AIMD fallback when headers are absent, unparseable or stale (Gemini, some gateways,
-Azure variants to be verified): classic congestion control. If the 429 ratio in the
-last minute exceeds `aimdThreshold` (default 0.02), multiply the ceiling by
+Azure variants to be verified): classic congestion control. If the share of 429 among
+the 2xx and 429 responses of the last minute exceeds `aimdThreshold` (default 0.02),
+multiply the ceiling by
 `aimdDecrease` (default 0.5) and hold it until the longest observed `retry-after`
 elapses, at least one minute; otherwise add `aimdIncrease` (default 1) per
 `stepInterval` up to `maxReplicas`. Header mode and AIMD run together; AIMD acts as a
@@ -151,13 +152,25 @@ key), `safety` (0.85), `share` (1), `maxStepUp` (2), `stepInterval` (15s),
 `defaultCeiling` (1), `minReplicas` (1), `maxReplicas` (100, mirror
 `maxReplicaCount` by hand), `staleAfter` (2m), `staleHard` (10m), `window` (1m),
 `aimdThreshold` (0.02), `aimdDecrease` (0.5), `aimdIncrease` (1).
-Ceilings are computed per ScaledObject and per bucket, summed across the credentials
-that match and clamped to `maxReplicas`. A cap trigger never reports `IsActive`;
+Ceilings are computed per ScaledObject, trigger and bucket: the state a poll continues
+from is keyed by the namespace, the name and a hash of the trigger metadata, so a
+caller that sends other metadata for the same name evaluates its own entry and never
+moves the one KEDA's trigger reads (ADR 0009). They are summed across the matching
+credentials the provider has accepted at least once with a 2xx or a 429, so a key
+that only ever saw 401s is tracked but never scaled on; calls still open on
+credentials the provider has not answered yet add one drain floor across all of
+them. The total is
+clamped to `maxReplicas`. A cap trigger never reports `IsActive`;
 activation stays with the demand trigger. The scaler trusts nothing in the request
 beyond what it validates: ScaledObject names and namespaces are bounded to 253
 characters, at most `-max-scaled-objects` (1000) ScaledObjects are served and the
 rest get ResourceExhausted, and single-trigger mode only dials the Redis addresses
 listed with `-redis-address`; any other `redisAddress` is PermissionDenied (ADR 0008).
+One gRPC connection may hold at most two streams per ScaledObject served, a parked
+`StreamIsActive` and a call in flight, because KEDA multiplexes every ScaledObject of
+a scaler address over one connection; a caller that parks streams cannot grow the
+process beyond that (ADR 0009). Editing a trigger's metadata starts its ceiling state
+afresh, as a new quotaware process would.
 
 ### 5. Combining with the existing queue trigger
 
@@ -187,7 +200,8 @@ credential): `quotaware_limit_requests`, `quotaware_remaining_requests`,
 the organization, project, input and output token windows), `quotaware_reset_seconds`
 per window, `quotaware_tokens_per_call`, `quotaware_latency_seconds`,
 `quotaware_inflight`, `quotaware_retry_after_seconds`, `quotaware_rate_limited_ratio`,
-`quotaware_ceiling`, and the counters `quotaware_responses_total`,
+`quotaware_ceiling` (labelled by `namespace`, `scaledobject` and `trigger` as well),
+and the counters `quotaware_responses_total`,
 `quotaware_429_total`, `quotaware_aborted_total`, `quotaware_upstream_errors_total`,
 `quotaware_headers_missing_total`, `quotaware_headers_malformed_total` and
 `quotaware_usage_missing_total`. Unlabelled: `quotaware_buckets`,

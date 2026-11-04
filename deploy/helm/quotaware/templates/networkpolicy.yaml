@@ -1,0 +1,44 @@
+{{- if .Values.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "quotaware.fullname" . }}
+  labels:
+    {{- include "quotaware.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "quotaware.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.keda.namespace }}
+          podSelector:
+            matchLabels:
+              {{- toYaml (.Values.networkPolicy.keda.podSelector | default (dict "app" "keda-operator")) | nindent 14 }}
+        {{- with .Values.networkPolicy.grpcFrom }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      ports:
+        - port: {{ .Values.ports.grpc }}
+          protocol: TCP
+    - from:
+        - podSelector: {}
+        {{- with .Values.networkPolicy.proxyFrom }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      ports:
+        - port: {{ .Values.ports.proxy }}
+          protocol: TCP
+    - from:
+        - podSelector: {}
+        {{- with .Values.networkPolicy.adminFrom }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      ports:
+        - port: {{ .Values.ports.admin }}
+          protocol: TCP
+{{- end }}

@@ -17,7 +17,8 @@ every response; nothing wires them to the autoscaler.
 
 Same queue, same fake provider limited to 600 requests per minute, same job
 schedule. Run A scales on queue depth alone; runs B and C cap the same trigger with
-the quotaware ceiling, at the default safety factor 0.85 and at 1.
+the quotaware ceiling, at the default safety factor 0.85 and at 1, both with
+`maxStepUp: "4"`, twice the default.
 
 ![worker replicas](bench/results/2026-11-02/replicas.svg)
 
@@ -42,8 +43,9 @@ the quotaware ceiling, at the default safety factor 0.85 and at 1.
 
 Read it as a trade-off set by `safety`. At 0.85 quotaware ends every 429 and cuts
 the pod-seconds by more than half, but leaves 20 % of the quota unused, so under
-sustained overload jobs wait 50 % longer. At 1 it matches the baseline's latency
-within 2 % with 43 % of the pod-seconds and 2 % of the 429s. `make bench` reproduces
+sustained overload jobs wait 50 % longer at p95 and twice as long at p50. At 1 it
+matches the baseline's p95 within 2 % and its p50 within 30 %, with 43 % of the
+pod-seconds and 2 % of the 429s. `make bench` reproduces
 all three runs on a laptop; `docs/benchmark.md` has the setup, the hypothesis
 written before the first run, the result against it and how each number is measured.
 
@@ -156,8 +158,14 @@ every release publishes for linux/amd64 and linux/arm64:
 
 The chart refuses to render without `observe.token`, `observe.existingSecret` or an
 explicit `observe.insecure=true`. The proxy, gRPC and admin ports carry no
-authentication of their own: keep them inside the cluster and restrict them with a
-NetworkPolicy to the workers, KEDA and Prometheus.
+authentication of their own, so the chart ships a NetworkPolicy, on by default, that
+admits KEDA's operator from the `keda` namespace to the gRPC port and the release
+namespace to the proxy and admin ports. Set `networkPolicy.keda.namespace` and
+`networkPolicy.keda.podSelector` when KEDA runs elsewhere or under other labels. Peers
+from other namespaces go under `networkPolicy.proxyFrom` for workers that call the
+proxy, `networkPolicy.adminFrom` for collectors posting to `/v1/observe` and for
+Prometheus, and `networkPolicy.grpcFrom` for anything besides KEDA that must reach
+the scaler. A CNI that does not enforce policies ignores it (ADR 0009).
 
 Point your workers at `http://quotaware.llm.svc:8080` and add the ceiling as a second
 trigger next to your queue trigger. KEDA takes the largest value across triggers, so
@@ -195,8 +203,16 @@ single-trigger mode (quotaware reads the Redis list itself and returns the minim
 are in `deploy/examples/`. Single-trigger mode only reads the Redis addresses listed
 in `redisAddresses` (the `-redis-address` flag); any other `redisAddress` in trigger
 metadata is answered with PermissionDenied. Each quotaware serves at most
-`-max-scaled-objects` (1000) ScaledObjects; the rest get ResourceExhausted. The
-remaining knobs (`credential`, `safety`, `share`,
+`-max-scaled-objects` (1000) ScaledObjects; the rest get ResourceExhausted. Ceiling
+state is kept per ScaledObject and trigger metadata, so a caller on the gRPC port
+that sends other metadata for the same name gets its own entry and cannot move yours.
+Editing the trigger metadata, to tune `safety` for instance, starts that state
+afresh: an AIMD ceiling restarts at `defaultCeiling` and a header ceiling skips the
+`maxStepUp` limit once. A credential enters the sum only once the provider has
+answered it with a 2xx or a 429, so a key it rejects with 401 or 403 adds nothing
+(ADR 0009). A 429 counts as an answer, including OpenAI's `insufficient_quota`, so
+set `credential` when other teams' keys go through the same proxy.
+The remaining knobs (`credential`, `safety`, `share`,
 `maxStepUp`, `stepInterval`, `defaultCeiling`, `minReplicas`, `staleAfter`,
 `staleHard`, `window`) and their defaults are listed in `docs/SPEC.md`. A Grafana
 dashboard is in `deploy/grafana/`.
@@ -234,7 +250,8 @@ Buckets without a usable quota, because the provider or a gateway strips the
 headers or the last observation is older than `staleHard`, are driven by AIMD:
 start at `defaultCeiling`, add `aimdIncrease` per `stepInterval` of clean traffic,
 multiply by `aimdDecrease` (0.5) when more than `aimdThreshold` (2 %) of the last
-minute's responses were 429, then hold for the longest `retry-after` seen and at
+minute's accepted responses, 2xx and 429, were 429, then hold for the longest
+`retry-after` seen and at
 least one minute, so one burst is halved once. The same rule guards a header-derived
 ceiling, so a burst of 429s halves it even while the headers still look healthy.
 `quotaware_rate_limited_ratio` shows the share the rule reacts to (ADR 0006).
@@ -275,7 +292,7 @@ Not a gateway, not a rate limiter, not a cost dashboard. See `docs/SPEC.md`.
 
 v0.1.0 is released: binaries for Linux and macOS on the releases page, the image on
 `ghcr.io`, everything in `docs/SPEC.md` implemented and benchmarked. `main` adds the
-network defaults of ADR 0008, the store limits, a worker that never retries before
+network defaults of ADR 0008 and 0009, the store limits, a worker that never retries before
 `retry-after` and the three-run benchmark above, for the next release. See
 `docs/design.md` for how the pieces fit and `docs/release.md` for how a release is
 cut. Specification in `docs/SPEC.md`, decisions in `docs/adr`.

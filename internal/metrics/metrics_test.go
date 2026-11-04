@@ -46,7 +46,7 @@ func populated(t *testing.T) *state.Store {
 	s.End(key, state.Sample{Status: http.StatusTooManyRequests, Complete: true, Headers: state.HeadersPresent, Quotas: quotas, RetryAfter: 20 * time.Second, At: now})
 	s.Begin(key, now)
 	s.Fail(key, now)
-	_, err = s.UpdateCeiling(state.Consumer{Namespace: "jobs", ScaledObject: "llm-workers", Bucket: key}, func(state.Ceiling, bool) state.Ceiling {
+	_, err = s.UpdateCeiling(state.Consumer{Namespace: "jobs", ScaledObject: "llm-workers", Trigger: "7c1d", Bucket: key}, func(state.Ceiling, bool) state.Ceiling {
 		return state.Ceiling{Value: 4, Bound: 4, Mode: state.ModeHeadroom, ChangedAt: now, Seen: now}
 	})
 	if err != nil {
@@ -96,9 +96,9 @@ quotaware_scaled_objects_rejected_total 1
 # HELP quotaware_429_total Responses with status 429.
 # TYPE quotaware_429_total counter
 quotaware_429_total{key="ab12",model="gpt-4.1-mini",provider="openai"} 1
-# HELP quotaware_ceiling Replica ceiling last reported to KEDA for a scaled object and bucket.
+# HELP quotaware_ceiling Replica ceiling of one bucket for a scaled object and trigger, before the sum KEDA receives.
 # TYPE quotaware_ceiling gauge
-quotaware_ceiling{key="ab12",model="gpt-4.1-mini",namespace="jobs",provider="openai",scaledobject="llm-workers"} 4
+quotaware_ceiling{key="ab12",model="gpt-4.1-mini",namespace="jobs",provider="openai",scaledobject="llm-workers",trigger="7c1d"} 4
 # HELP quotaware_inflight Calls currently open through the proxy.
 # TYPE quotaware_inflight gauge
 quotaware_inflight{key="ab12",model="gpt-4.1-mini",provider="openai"} 1
@@ -109,7 +109,7 @@ quotaware_limit_requests{key="ab12",model="gpt-4.1-mini",provider="openai"} 1000
 # TYPE quotaware_limit_tokens gauge
 quotaware_limit_tokens{key="ab12",model="gpt-4.1-mini",provider="openai",window="project_tokens"} 100000
 quotaware_limit_tokens{key="ab12",model="gpt-4.1-mini",provider="openai",window="tokens"} 600000
-# HELP quotaware_rate_limited_ratio Share of responses in the last minute that were 429.
+# HELP quotaware_rate_limited_ratio Share of 429 among the 2xx and 429 responses of the last minute.
 # TYPE quotaware_rate_limited_ratio gauge
 quotaware_rate_limited_ratio{key="ab12",model="gpt-4.1-mini",provider="openai"} 0.5
 # HELP quotaware_remaining_requests Requests remaining in the current window.

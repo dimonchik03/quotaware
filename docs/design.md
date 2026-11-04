@@ -51,8 +51,10 @@ other; `cmd/quotaware` wires them.
    the AIMD guard on top while 429s exceed the threshold. Raises are limited to
    `maxStepUp` per `stepInterval` from the last change; drops are immediate; the drain
    guard never reports fewer pods than the open calls need.
-5. The ceilings are summed across the credentials of the model, clamped, and returned
-   as a replica count. KEDA's `scalingModifiers` take the minimum of the queue demand
+5. The ceilings are summed across the credentials of the model that the provider has
+   accepted at least once with a 2xx or a 429, plus one drain floor over the calls
+   still open on credentials it has not answered yet, clamped, and returned as a replica
+   count. KEDA's `scalingModifiers` take the minimum of the queue demand
    and the ceiling (ADR 0005); the metrics endpoint exposes every number along the way.
 
 ## The ceiling in one formula
@@ -73,7 +75,9 @@ Buckets that never showed a usable quota, or whose last observation is older tha
 `staleHard`, are driven by AIMD: start at `defaultCeiling`, add `aimdIncrease` per
 `stepInterval` of clean traffic, multiply by `aimdDecrease` when the 429 share of the
 last minute exceeds `aimdThreshold`, then hold for the longest `retry-after` seen,
-at least one window, and never halve twice on one burst. The same rule guards a
+at least one window, and never halve twice on one burst. The window counts only the
+responses that carry the provider's verdict on the quota, 2xx and 429, so a 401 or
+an outage neither dilutes the share nor passes for clean traffic (ADR 0009). The same rule guards a
 header-derived ceiling: a burst of 429s halves it even when the headers still look
 healthy. Both act on the ceiling before the drain guard, and the store keeps that
 bound next to the reported value (ADR 0006).
@@ -91,7 +95,11 @@ v0.1; a shared backend is the planned step towards several.
 Nothing that arrives over the network is trusted on its own (ADR 0008). The
 observe endpoint needs a bearer token unless the operator opts out explicitly.
 Trigger metadata may only point single-trigger mode at Redis addresses the operator
-listed. The store caps the buckets and the ScaledObjects it tracks, counts what it
+listed. Ceiling state is keyed by a hash of the trigger metadata next to the
+ScaledObject, so a caller that sends other metadata for the same name evaluates its
+own entry and cannot move the one KEDA continues from, and one gRPC connection may
+hold at most two streams per ScaledObject it serves (ADR 0009). The store caps the
+buckets and the ScaledObjects it tracks, counts what it
 refused, and the scaler bounds the names it accepts, so an unauthenticated caller
 can exhaust neither memory nor label cardinality.
 

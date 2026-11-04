@@ -31,6 +31,11 @@ jobs:
       - run: helm template quotaware deploy/helm/quotaware --set observe.token=example > /dev/null
       - run: helm template quotaware deploy/helm/quotaware --set observe.existingSecret=quotaware-observe > /dev/null
       - run: "! helm template quotaware deploy/helm/quotaware > /dev/null 2>&1"
+      - run: |
+          helm template quotaware deploy/helm/quotaware --set observe.token=example > "$RUNNER_TEMP/with-policy.yaml"
+          grep -q "kind: NetworkPolicy" "$RUNNER_TEMP/with-policy.yaml"
+          helm template quotaware deploy/helm/quotaware --set observe.token=example --set networkPolicy.enabled=false > "$RUNNER_TEMP/without-policy.yaml"
+          if grep -q NetworkPolicy "$RUNNER_TEMP/without-policy.yaml"; then exit 1; fi
 
   e2e:
     runs-on: ubuntu-latest

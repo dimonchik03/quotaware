@@ -172,7 +172,7 @@ func runObserver(command string, args []string, stderr io.Writer, withScaler boo
 			fmt.Fprintf(stderr, "quotaware %s: %v\n", command, err)
 			return 2
 		}
-		rpc = grpc.NewServer()
+		rpc = scaler.NewServer(options.limits.Consumers)
 		service.Register(rpc)
 		defer func() {
 			if err := service.Close(); err != nil {

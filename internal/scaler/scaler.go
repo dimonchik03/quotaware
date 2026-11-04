@@ -2,9 +2,13 @@ package scaler
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"math"
 	"slices"
 	"strconv"
@@ -22,7 +26,15 @@ import (
 	"github.com/dimonchik03/quotaware/internal/state"
 )
 
-const MetricName = "quotaware-ceiling"
+const (
+	MetricName             = "quotaware-ceiling"
+	streamsPerScaledObject = 2
+)
+
+func NewServer(maxScaledObjects int) *grpc.Server {
+	streams := min(int64(streamsPerScaledObject)*int64(maxScaledObjects), math.MaxUint32)
+	return grpc.NewServer(grpc.MaxConcurrentStreams(uint32(streams)))
+}
 
 type QueueDepth interface {
 	Len(ctx context.Context, name string) (int64, error)
@@ -94,12 +106,13 @@ func (s *Service) Close() error {
 }
 
 type trigger struct {
-	provider   string
-	model      string
-	credential string
-	cfg        headroom.Config
-	aimd       aimd.Config
-	queue      *queueTrigger
+	fingerprint string
+	provider    string
+	model       string
+	credential  string
+	cfg         headroom.Config
+	aimd        aimd.Config
+	queue       *queueTrigger
 }
 
 type queueTrigger struct {
@@ -130,7 +143,23 @@ func (s *Service) parse(ref *externalscaler.ScaledObjectRef) (trigger, error) {
 	if err != nil {
 		return trigger{}, err
 	}
-	return trigger{provider: provider, model: model, credential: metadata["credential"], cfg: cfg, aimd: fallback, queue: queue}, nil
+	return trigger{fingerprint: fingerprint(metadata), provider: provider, model: model, credential: metadata["credential"], cfg: cfg, aimd: fallback, queue: queue}, nil
+}
+
+const fingerprintBytes = 16
+
+func fingerprint(metadata map[string]string) string {
+	var encoded []byte
+	for _, name := range slices.Sorted(maps.Keys(metadata)) {
+		encoded = appendField(encoded, name)
+		encoded = appendField(encoded, metadata[name])
+	}
+	sum := sha256.Sum256(encoded)
+	return hex.EncodeToString(sum[:fingerprintBytes])
+}
+
+func appendField(encoded []byte, field string) []byte {
+	return append(binary.AppendUvarint(encoded, uint64(len(field))), field...)
 }
 
 func (s *Service) parseAIMD(metadata map[string]string, cfg headroom.Config) (aimd.Config, error) {
@@ -393,25 +422,35 @@ func (s *Service) queueDepth(ctx context.Context, q *queueTrigger) (int64, error
 
 func (s *Service) ceiling(ref *externalscaler.ScaledObjectRef, t trigger) (int, error) {
 	now := s.now()
-	total := 0
-	matched := 0
+	total, matched, waiting := 0, 0, 0
 	for _, b := range s.store.Buckets(now) {
 		if b.Key.Provider != t.provider || b.Key.Model != t.model || (t.credential != "" && b.Key.Key != t.credential) {
 			continue
 		}
+		if !b.Accepted() {
+			if !b.Answered() {
+				waiting += b.InFlight
+			}
+			continue
+		}
 		matched++
-		consumer := state.Consumer{Namespace: ref.GetNamespace(), ScaledObject: ref.GetName(), Bucket: b.Key}
+		consumer := state.Consumer{Namespace: ref.GetNamespace(), ScaledObject: ref.GetName(), Trigger: t.fingerprint, Bucket: b.Key}
 		value, err := s.evaluate(consumer, t, b.Observation(), b.Recent, now)
 		if err != nil {
 			return 0, err
 		}
 		total += value
 	}
+	unanswered := headroom.DrainFloor(t.cfg, headroom.Observation{InFlight: waiting})
 	if matched == 0 {
-		consumer := state.Consumer{Namespace: ref.GetNamespace(), ScaledObject: ref.GetName(), Bucket: state.Key{Provider: t.provider, Model: t.model, Key: t.credential}}
-		return s.evaluate(consumer, t, headroom.Observation{}, state.Recent{}, now)
+		consumer := state.Consumer{Namespace: ref.GetNamespace(), ScaledObject: ref.GetName(), Trigger: t.fingerprint, Bucket: state.Key{Provider: t.provider, Model: t.model, Key: t.credential}}
+		fallback, err := s.evaluate(consumer, t, headroom.Observation{}, state.Recent{}, now)
+		if err != nil {
+			return 0, err
+		}
+		return min(max(fallback, unanswered), t.cfg.MaxReplicas), nil
 	}
-	return min(total, t.cfg.MaxReplicas), nil
+	return min(total+unanswered, t.cfg.MaxReplicas), nil
 }
 
 type decision struct {
@@ -444,7 +483,7 @@ func (s *Service) evaluate(consumer state.Consumer, t trigger, obs headroom.Obse
 	}
 	if change != nil {
 		s.logger.Info("ceiling changed",
-			"namespace", consumer.Namespace, "scaledobject", consumer.ScaledObject,
+			"namespace", consumer.Namespace, "scaledobject", consumer.ScaledObject, "trigger", consumer.Trigger,
 			"bucket", consumer.Bucket.Provider+"/"+consumer.Bucket.Model, "credential", consumer.Bucket.Key,
 			"from", from, "to", change.value, "mode", string(change.mode), "reason", change.reason,
 			"allowed_rate", change.allowedRate, "pod_rate", change.podRate)

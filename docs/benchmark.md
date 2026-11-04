@@ -19,7 +19,9 @@ provider with the same job schedule.
   seed, so every run sees the same jobs.
 - Run A, the baseline: KEDA Redis list trigger, ten jobs per replica, 1 to 30 pods.
 - Run B: the same trigger capped by the quotaware ceiling through `scalingModifiers`
-  at the default `safety` of 0.85 (`bench/manifests/scaledobject-b.yaml`).
+  at the default `safety` of 0.85, with `concurrency: "2"` to match the worker and
+  `maxStepUp: "4"`, twice the default, so the ceiling may rise by four pods per
+  15 s step (`bench/manifests/scaledobject-b.yaml`).
 - Run C: the same cap with `safety: "1"` (`bench/manifests/scaledobject-c.yaml`).
 - Prometheus scrapes the workers, the producer and quotaware every five seconds;
   `bench/bench.sh` exports the series and `bench/cmd/plot` draws the charts and the
@@ -92,11 +94,13 @@ Run A took 1091 s, run B 1352 s, run C 1128 s, including the drain after the sch
   B's p95 is 689.5 s against A's 457.7 s and the burst drains in 720 s instead of
   450 s, because the default safety factor leaves 20 % of the quota unused:
   floor(600 / 60 × 0.85) is 8 pods, which sustain 480 calls per minute. C reaches the
-  full quota with 10 pods: p95 463.1 s, drain 495 s, 15 429s against 720.
+  full quota with 10 pods: p95 463.1 s, drain 495 s, 15 429s against 720. The median
+  moves more than the tail: p50 is 128.1 s for A, 263.6 s for B and 164.8 s for C.
 
 The trade-off is the safety factor. At 0.85 quotaware buys zero 429s with 50 % more
-latency under sustained overload; at 1 it matches the baseline's latency within 2 %
-at 43 % of the pod-seconds and 2 % of the 429s. C's 15 429s are the fixed window's
+p95 latency and twice the p50 under sustained overload; at 1 it matches the
+baseline's p95 within 2 % and its p50 within 30 % at 43 % of the pod-seconds and
+2 % of the 429s. C's 15 429s are the fixed window's
 edge: ten pods at about one call per second each sit exactly on 600 per minute, and
 latency jitter occasionally pushes a window over.
 

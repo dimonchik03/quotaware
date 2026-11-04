@@ -280,6 +280,80 @@ func TestGetMetrics(t *testing.T) {
 		}
 	})
 
+	t.Run("leaves a credential the provider never accepted out of the sum", func(t *testing.T) {
+		f := newFixture(t)
+		f.observe(bucketA, 900, 500000)
+		for range 3 {
+			f.respond(state.Key{Provider: "openai", Model: "gpt-4.1-mini", Key: "b"}, http.StatusUnauthorized, state.HeadersMissing, 0)
+		}
+
+		if got := metric(t, f, capMetadata()); got != 4 {
+			t.Fatalf("ceiling = %d, want 4 with the refused credential ignored", got)
+		}
+		if ceilings := f.store.Ceilings(); len(ceilings) != 1 {
+			t.Fatalf("recorded = %+v, want no ceiling tracked for the refused credential", ceilings)
+		}
+	})
+
+	t.Run("keeps the drain floor of calls open on a credential the provider has not answered yet", func(t *testing.T) {
+		f := newFixture(t)
+		for range 40 {
+			f.store.Begin(bucketA, f.clock.Now())
+		}
+
+		if got := metric(t, f, capMetadata()); got != 10 {
+			t.Fatalf("ceiling = %d, want ceil(40/4) = 10 pods for the open calls", got)
+		}
+	})
+
+	t.Run("adds the drain floor of an unanswered credential to the ceilings of the answered ones", func(t *testing.T) {
+		f := newFixture(t)
+		f.observe(bucketA, 900, 500000)
+		for range 40 {
+			f.store.Begin(state.Key{Provider: "openai", Model: "gpt-4.1-mini", Key: "b"}, f.clock.Now())
+		}
+
+		if got := metric(t, f, capMetadata()); got != 14 {
+			t.Fatalf("ceiling = %d, want 4 from the headers plus 10 for the open calls", got)
+		}
+	})
+
+	t.Run("leaves the open calls of a credential the provider refused out of the drain floor", func(t *testing.T) {
+		f := newFixture(t)
+		f.observe(bucketA, 900, 500000)
+		refused := state.Key{Provider: "openai", Model: "gpt-4.1-mini", Key: "b"}
+		f.respond(refused, http.StatusUnauthorized, state.HeadersMissing, 0)
+		for range 40 {
+			f.store.Begin(refused, f.clock.Now())
+		}
+
+		if got := metric(t, f, capMetadata()); got != 4 {
+			t.Fatalf("ceiling = %d, want 4 with the refused credential's open calls ignored", got)
+		}
+	})
+
+	t.Run("rounds the drain floor of unanswered credentials once across them", func(t *testing.T) {
+		f := newFixture(t)
+		f.observe(bucketA, 900, 500000)
+		for _, credential := range []string{"b", "c", "d", "e"} {
+			f.store.Begin(state.Key{Provider: "openai", Model: "gpt-4.1-mini", Key: credential}, f.clock.Now())
+		}
+
+		if got := metric(t, f, capMetadata()); got != 5 {
+			t.Fatalf("ceiling = %d, want 4 plus ceil(4/4) = 1 for four single open calls", got)
+		}
+	})
+
+	t.Run("counts a credential that only saw 429s", func(t *testing.T) {
+		f := newFixture(t)
+		f.observe(bucketA, 900, 500000)
+		f.respond(state.Key{Provider: "openai", Model: "gpt-4.1-mini", Key: "b"}, http.StatusTooManyRequests, state.HeadersMissing, 0)
+
+		if got := metric(t, f, capMetadata()); got != 5 {
+			t.Fatalf("ceiling = %d, want 4 plus the default of the rate-limited credential", got)
+		}
+	})
+
 	t.Run("clamps the sum across credentials to maxReplicas", func(t *testing.T) {
 		f := newFixture(t)
 		f.observe(bucketA, 900, 500000)
@@ -350,6 +424,39 @@ func TestGetMetrics(t *testing.T) {
 
 		if first != 2 || second != 2 || third != 2 {
 			t.Fatalf("ceilings = %d, %d, %d, want one raise held for the step interval", first, second, third)
+		}
+	})
+
+	t.Run("keeps the ceiling of a trigger apart from a caller that sends other metadata for the same scaled object", func(t *testing.T) {
+		f := newFixture(t)
+		f.observe(bucketA, 900, 500000)
+		if got := metric(t, f, capMetadata()); got != 4 {
+			t.Fatalf("ceiling = %d, want 4 before the other caller", got)
+		}
+		other := capMetadata()
+		other["maxReplicas"] = "1"
+
+		if got := metric(t, f, other); got != 1 {
+			t.Fatalf("ceiling = %d, want the other caller clamped to its own maxReplicas", got)
+		}
+		if got := metric(t, f, capMetadata()); got != 4 {
+			t.Fatalf("ceiling = %d, want the trigger's own ceiling untouched by the other caller", got)
+		}
+		if ceilings := f.store.Ceilings(); len(ceilings) != 2 || ceilings[0].Consumer.Trigger == ceilings[1].Consumer.Trigger {
+			t.Fatalf("recorded = %+v, want one entry per trigger", ceilings)
+		}
+	})
+
+	t.Run("keeps a trigger apart from a caller that moves its fields across keys", func(t *testing.T) {
+		f := newFixture(t)
+		f.observe(bucketA, 900, 500000)
+		metric(t, f, capMetadata())
+		resplit := map[string]string{"bucket": "openai/gpt-4.1-mini", "concurrency": "4", "defaultCeiling\x001\x00maxStepUp": "100"}
+
+		metric(t, f, resplit)
+
+		if ceilings := f.store.Ceilings(); len(ceilings) != 2 {
+			t.Fatalf("recorded = %+v, want the re-split metadata kept in its own entry", ceilings)
 		}
 	})
 
@@ -455,6 +562,26 @@ func TestAIMD(t *testing.T) {
 
 		if first != 2 || second != 3 {
 			t.Fatalf("ceilings = %d then %d, want the default and one additive increase", first, second)
+		}
+	})
+
+	t.Run("holds the ceiling while the provider answers 5xx instead of counting them as clean traffic", func(t *testing.T) {
+		f := newFixture(t)
+		metadata := capMetadata()
+		metadata["defaultCeiling"] = "2"
+		for range 5 {
+			f.respond(bucketA, http.StatusOK, state.HeadersMissing, 0)
+		}
+		if got := metric(t, f, metadata); got != 2 {
+			t.Fatalf("ceiling = %d, want the default of 2", got)
+		}
+		f.clock.Advance(70 * time.Second)
+		for range 5 {
+			f.respond(bucketA, http.StatusServiceUnavailable, state.HeadersMissing, 0)
+		}
+
+		if got := metric(t, f, metadata); got != 2 {
+			t.Fatalf("ceiling = %d, want the ceiling held through an outage", got)
 		}
 	})
 
@@ -573,8 +700,8 @@ func TestAIMD(t *testing.T) {
 		if inflated != 10 || stillHeld != 10 {
 			t.Fatalf("ceilings = %d then %d, want the drain floor of 10 reported while the guarded bound of 2 stays recorded", inflated, stillHeld)
 		}
-		if ceiling, _ := f.store.Ceiling(state.Consumer{Namespace: "jobs", ScaledObject: "llm-workers", Bucket: bucketA}); ceiling.Bound != 2 {
-			t.Fatalf("bound = %d, want the halved value kept apart from the reported value", ceiling.Bound)
+		if ceilings := f.store.Ceilings(); len(ceilings) != 1 || ceilings[0].Bound != 2 {
+			t.Fatalf("ceilings = %+v, want the halved value kept apart from the reported value", ceilings)
 		}
 	})
 
@@ -655,18 +782,12 @@ func TestOverGRPC(t *testing.T) {
 	f := newFixture(t)
 	f.observe(bucketA, 900, 500000)
 	listener := bufconn.Listen(1 << 20)
-	server := grpc.NewServer()
+	const servedObjects = 2
+	server := scaler.NewServer(servedObjects)
 	f.service.Register(server)
 	go func() { _ = server.Serve(listener) }()
 	t.Cleanup(server.Stop)
-	conn, err := grpc.NewClient("passthrough:///bufconn",
-		grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) { return listener.DialContext(ctx) }),
-		grpc.WithTransportCredentials(insecure.NewCredentials()))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = conn.Close() })
-	client := externalscaler.NewExternalScalerClient(conn)
+	client := dial(t, listener)
 
 	t.Run("serves metrics over the wire", func(t *testing.T) {
 		response, err := client.GetMetrics(context.Background(), &externalscaler.GetMetricsRequest{ScaledObjectRef: ref(capMetadata())})
@@ -735,6 +856,24 @@ func TestOverGRPC(t *testing.T) {
 		}
 	})
 
+	t.Run("holds a stream beyond two per scaled object it serves on one connection", func(t *testing.T) {
+		own := dial(t, listener)
+		parked, release := context.WithCancel(context.Background())
+		defer release()
+		park(t, own, parked, 2*servedObjects)
+		waiting, stopWaiting := context.WithTimeout(context.Background(), 300*time.Millisecond)
+		defer stopWaiting()
+
+		extra, err := own.StreamIsActive(waiting, ref(capMetadata()))
+		if err == nil {
+			_, err = extra.Recv()
+		}
+
+		if code(err) != codes.DeadlineExceeded {
+			t.Fatalf("code = %v, want the stream beyond the limit to wait", code(err))
+		}
+	})
+
 	t.Run("leaves StreamMetricSpec unimplemented so KEDA falls back to polling", func(t *testing.T) {
 		stream, err := client.StreamMetricSpec(context.Background(), ref(capMetadata()))
 		if err != nil {
@@ -747,4 +886,42 @@ func TestOverGRPC(t *testing.T) {
 			t.Fatalf("code = %v, want Unimplemented", code(err))
 		}
 	})
+}
+
+func TestNewServerSaturatesTheStreamCapOfAHugeLimit(t *testing.T) {
+	f := newFixture(t)
+	listener := bufconn.Listen(1 << 20)
+	server := scaler.NewServer(1<<31 + 1)
+	f.service.Register(server)
+	go func() { _ = server.Serve(listener) }()
+	t.Cleanup(server.Stop)
+	parked, release := context.WithTimeout(context.Background(), 5*time.Second)
+	defer release()
+
+	park(t, dial(t, listener), parked, 3)
+}
+
+func dial(t *testing.T, listener *bufconn.Listener) externalscaler.ExternalScalerClient {
+	t.Helper()
+	conn, err := grpc.NewClient("passthrough:///bufconn",
+		grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) { return listener.DialContext(ctx) }),
+		grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	return externalscaler.NewExternalScalerClient(conn)
+}
+
+func park(t *testing.T, client externalscaler.ExternalScalerClient, ctx context.Context, streams int) {
+	t.Helper()
+	for range streams {
+		stream, err := client.StreamIsActive(ctx, ref(capMetadata()))
+		if err == nil {
+			_, err = stream.Recv()
+		}
+		if err != nil {
+			t.Fatalf("stream did not open: %v", err)
+		}
+	}
 }

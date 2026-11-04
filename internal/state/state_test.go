@@ -177,6 +177,21 @@ func TestStore(t *testing.T) {
 		}
 	})
 
+	t.Run("the 429 window ignores responses the provider did not accept", func(t *testing.T) {
+		s := store(t, 0.5)
+
+		s.End(key, state.Sample{Status: http.StatusUnauthorized, Complete: true, Headers: state.HeadersMissing, At: now})
+		s.End(key, state.Sample{Status: http.StatusServiceUnavailable, Complete: true, Headers: state.HeadersMissing, At: now})
+
+		b := bucketAt(t, s, now)
+		if b.Recent.Responses != 0 || b.Recent.RateLimited != 0 {
+			t.Fatalf("recent = %+v, want an empty window after a 401 and a 503", b.Recent)
+		}
+		if b.Responses != 2 {
+			t.Fatalf("responses = %d, want both still counted as responses", b.Responses)
+		}
+	})
+
 	t.Run("a window the new sample does not know keeps its last value", func(t *testing.T) {
 		s := store(t, 0.5)
 		s.End(key, success(1000, 2*time.Second))
@@ -422,8 +437,23 @@ func TestStore(t *testing.T) {
 
 		s.Evict(now.Add(12*time.Minute), 10*time.Minute)
 
-		if _, ok := s.Ceiling(consumer); ok || len(s.Ceilings()) != 0 {
+		if len(s.Ceilings()) != 0 {
 			t.Fatal("ceiling survived although its consumer stopped polling")
+		}
+	})
+
+	t.Run("a scaled object keeps one ceiling per trigger", func(t *testing.T) {
+		s := store(t, 0.5)
+		keep := func(value int) func(state.Ceiling, bool) state.Ceiling {
+			return func(state.Ceiling, bool) state.Ceiling { return state.Ceiling{Value: value, Seen: now} }
+		}
+		updateCeiling(t, s, state.Consumer{Namespace: "jobs", ScaledObject: "llm-workers", Trigger: "b", Bucket: key}, keep(4))
+		updateCeiling(t, s, state.Consumer{Namespace: "jobs", ScaledObject: "llm-workers", Trigger: "a", Bucket: key}, keep(1))
+
+		all := s.Ceilings()
+
+		if len(all) != 2 || all[0].Consumer.Trigger != "a" || all[0].Value != 1 || all[1].Consumer.Trigger != "b" || all[1].Value != 4 {
+			t.Fatalf("ceilings = %+v, want both triggers kept and listed by trigger", all)
 		}
 	})
 
@@ -470,4 +500,31 @@ func TestStore(t *testing.T) {
 			}
 		}
 	})
+}
+
+func TestBucketAccepted(t *testing.T) {
+	cases := []struct {
+		name     string
+		statuses []int
+		want     bool
+	}{
+		{"a bucket the provider only refused is not accepted", []int{http.StatusUnauthorized, http.StatusForbidden}, false},
+		{"a bucket with only upstream failures is not accepted", []int{http.StatusServiceUnavailable}, false},
+		{"a success accepts the bucket", []int{http.StatusUnauthorized, http.StatusOK}, true},
+		{"a 429 alone accepts the bucket", []int{http.StatusTooManyRequests}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := store(t, 0.5)
+			for _, status := range tc.statuses {
+				s.End(key, state.Sample{Status: status, Complete: true, Headers: state.HeadersMissing, At: now})
+			}
+
+			got := bucketAt(t, s, now).Accepted()
+
+			if got != tc.want {
+				t.Fatalf("accepted = %v, want %v", got, tc.want)
+			}
+		})
+	}
 }

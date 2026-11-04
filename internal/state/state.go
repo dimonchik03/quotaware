@@ -81,6 +81,7 @@ type Bucket struct {
 	ObservedAt       time.Time
 	LastSeen         time.Time
 	Responses        int64
+	Succeeded        int64
 	RateLimited      int64
 	Aborted          int64
 	UpstreamErrors   int64
@@ -134,6 +135,14 @@ func (w *window) recent(at time.Time) Recent {
 	return r
 }
 
+func (b Bucket) Accepted() bool {
+	return b.Succeeded > 0 || b.RateLimited > 0
+}
+
+func (b Bucket) Answered() bool {
+	return b.Responses > 0
+}
+
 func (b Bucket) Observation() headroom.Observation {
 	return headroom.Observation{
 		Requests:      b.Quotas.Requests,
@@ -149,6 +158,7 @@ func (b Bucket) Observation() headroom.Observation {
 type Consumer struct {
 	Namespace    string
 	ScaledObject string
+	Trigger      string
 	Bucket       Key
 }
 
@@ -238,13 +248,6 @@ func (s *Store) UpdateCeiling(consumer Consumer, update func(previous Ceiling, k
 	return next, nil
 }
 
-func (s *Store) Ceiling(consumer Consumer) (Ceiling, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	c, ok := s.ceilings[consumer]
-	return c, ok
-}
-
 func (s *Store) Ceilings() []Ceiling {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -264,6 +267,8 @@ func (c Consumer) less(other Consumer) bool {
 		return c.Namespace < other.Namespace
 	case c.ScaledObject != other.ScaledObject:
 		return c.ScaledObject < other.ScaledObject
+	case c.Trigger != other.Trigger:
+		return c.Trigger < other.Trigger
 	default:
 		return c.Bucket.less(other.Bucket)
 	}
@@ -314,11 +319,16 @@ func (s *Store) End(key Key, sample Sample) {
 	b.InFlight = max(b.InFlight-1, 0)
 	b.LastSeen = latest(b.LastSeen, sample.At)
 	b.Responses++
+	if succeeded(sample.Status) {
+		b.Succeeded++
+	}
 	if sample.Status == http.StatusTooManyRequests {
 		b.RateLimited++
 		b.RetryAfter = sample.RetryAfter
 	}
-	s.window(key).record(sample.At, sample.Status == http.StatusTooManyRequests, sample.RetryAfter)
+	if carriesLimits(sample.Status) {
+		s.window(key).record(sample.At, sample.Status == http.StatusTooManyRequests, sample.RetryAfter)
+	}
 	switch sample.Headers {
 	case HeadersPresent:
 		b.Quotas = b.Quotas.merge(sample.Quotas)
