@@ -50,6 +50,14 @@ deploy_base() {
     sh -c 'for i in $(seq 1 30); do nc -z quotaware 9090 && exit 0; sleep 1; done; echo "quotaware:9090 unreachable" >&2; exit 1' >/dev/null
 }
 
+sha256() {
+  if command -v sha256sum >/dev/null; then
+    sha256sum
+  else
+    shasum -a 256
+  fi
+}
+
 credential_hash() {
-  printf 'Bearer %s' "$1" | shasum -a 256 | cut -c1-12
+  printf 'Bearer %s' "$1" | sha256 | cut -c1-12
 }
