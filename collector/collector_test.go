@@ -170,6 +170,28 @@ func TestCollector(t *testing.T) {
 		}
 	})
 
+	t.Run("reports a 429 with its retry-after and no usage", func(t *testing.T) {
+		s := newSink(t, false)
+		upstream := provider(t, func(w http.ResponseWriter, _ *http.Request) {
+			rateLimited(w)
+			w.Header().Set("Retry-After", "7")
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = io.WriteString(w, `{"error":{"type":"rate_limit"}}`)
+		})
+		c := newCollector(t, s.server.URL, nil)
+		client := &http.Client{Transport: c.Wrap(nil)}
+
+		response := mustCall(t, client, upstream.URL, chat)
+		if err := c.Close(); err != nil {
+			t.Fatal(err)
+		}
+
+		o := s.all()[0]
+		if response.StatusCode != http.StatusTooManyRequests || o.Status != http.StatusTooManyRequests || o.Headers["retry-after"] != "7" || o.Usage != nil || !o.Complete {
+			t.Fatalf("observation = %+v, want the 429, its retry-after, no usage and a complete body", o)
+		}
+	})
+
 	t.Run("leaves other requests alone", func(t *testing.T) {
 		s := newSink(t, false)
 		upstream := provider(t, func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, `[]`) })
