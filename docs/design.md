@@ -52,8 +52,8 @@ other; `cmd/quotaware` wires them.
    `maxStepUp` per `stepInterval` from the last change; drops are immediate; the drain
    guard never reports fewer pods than the open calls need.
 5. The ceilings are summed across the credentials of the model that the provider has
-   accepted at least once with a 2xx or a 429, plus the drain floor of calls still open
-   on credentials it has not answered yet, clamped, and returned as a replica
+   accepted at least once with a 2xx or a 429, plus one drain floor over the calls
+   still open on credentials it has not answered yet, clamped, and returned as a replica
    count. KEDA's `scalingModifiers` take the minimum of the queue demand
    and the ceiling (ADR 0005); the metrics endpoint exposes every number along the way.
 

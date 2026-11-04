@@ -157,8 +157,9 @@ from is keyed by the namespace, the name and a hash of the trigger metadata, so 
 caller that sends other metadata for the same name evaluates its own entry and never
 moves the one KEDA's trigger reads (ADR 0009). They are summed across the matching
 credentials the provider has accepted at least once with a 2xx or a 429, so a key
-that only ever saw 401s is tracked but never scaled on; calls still open on a
-credential the provider has not answered yet add their drain floor. The total is
+that only ever saw 401s is tracked but never scaled on; calls still open on
+credentials the provider has not answered yet add one drain floor across all of
+them. The total is
 clamped to `maxReplicas`. A cap trigger never reports `IsActive`;
 activation stays with the demand trigger. The scaler trusts nothing in the request
 beyond what it validates: ScaledObject names and namespaces are bounded to 253

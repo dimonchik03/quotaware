@@ -421,13 +421,15 @@ func (s *Service) queueDepth(ctx context.Context, q *queueTrigger) (int64, error
 
 func (s *Service) ceiling(ref *externalscaler.ScaledObjectRef, t trigger) (int, error) {
 	now := s.now()
-	total, matched, unanswered := 0, 0, 0
+	total, matched, waiting := 0, 0, 0
 	for _, b := range s.store.Buckets(now) {
 		if b.Key.Provider != t.provider || b.Key.Model != t.model || (t.credential != "" && b.Key.Key != t.credential) {
 			continue
 		}
 		if !b.Accepted() {
-			unanswered += headroom.DrainFloor(t.cfg, b.Observation())
+			if !b.Answered() {
+				waiting += b.InFlight
+			}
 			continue
 		}
 		matched++
@@ -438,6 +440,7 @@ func (s *Service) ceiling(ref *externalscaler.ScaledObjectRef, t trigger) (int, 
 		}
 		total += value
 	}
+	unanswered := headroom.DrainFloor(t.cfg, headroom.Observation{InFlight: waiting})
 	if matched == 0 {
 		consumer := state.Consumer{Namespace: ref.GetNamespace(), ScaledObject: ref.GetName(), Trigger: t.fingerprint, Bucket: state.Key{Provider: t.provider, Model: t.model, Key: t.credential}}
 		fallback, err := s.evaluate(consumer, t, headroom.Observation{}, state.Recent{}, now)

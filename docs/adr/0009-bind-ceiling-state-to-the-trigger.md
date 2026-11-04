@@ -45,8 +45,10 @@ anything else. The 429 window counts only responses that carry the provider's ve
 on the quota, 2xx and 429, so a 401, a 403 or a 5xx neither dilutes the ratio nor
 counts as clean traffic. A bucket enters a ScaledObject's sum only once the provider
 has answered its credential at least once with a 2xx or a 429; until then it is
-tracked and exported, and only the drain floor of its open calls counts, so ADR 0003
-still holds for a credential whose first calls are in flight.
+tracked and exported but not scaled on. Calls open on credentials that have no
+answer yet count through one drain floor across all of them, so ADR 0003 still holds
+for a credential whose first calls are in flight, and a credential the provider has
+refused adds nothing.
 
 ## Alternatives considered
 
@@ -79,7 +81,9 @@ A credential that only ever receives 401 or 403 never scales anything and shows 
 in the bucket metrics for the operator to notice. A 429 counts as an answer,
 including OpenAI's `insufficient_quota` for an unfunded key, so a real key of
 another team enters an unpinned ScaledObject's sum; pinning `credential` is the
-answer when keys of several teams share one proxy.
+answer when keys of several teams share one proxy. A caller that keeps many calls
+open on fresh keys still holds `ceil(open / concurrency)` pods until the provider
+answers them, as any caller of the proxy can.
 
 The stream limit bounds what one connection can park; the NetworkPolicy, not the
 limit, is the fence against many connections, and against a caller filling the

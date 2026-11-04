@@ -318,6 +318,32 @@ func TestGetMetrics(t *testing.T) {
 		}
 	})
 
+	t.Run("leaves the open calls of a credential the provider refused out of the drain floor", func(t *testing.T) {
+		f := newFixture(t)
+		f.observe(bucketA, 900, 500000)
+		refused := state.Key{Provider: "openai", Model: "gpt-4.1-mini", Key: "b"}
+		f.respond(refused, http.StatusUnauthorized, state.HeadersMissing, 0)
+		for range 40 {
+			f.store.Begin(refused, f.clock.Now())
+		}
+
+		if got := metric(t, f, capMetadata()); got != 4 {
+			t.Fatalf("ceiling = %d, want 4 with the refused credential's open calls ignored", got)
+		}
+	})
+
+	t.Run("rounds the drain floor of unanswered credentials once across them", func(t *testing.T) {
+		f := newFixture(t)
+		f.observe(bucketA, 900, 500000)
+		for _, credential := range []string{"b", "c", "d", "e"} {
+			f.store.Begin(state.Key{Provider: "openai", Model: "gpt-4.1-mini", Key: credential}, f.clock.Now())
+		}
+
+		if got := metric(t, f, capMetadata()); got != 5 {
+			t.Fatalf("ceiling = %d, want 4 plus ceil(4/4) = 1 for four single open calls", got)
+		}
+	})
+
 	t.Run("counts a credential that only saw 429s", func(t *testing.T) {
 		f := newFixture(t)
 		f.observe(bucketA, 900, 500000)

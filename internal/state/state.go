@@ -139,6 +139,10 @@ func (b Bucket) Accepted() bool {
 	return b.Succeeded > 0 || b.RateLimited > 0
 }
 
+func (b Bucket) Answered() bool {
+	return b.Responses > 0
+}
+
 func (b Bucket) Observation() headroom.Observation {
 	return headroom.Observation{
 		Requests:      b.Quotas.Requests,
