@@ -1,5 +1,13 @@
 version: "2"
 
+run:
+  build-tags:
+    - e2e
+
+formatters:
+  enable:
+    - gofmt
+
 linters:
   settings:
     errcheck:
