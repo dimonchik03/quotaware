@@ -73,13 +73,13 @@ func TestCollector(t *testing.T) {
 # HELP quotaware_buckets Buckets currently tracked.
 # TYPE quotaware_buckets gauge
 quotaware_buckets 1
-# HELP quotaware_buckets_rejected_total Calls on new buckets refused because the bucket limit was reached.
+# HELP quotaware_buckets_rejected_total Store updates on new buckets refused because the bucket limit was reached; a refused proxied call counts at its start and at its end.
 # TYPE quotaware_buckets_rejected_total counter
 quotaware_buckets_rejected_total 1
-# HELP quotaware_scaled_objects Scaled objects currently tracking a ceiling.
+# HELP quotaware_scaled_objects Ceilings currently tracked, one per scaled object, trigger and credential.
 # TYPE quotaware_scaled_objects gauge
 quotaware_scaled_objects 1
-# HELP quotaware_scaled_objects_rejected_total Ceiling evaluations refused because the scaled object limit was reached.
+# HELP quotaware_scaled_objects_rejected_total Ceiling evaluations refused because the ceiling limit was reached.
 # TYPE quotaware_scaled_objects_rejected_total counter
 quotaware_scaled_objects_rejected_total 1
 `

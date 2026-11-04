@@ -164,8 +164,9 @@ them. The total is
 clamped to `maxReplicas`. A cap trigger never reports `IsActive`;
 activation stays with the demand trigger. The scaler trusts nothing in the request
 beyond what it validates: ScaledObject names and namespaces are bounded to 253
-characters, at most `-max-scaled-objects` (1000) ScaledObjects are served and the
-rest get ResourceExhausted, and single-trigger mode only dials the Redis addresses
+characters, at most `-max-scaled-objects` (1000) ceilings are tracked, one per
+ScaledObject, trigger and credential, and a poll that needs another gets
+ResourceExhausted, and single-trigger mode only dials the Redis addresses
 listed with `-redis-address`; any other `redisAddress` is PermissionDenied (ADR 0008).
 One gRPC connection may hold at most two streams per ScaledObject served, a parked
 `StreamIsActive` and a call in flight, because KEDA multiplexes every ScaledObject of
