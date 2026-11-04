@@ -13,19 +13,20 @@ them is KEDA with a queue trigger: Redis list length, RabbitMQ queue depth, SQS
 messages. That works until the real bottleneck appears, which is not CPU and not the
 queue. It is the provider's rate limit: requests per minute and tokens per minute.
 
-Past that point queue-depth scaling creates a positive feedback loop:
+Past that point queue-depth scaling keeps adding pods the quota cannot feed:
 
 1. Queue grows, so the autoscaler adds pods.
 2. More pods means more concurrent provider calls, which trip the limit.
 3. The provider answers 429 with `retry-after`; SDKs back off exponentially.
-4. Pods sit idle in backoff, the queue grows further, the autoscaler adds more pods.
+4. Pods sit idle in backoff while the queue still looks long, so the autoscaler keeps
+   them and adds more.
 5. Spiky traffic also trips acceleration limits (Anthropic) and `slow_down` (OpenAI),
    which fire even below the nominal RPM/TPM.
 
-Cost of the loop: pod-seconds burned while waiting, p95 job latency driven by backoff
-storms rather than by model latency, and retry traffic that counts against RPM.
+Cost: pod-seconds burned while waiting and retry traffic that counts
+against RPM. The extra pods buy no throughput, because the quota caps it either way.
 
-The signal needed to break the loop already exists. Both OpenAI and Anthropic return
+The signal needed to stop it already exists. Both OpenAI and Anthropic return
 limit, remaining and reset headers on every response. Nothing today feeds that signal
 into the autoscaler. quotaware does.
 
@@ -245,7 +246,7 @@ Components under `bench/`:
 - `producer/`: pushes jobs into a Redis list following a phased schedule: 0.5x quota
   for three minutes, 1.0x for three, a 3x burst for four, then four minutes idle. The
   job schedule and prompt sizes come from one seed, so every run sees the same jobs.
-- `worker/` (Go): `BLPOP`, `k` concurrent calls through the proxy, SDK-style retry on
+- `worker/` (Go): `BRPOP`, `k` concurrent calls through the proxy, SDK-style retry on
   429 (exponential backoff with jitter, never before `retry-after`), graceful shutdown
   on SIGTERM that counts the jobs it had to abandon and lingers for the last scrape.
 - `kind/` and `prometheus/`: cluster config, KEDA via Helm, a plain Prometheus scrape

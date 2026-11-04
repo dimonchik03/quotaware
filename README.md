@@ -9,9 +9,10 @@ number.
 
 ## Why
 
-Queue-depth autoscaling past the provider's RPM/TPM limit is a feedback loop: more
-pods, more 429s, more backoff, longer queue, more pods. The headers to stop it are on
-every response; nothing wires them to the autoscaler.
+Past the provider's RPM/TPM limit, queue-depth autoscaling keeps adding pods the
+quota cannot feed: throughput stays at the quota, and the extra capacity goes into
+429s and backoff while the queue still looks long. The headers that say how much
+quota is left are on every response; nothing wires them to the autoscaler.
 
 ## What it changes
 
@@ -43,11 +44,16 @@ the quotaware ceiling, at the default safety factor 0.85 and at 1, both with
 
 Read it as a trade-off set by `safety`. At 0.85 quotaware ends every 429 and cuts
 the pod-seconds by more than half, but leaves 20 % of the quota unused, so under
-sustained overload jobs wait 50 % longer at p95 and twice as long at p50. At 1 it
-matches the baseline's p95 within 2 % and its p50 within 30 %, with 43 % of the
-pod-seconds and 2 % of the 429s. `make bench` reproduces
-all three runs on a laptop; `docs/benchmark.md` has the setup, the hypothesis
-written before the first run, the result against it and how each number is measured.
+sustained overload jobs wait longer: about 50 % at p95 and twice as long at p50, as
+far as the latency histogram resolves. At 1 it ties the baseline's p95 within one
+histogram bucket, with 43 % of the pod-seconds and 2 % of the 429s, while its p50
+sits one bucket higher (about 29 %) and the burst takes 10 % longer to drain. The
+quota and the latency stay constant here, so a static `maxReplicaCount` of 10 would
+likely do as well as C. The ceiling is meant for headroom that moves: the kind demo
+below shows it following another credential's burst on the shared quota, a case the
+benchmark does not measure yet. `make bench` reproduces all three runs on a laptop; `docs/benchmark.md` has
+the setup, the hypothesis written before the first run (C was added after it), the
+result against it and how each number is measured.
 
 ## How it works
 

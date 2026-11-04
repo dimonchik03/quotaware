@@ -1,5 +1,7 @@
 # quotaware benchmark 2026-11-01
 
+Superseded by [2026-11-02](../2026-11-02/README.md); kept for the record, do not quote. [docs/benchmark.md](../../../docs/benchmark.md#superseded-results-2026-11-01) says what was wrong with this run.
+
 Schedule `half:3m:0.5,full:3m:1,burst:4m:3,idle:4m:0` against a fake provider limited to 600 requests per minute, two calls in flight per worker pod, the same seed for both runs.
 
 ![replicas](replicas.svg)
