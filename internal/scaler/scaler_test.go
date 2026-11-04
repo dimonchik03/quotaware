@@ -133,6 +133,12 @@ func capMetadata() map[string]string {
 	return map[string]string{"bucket": "openai/gpt-4.1-mini", "concurrency": "4", "maxStepUp": "100", "defaultCeiling": "1"}
 }
 
+func perCredentialMetadata() map[string]string {
+	metadata := capMetadata()
+	metadata["quotaScope"] = "credential"
+	return metadata
+}
+
 func queueMetadata() map[string]string {
 	metadata := capMetadata()
 	metadata["redisAddress"], metadata["listName"], metadata["listLength"] = "redis:6379", "jobs", "10"
@@ -191,6 +197,7 @@ func TestMetadata(t *testing.T) {
 		{"rejects a safety factor above one", map[string]string{"bucket": "openai/gpt-4.1-mini", "concurrency": "4", "safety": "2"}, codes.InvalidArgument},
 		{"rejects an unparseable duration", map[string]string{"bucket": "openai/gpt-4.1-mini", "concurrency": "4", "staleAfter": "soon"}, codes.InvalidArgument},
 		{"rejects queue mode without a list name", map[string]string{"bucket": "openai/gpt-4.1-mini", "concurrency": "4", "redisAddress": "redis:6379"}, codes.InvalidArgument},
+		{"rejects an unknown quota scope", map[string]string{"bucket": "openai/gpt-4.1-mini", "concurrency": "4", "quotaScope": "organisation"}, codes.InvalidArgument},
 		{"rejects a non-positive list length", map[string]string{"bucket": "openai/gpt-4.1-mini", "concurrency": "4", "redisAddress": "redis:6379", "listName": "jobs", "listLength": "0"}, codes.InvalidArgument},
 	}
 	for _, tc := range cases {
@@ -269,14 +276,51 @@ func TestGetMetrics(t *testing.T) {
 		}
 	})
 
-	t.Run("sums the ceilings of credentials that share a model", func(t *testing.T) {
+	t.Run("takes one ceiling for credentials that share the model's quota", func(t *testing.T) {
 		f := newFixture(t)
 		f.observe(bucketA, 900, 500000)
 		f.observe(state.Key{Provider: "openai", Model: "gpt-4.1-mini", Key: "b"}, 900, 500000)
 		f.observe(state.Key{Provider: "openai", Model: "gpt-4.1", Key: "a"}, 900, 500000)
 
-		if got := metric(t, f, capMetadata()); got != 8 {
+		if got := metric(t, f, capMetadata()); got != 4 {
+			t.Fatalf("ceiling = %d, want 4 for one quota seen through two credentials", got)
+		}
+	})
+
+	t.Run("follows the freshest headers of a quota that several credentials share", func(t *testing.T) {
+		f := newFixture(t)
+		f.observe(bucketA, 900, 500000)
+		f.clock.Advance(30 * time.Second)
+		f.observe(state.Key{Provider: "openai", Model: "gpt-4.1-mini", Key: "b"}, 0, 0)
+
+		if got := metric(t, f, capMetadata()); got != 1 {
+			t.Fatalf("ceiling = %d, want 1 from the exhausted quota the newer headers report", got)
+		}
+	})
+
+	t.Run("sums the ceilings of credentials when each has a quota of its own", func(t *testing.T) {
+		f := newFixture(t)
+		f.observe(bucketA, 900, 500000)
+		f.observe(state.Key{Provider: "openai", Model: "gpt-4.1-mini", Key: "b"}, 900, 500000)
+		f.observe(state.Key{Provider: "openai", Model: "gpt-4.1", Key: "a"}, 900, 500000)
+
+		if got := metric(t, f, perCredentialMetadata()); got != 8 {
 			t.Fatalf("ceiling = %d, want 4 + 4 for the two credentials of the model", got)
+		}
+	})
+
+	t.Run("keeps pods for every call open across the credentials that share the quota", func(t *testing.T) {
+		f := newFixture(t)
+		f.observe(bucketA, 900, 500000)
+		other := state.Key{Provider: "openai", Model: "gpt-4.1-mini", Key: "b"}
+		f.observe(other, 900, 500000)
+		for range 20 {
+			f.store.Begin(bucketA, f.clock.Now())
+			f.store.Begin(other, f.clock.Now())
+		}
+
+		if got := metric(t, f, capMetadata()); got != 10 {
+			t.Fatalf("ceiling = %d, want ceil(40/4) = 10 pods for the calls open on both credentials", got)
 		}
 	})
 
@@ -306,14 +350,40 @@ func TestGetMetrics(t *testing.T) {
 		}
 	})
 
-	t.Run("adds the drain floor of an unanswered credential to the ceilings of the answered ones", func(t *testing.T) {
+	t.Run("raises the shared ceiling to the drain floor of calls open on an unanswered credential", func(t *testing.T) {
 		f := newFixture(t)
 		f.observe(bucketA, 900, 500000)
 		for range 40 {
 			f.store.Begin(state.Key{Provider: "openai", Model: "gpt-4.1-mini", Key: "b"}, f.clock.Now())
 		}
 
-		if got := metric(t, f, capMetadata()); got != 14 {
+		if got := metric(t, f, capMetadata()); got != 10 {
+			t.Fatalf("ceiling = %d, want ceil(40/4) = 10 above the headroom ceiling of 4", got)
+		}
+	})
+
+	t.Run("counts the calls open on a credential whose first answer was a 5xx", func(t *testing.T) {
+		f := newFixture(t)
+		f.observe(bucketA, 900, 500000)
+		failing := state.Key{Provider: "openai", Model: "gpt-4.1-mini", Key: "b"}
+		f.respond(failing, http.StatusServiceUnavailable, state.HeadersMissing, 0)
+		for range 40 {
+			f.store.Begin(failing, f.clock.Now())
+		}
+
+		if got := metric(t, f, capMetadata()); got != 10 {
+			t.Fatalf("ceiling = %d, want ceil(40/4) = 10 for the open calls of a credential the provider did not refuse", got)
+		}
+	})
+
+	t.Run("adds the drain floor of an unanswered credential to the summed ceilings", func(t *testing.T) {
+		f := newFixture(t)
+		f.observe(bucketA, 900, 500000)
+		for range 40 {
+			f.store.Begin(state.Key{Provider: "openai", Model: "gpt-4.1-mini", Key: "b"}, f.clock.Now())
+		}
+
+		if got := metric(t, f, perCredentialMetadata()); got != 14 {
 			t.Fatalf("ceiling = %d, want 4 from the headers plus 10 for the open calls", got)
 		}
 	})
@@ -339,7 +409,7 @@ func TestGetMetrics(t *testing.T) {
 			f.store.Begin(state.Key{Provider: "openai", Model: "gpt-4.1-mini", Key: credential}, f.clock.Now())
 		}
 
-		if got := metric(t, f, capMetadata()); got != 5 {
+		if got := metric(t, f, perCredentialMetadata()); got != 5 {
 			t.Fatalf("ceiling = %d, want 4 plus ceil(4/4) = 1 for four single open calls", got)
 		}
 	})
@@ -349,7 +419,7 @@ func TestGetMetrics(t *testing.T) {
 		f.observe(bucketA, 900, 500000)
 		f.respond(state.Key{Provider: "openai", Model: "gpt-4.1-mini", Key: "b"}, http.StatusTooManyRequests, state.HeadersMissing, 0)
 
-		if got := metric(t, f, capMetadata()); got != 5 {
+		if got := metric(t, f, perCredentialMetadata()); got != 5 {
 			t.Fatalf("ceiling = %d, want 4 plus the default of the rate-limited credential", got)
 		}
 	})
@@ -358,7 +428,7 @@ func TestGetMetrics(t *testing.T) {
 		f := newFixture(t)
 		f.observe(bucketA, 900, 500000)
 		f.observe(state.Key{Provider: "openai", Model: "gpt-4.1-mini", Key: "b"}, 900, 500000)
-		metadata := capMetadata()
+		metadata := perCredentialMetadata()
 		metadata["maxReplicas"] = "6"
 
 		if got := metric(t, f, metadata); got != 6 {
@@ -496,6 +566,19 @@ func TestGetMetrics(t *testing.T) {
 
 		if got := metric(t, f, queueMetadata()); got != 4 {
 			t.Fatalf("metric = %d, want the ceiling of 4 below a demand of 10", got)
+		}
+	})
+
+	t.Run("queue mode never reports fewer pods than the calls still open need", func(t *testing.T) {
+		f := newFixture(t)
+		f.observe(bucketA, 900, 500000)
+		for range 40 {
+			f.store.Begin(bucketA, f.clock.Now())
+		}
+		f.queue.set(0, nil)
+
+		if got := metric(t, f, queueMetadata()); got != 10 {
+			t.Fatalf("metric = %d, want ceil(40/4) = 10 pods for the open calls although the queue is empty", got)
 		}
 	})
 
@@ -779,6 +862,31 @@ func TestIsActive(t *testing.T) {
 
 		if err != nil || !response.GetResult() {
 			t.Fatalf("active = %v err = %v, want active", response.GetResult(), err)
+		}
+	})
+
+	t.Run("a queue trigger stays active while calls are open on an empty list", func(t *testing.T) {
+		f := newFixture(t)
+		f.observe(bucketA, 900, 500000)
+		f.store.Begin(bucketA, f.clock.Now())
+		f.queue.set(0, nil)
+
+		response, err := f.service.IsActive(context.Background(), ref(queueMetadata()))
+
+		if err != nil || !response.GetResult() {
+			t.Fatalf("active = %v err = %v, want active until the open call ends", response.GetResult(), err)
+		}
+	})
+
+	t.Run("a queue trigger is inactive on an empty list without open calls", func(t *testing.T) {
+		f := newFixture(t)
+		f.observe(bucketA, 900, 500000)
+		f.queue.set(0, nil)
+
+		response, err := f.service.IsActive(context.Background(), ref(queueMetadata()))
+
+		if err != nil || response.GetResult() {
+			t.Fatalf("active = %v err = %v, want inactive", response.GetResult(), err)
 		}
 	})
 }

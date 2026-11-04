@@ -84,6 +84,7 @@ type Bucket struct {
 	Responses        int64
 	Succeeded        int64
 	RateLimited      int64
+	Refused          int64
 	Aborted          int64
 	UpstreamErrors   int64
 	HeadersMissing   int64
@@ -140,8 +141,8 @@ func (b Bucket) Accepted() bool {
 	return b.Succeeded > 0 || b.RateLimited > 0
 }
 
-func (b Bucket) Answered() bool {
-	return b.Responses > 0
+func (b Bucket) RefusedOnly() bool {
+	return b.Refused > 0 && !b.Accepted()
 }
 
 func (b Bucket) Observation() headroom.Observation {
@@ -327,6 +328,9 @@ func (s *Store) End(key Key, sample Sample) {
 		b.RateLimited++
 		b.RetryAfter = sample.RetryAfter
 	}
+	if refused(sample.Status) {
+		b.Refused++
+	}
 	if carriesLimits(sample.Status) {
 		s.window(key).record(sample.At, sample.Status == http.StatusTooManyRequests, sample.RetryAfter)
 	}
@@ -464,6 +468,10 @@ func latest(a, b time.Time) time.Time {
 
 func carriesLimits(status int) bool {
 	return succeeded(status) || status == http.StatusTooManyRequests
+}
+
+func refused(status int) bool {
+	return status == http.StatusUnauthorized || status == http.StatusForbidden
 }
 
 func succeeded(status int) bool {

@@ -230,7 +230,8 @@ ScaledObject when the formula result is above `activationTarget` (default 0), so
 exhausted quota with `minReplicaCount: 0` scales to zero; keep `minReplicaCount` at
 one or more when the workers must stay warm. If quotaware is unreachable the HPA
 keeps the current replica count. Full manifests for this mode and for the
-single-trigger mode (quotaware reads the Redis list itself and returns the minimum)
+single-trigger mode (quotaware reads the Redis list itself and returns the minimum,
+never below the pods the open calls need)
 are in `deploy/examples/`. Single-trigger mode only reads the Redis addresses listed
 in `redisAddresses` (the `-redis-address` flag); any other `redisAddress` in trigger
 metadata is answered with PermissionDenied; the reader connects without password or
@@ -241,11 +242,15 @@ state is kept per ScaledObject and trigger metadata, so a caller on the gRPC por
 that sends other metadata for the same name gets its own entry and cannot move yours.
 Editing the trigger metadata, to tune `safety` for instance, starts that state
 afresh: an AIMD ceiling restarts at `defaultCeiling` and a header ceiling skips the
-`maxStepUp` limit once. A credential enters the sum only once the provider has
-answered it with a 2xx or a 429, so a key it rejects with 401 or 403 adds nothing
-(ADR 0009). A 429 counts as an answer, including OpenAI's `insufficient_quota`, so
-set `credential` when other teams' keys go through the same proxy.
-The remaining knobs (`credential`, `safety`, `share`,
+`maxStepUp` limit once. Providers scope rate limits to the organization or project,
+not to the key, so the credentials that match a trigger count as views of one quota:
+the newest headers among them decide the ceiling, and one drain floor covers the calls
+open on all of them. A trigger whose keys each have a quota of their own, keys of
+separate organizations for instance, sets `quotaScope: credential` to add their
+ceilings up instead (ADR 0010). A key the provider has only answered with 401 or 403
+counts for nothing. Set `credential` when other teams' keys for the same model go
+through the same proxy, or their headers may be the newest.
+The remaining knobs (`credential`, `quotaScope`, `safety`, `share`,
 `maxStepUp`, `stepInterval`, `defaultCeiling`, `minReplicas`, `staleAfter`,
 `staleHard`, `window`) and their defaults are listed in `docs/SPEC.md`. A Grafana
 dashboard is in `deploy/grafana/`.
