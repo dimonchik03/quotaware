@@ -7,11 +7,13 @@ import os
 import sys
 import threading
 import time
+import weakref
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import httpx
 import pytest
 
+import quotaware_httpx
 from quotaware_httpx import QuotawareHook, credential_hash, tokens
 
 
@@ -59,7 +61,7 @@ def fake_stream(request):
 
 
 def fake_broken(request):
-    return httpx.Response(200, headers={"content-type": "application/json"}, content=b"not json")
+    return httpx.Response(200, headers={**RATE_LIMIT_HEADERS, "content-type": "application/json"}, content=b"not json")
 
 
 def client_with(hook, transport):
@@ -143,6 +145,7 @@ def test_a_2xx_body_that_is_not_json_still_reports_its_headers(sink):
     _, observation = Sink.received[0]
     assert observation["usage"] is None
     assert observation["complete"] is True
+    assert observation["headers"]["x-ratelimit-remaining-requests"] == "59"
 
 
 def test_counts_rejected_deliveries(sink):
@@ -262,6 +265,7 @@ def test_async_hooks_report_the_headers_of_a_2xx_body_that_is_not_json(sink):
     assert hook.errors == 0
     _, observation = Sink.received[0]
     assert observation["usage"] is None
+    assert observation["headers"]["x-ratelimit-remaining-requests"] == "59"
 
 
 def test_counts_tokens_per_provider_and_tolerates_nulls():
@@ -414,3 +418,148 @@ def test_keeps_reporting_from_a_process_forked_after_the_hook_was_created(sink):
 
     assert os.waitstatus_to_exitcode(status) == 0
     wait_for(lambda: len(Sink.received) == 1)
+
+
+def rate_limited(request):
+    return httpx.Response(429, headers={**RATE_LIMIT_HEADERS, "retry-after": "7", "content-type": "application/json"}, json={"error": {"type": "rate_limit"}})
+
+
+def test_reports_a_429_with_its_retry_after_and_no_usage(sink):
+    hook = QuotawareHook(sink, "openai")
+    response = chat(client_with(hook, rate_limited))
+    hook.close()
+
+    assert response.status_code == 429
+    _, observation = Sink.received[0]
+    assert observation["status"] == 429
+    assert observation["headers"]["retry-after"] == "7"
+    assert observation["headers"]["x-ratelimit-remaining-requests"] == "59"
+    assert observation["complete"] is True
+    assert observation["usage"] is None
+
+
+class AsyncBreakingStream(httpx.AsyncByteStream):
+    async def __aiter__(self):
+        yield b'{"usage":'
+        raise httpx.ReadError("connection reset")
+
+
+def test_async_hooks_let_a_broken_body_reach_the_caller_with_its_own_error(sink):
+    hook = QuotawareHook(sink, "openai")
+
+    def broken(request):
+        return httpx.Response(200, headers={"content-type": "application/json"}, stream=AsyncBreakingStream())
+
+    async def call():
+        async with async_client_with(hook, broken) as client:
+            return await async_chat(client)
+
+    with pytest.raises(httpx.ReadError):
+        asyncio.run(call())
+    hook.close()
+
+    _, observation = Sink.received[0]
+    assert observation["complete"] is False
+
+
+def test_reports_how_long_before_the_end_of_a_stream_its_headers_arrived(sink):
+    hook = QuotawareHook(sink, "openai")
+    client = client_with(hook, streaming(OPENAI_STREAM))
+    with client.stream("POST", "/v1/chat/completions", json={"model": "gpt-4.1-mini", "messages": []}) as response:
+        time.sleep(0.05)
+        response.read()
+    hook.close()
+
+    _, observation = Sink.received[0]
+    assert 40 <= observation["headers_age_ms"] <= observation["latency_ms"]
+
+
+def test_leaves_a_request_body_over_the_limit_unobserved(sink):
+    hook = QuotawareHook(sink, "openai", max_request_bytes=64)
+    client = client_with(hook, fake_openai)
+
+    response = client.post("/v1/chat/completions", json={"model": "gpt-4.1-mini", "messages": [{"role": "user", "content": "x" * 100}]})
+    hook.close()
+
+    assert response.status_code == 200
+    assert hook.unobserved == 1
+    assert hook.errors == 0
+    assert Sink.received == []
+
+
+def test_leaves_a_request_that_is_not_json_unobserved_without_an_error(sink):
+    hook = QuotawareHook(sink, "openai")
+    client = client_with(hook, fake_openai)
+
+    client.post("/v1/chat/completions", content=b"not json")
+    hook.close()
+
+    assert hook.unobserved == 1
+    assert hook.errors == 0
+
+
+def test_leaves_a_request_whose_model_is_not_a_string_unobserved(sink):
+    hook = QuotawareHook(sink, "openai")
+    client = client_with(hook, fake_openai)
+
+    client.post("/v1/chat/completions", json={"model": 4, "messages": []})
+    hook.close()
+
+    assert hook.unobserved == 1
+    assert Sink.received == []
+
+
+def test_reports_the_first_value_of_a_repeated_header(sink):
+    hook = QuotawareHook(sink, "openai")
+
+    def repeated(request):
+        return httpx.Response(200, headers=[("content-type", "application/json"), ("x-ratelimit-remaining-requests", "59"), ("x-ratelimit-remaining-requests", "58")], json={})
+
+    chat(client_with(hook, repeated))
+    hook.close()
+
+    _, observation = Sink.received[0]
+    assert observation["headers"]["x-ratelimit-remaining-requests"] == "59"
+
+
+def test_works_where_the_platform_has_no_fork_hook(sink, monkeypatch):
+    monkeypatch.delattr(os, "register_at_fork")
+
+    hook = QuotawareHook(sink, "openai")
+    chat(client_with(hook, fake_openai))
+    hook.close()
+
+    assert len(Sink.received) == 1
+
+
+def test_a_hook_closed_before_a_fork_stays_closed_in_the_child(sink):
+    hook = QuotawareHook(sink, "openai")
+    hook.close()
+
+    quotaware_httpx._restart_in_child(weakref.ref(hook))
+    chat(client_with(hook, fake_openai))
+
+    assert hook.dropped == 1
+    assert Sink.received == []
+
+
+def test_close_returns_what_is_still_queued_even_without_a_delivery_thread(sink):
+    hook = QuotawareHook(sink, "openai")
+    hook._queue.put(None)
+    hook._thread.join()
+    hook._queue.put_nowait({"provider": "openai"})
+
+    assert hook.close() == 1
+
+
+def test_an_observed_stream_reports_only_when_it_is_closed():
+    reports = []
+    stream = quotaware_httpx.ObservedStream(httpx.ByteStream(b"data: [DONE]\n\n"), lambda complete, body: reports.append(complete))
+
+    chunks = list(stream)
+    before_close = list(reports)
+    stream.close()
+
+    assert chunks == [b"data: [DONE]\n\n"]
+    assert before_close == []
+    assert reports == [True]

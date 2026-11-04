@@ -282,18 +282,21 @@ the ceiling; give the collectors the same token.
     if err != nil {
         return err
     }
-    defer c.Close()
+    defer func() {
+        if err := c.Close(); err != nil {
+            log.Printf("quotaware: %v", err)
+        }
+    }()
     client := &http.Client{Transport: c.Wrap(http.DefaultTransport)}
 
     import os
 
-    import httpx
-    from openai import AsyncOpenAI, OpenAI
+    from openai import AsyncOpenAI, DefaultAsyncHttpxClient, DefaultHttpxClient, OpenAI
     from quotaware_httpx import QuotawareHook
 
     hook = QuotawareHook("http://quotaware:9100", "openai", token=os.environ["QUOTAWARE_OBSERVE_TOKEN"])
-    client = OpenAI(http_client=httpx.Client(event_hooks=hook.hooks()))
-    async_client = AsyncOpenAI(http_client=httpx.AsyncClient(event_hooks=hook.async_hooks()))
+    client = OpenAI(http_client=DefaultHttpxClient(event_hooks=hook.hooks()))
+    async_client = AsyncOpenAI(http_client=DefaultAsyncHttpxClient(event_hooks=hook.async_hooks()))
 
 The Python hook is one module in `collector/python/` with a `pyproject.toml`; copy
 the file or `pip install ./collector/python`. `hooks()` is for `httpx.Client`,
@@ -305,8 +308,14 @@ observed when it is closed, with the latency measured to the end and `complete`
 false if the caller abandoned it; a body that breaks reaches the caller with its own
 error. The Python hook logs through the `quotaware_httpx` logger when deliveries
 start failing and when they recover, restarts its delivery thread in a forked child
-(Celery prefork, gunicorn `--preload`), and `close()` returns how many observations
-it could not deliver; the Go collector's `Close` returns `ErrUndelivered` then.
+(Celery prefork, gunicorn `--preload`) unless it was closed, and works where the
+platform has no fork hook. Both send how long before the end of the call the headers
+arrived, so quotaware dates the quotas by the headers. `close()` returns how many
+observations were still queued when it gave up, and the Go collector's `Close` returns
+`ErrUndelivered` then; deliveries quotaware refused count in `failed` (`Failed()`),
+observations dropped on a full queue in `dropped` (`Dropped()`), and calls whose
+request the hook could not read (a body over 8 MiB, not JSON, or without a string
+`model`) in `unobserved` (`Unobserved()`).
 Collector traffic is not counted as in flight, so the drain guard only sees proxied
 calls (ADR 0007).
 
