@@ -6,9 +6,11 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -53,14 +55,22 @@ func run(args []string) int {
 		return 2
 	}
 
-	server := &http.Server{Addr: *metricsAddress, Handler: promhttp.HandlerFor(registry, promhttp.HandlerOpts{}), ReadHeaderTimeout: 10 * time.Second}
-	go func() {
-		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			logger.Error("metrics server failed", "error", err.Error())
-		}
-	}()
+	listener, err := net.Listen("tcp", *metricsAddress)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "worker: metrics: %v\n", err)
+		return 1
+	}
+	server := &http.Server{Handler: promhttp.HandlerFor(registry, promhttp.HandlerOpts{}), ReadHeaderTimeout: 10 * time.Second}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	var scrapeFailed atomic.Bool
+	go func() {
+		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			logger.Error("metrics server failed, stopping", "error", err.Error())
+			scrapeFailed.Store(true)
+			stop()
+		}
+	}()
 	logger.Info("worker started", "proxy", cfg.ProxyURL, "model", cfg.Model, "concurrency", cfg.Concurrency, "list", cfg.List)
 	w.Run(ctx)
 	logger.Info("worker draining finished, lingering for the last scrape", "linger", linger.String())
@@ -69,6 +79,9 @@ func run(args []string) int {
 	defer cancel()
 	if err := server.Shutdown(shutdown); err != nil {
 		fmt.Fprintf(os.Stderr, "worker: %v\n", err)
+		return 1
+	}
+	if scrapeFailed.Load() {
 		return 1
 	}
 	return 0
