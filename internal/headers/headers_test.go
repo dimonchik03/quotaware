@@ -164,6 +164,32 @@ func onlyMalformed(t *testing.T, limits headers.Limits) *headers.MalformedError 
 	return limits.Malformed[0]
 }
 
+func TestParseRejectsImpossibleCounts(t *testing.T) {
+	cases := []struct {
+		name   string
+		header string
+		value  string
+	}{
+		{"a limit of zero", "x-ratelimit-limit-requests", "0"},
+		{"a negative limit", "x-ratelimit-limit-requests", "-1"},
+		{"a negative remaining", "x-ratelimit-remaining-requests", "-3"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := http.Header{}
+			h.Set("x-ratelimit-limit-requests", "60")
+			h.Set("x-ratelimit-remaining-requests", "59")
+			h.Set(tc.header, tc.value)
+
+			limits, err := headers.Parse(headers.OpenAI, h, now)
+
+			if err != nil || len(limits.Malformed) != 1 || limits.Malformed[0].Header != tc.header || limits.Requests.Known() {
+				t.Fatalf("limits = %+v err = %v, want the window unknown and %s named malformed", limits, err, tc.header)
+			}
+		})
+	}
+}
+
 func TestParseAnthropic(t *testing.T) {
 	t.Run("parses RFC 3339 resets as absolute times", func(t *testing.T) {
 		limits, err := headers.Parse(headers.Anthropic, fixture(t, "anthropic_200.http"), now)

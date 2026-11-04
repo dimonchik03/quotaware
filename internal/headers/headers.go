@@ -58,6 +58,8 @@ var (
 	ErrUnknownProvider = errors.New("unknown provider")
 
 	errAbsentCounterpart = errors.New("limit and remaining must be reported together")
+	errNotPositive       = errors.New("a limit must be positive")
+	errNegative          = errors.New("a remaining count must not be negative")
 )
 
 type MalformedError struct {
@@ -143,6 +145,10 @@ func window(h http.Header, limitName, remainingName, resetName string, now time.
 		return Window{}, &MalformedError{Header: limitName, Err: errAbsentCounterpart}
 	case !remainingPresent:
 		return Window{}, &MalformedError{Header: remainingName, Err: errAbsentCounterpart}
+	case limit <= 0:
+		return Window{}, &MalformedError{Header: limitName, Value: strconv.FormatInt(limit, 10), Err: errNotPositive}
+	case remaining < 0:
+		return Window{}, &MalformedError{Header: remainingName, Value: strconv.FormatInt(remaining, 10), Err: errNegative}
 	}
 	parsed := Window{Limit: limit, Remaining: remaining}
 	value := strings.TrimSpace(h.Get(resetName))
