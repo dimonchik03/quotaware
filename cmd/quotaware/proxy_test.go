@@ -38,6 +38,8 @@ func TestObserverFlags(t *testing.T) {
 	})
 
 	t.Run("refuses to start without an observe token unless insecure is explicit", func(t *testing.T) {
+		t.Setenv("QUOTAWARE_OBSERVE_TOKEN", "")
+
 		_, err := parseObserverFlags("proxy", nil, &bytes.Buffer{}, false)
 
 		if err == nil || !strings.Contains(err.Error(), "observe-insecure") {
@@ -53,6 +55,67 @@ func TestObserverFlags(t *testing.T) {
 		}
 		if options.observeToken != "secret" || options.limits.Buckets != 50 || options.limits.Consumers != 5 {
 			t.Fatalf("options = %+v, want the token and the limits", options)
+		}
+	})
+
+	t.Run("reads the observe token from the environment when the flag is absent", func(t *testing.T) {
+		t.Setenv("QUOTAWARE_OBSERVE_TOKEN", "from-env")
+
+		options, err := parseObserverFlags("proxy", nil, &bytes.Buffer{}, false)
+
+		if err != nil {
+			t.Fatal(err)
+		}
+		if options.observeToken != "from-env" {
+			t.Fatalf("observe token = %q, want the environment value", options.observeToken)
+		}
+	})
+
+	t.Run("prefers the observe token flag over the environment", func(t *testing.T) {
+		t.Setenv("QUOTAWARE_OBSERVE_TOKEN", "from-env")
+
+		options, err := parseObserverFlags("proxy", []string{"-observe-token", "from-flag"}, &bytes.Buffer{}, false)
+
+		if err != nil {
+			t.Fatal(err)
+		}
+		if options.observeToken != "from-flag" {
+			t.Fatalf("observe token = %q, want the flag value", options.observeToken)
+		}
+	})
+
+	t.Run("lets an explicitly empty observe token flag override the environment", func(t *testing.T) {
+		t.Setenv("QUOTAWARE_OBSERVE_TOKEN", "from-env")
+
+		options, err := parseObserverFlags("proxy", []string{"-observe-token=", "-observe-insecure"}, &bytes.Buffer{}, false)
+
+		if err != nil {
+			t.Fatal(err)
+		}
+		if options.observeToken != "" {
+			t.Fatalf("observe token = %q, want the empty flag value", options.observeToken)
+		}
+	})
+
+	t.Run("never prints the observe token from the environment in the usage of a wrong flag", func(t *testing.T) {
+		t.Setenv("QUOTAWARE_OBSERVE_TOKEN", "do-not-print-me")
+		var stderr bytes.Buffer
+
+		code := run([]string{"all", "-no-such-flag"}, strings.NewReader(""), &bytes.Buffer{}, &stderr)
+
+		if code != 2 || strings.Contains(stderr.String(), "do-not-print-me") {
+			t.Fatalf("exit = %d, stderr = %q, want 2 without the token", code, stderr.String())
+		}
+	})
+
+	t.Run("never prints the observe token from the environment in the help text", func(t *testing.T) {
+		t.Setenv("QUOTAWARE_OBSERVE_TOKEN", "do-not-print-me")
+		var stderr bytes.Buffer
+
+		code := run([]string{"proxy", "-h"}, strings.NewReader(""), &bytes.Buffer{}, &stderr)
+
+		if code != 0 || strings.Contains(stderr.String(), "do-not-print-me") || !strings.Contains(stderr.String(), "QUOTAWARE_OBSERVE_TOKEN") {
+			t.Fatalf("exit = %d, stderr = %q, want 0 naming the variable but not its value", code, stderr.String())
 		}
 	})
 
