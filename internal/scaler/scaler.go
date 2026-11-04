@@ -489,13 +489,38 @@ func (s *Service) ceiling(ref *externalscaler.ScaledObjectRef, t trigger, bucket
 		if err != nil {
 			return 0, err
 		}
-		return min(max(fallback.Value, floor), t.cfg.MaxReplicas), nil
+		return s.report(ref, t, fallback.Value, floor, now)
 	case t.scope == quotaPerCredential:
 		unanswered := headroom.DrainFloor(t.cfg, headroom.Observation{InFlight: waiting})
-		return min(sum+unanswered, t.cfg.MaxReplicas), nil
+		return s.report(ref, t, sum+unanswered, floor, now)
 	default:
-		return min(max(shared.bound(), floor), t.cfg.MaxReplicas), nil
+		return s.report(ref, t, shared.bound(), floor, now)
 	}
+}
+
+const CombinedKey = "combined"
+
+func (s *Service) report(ref *externalscaler.ScaledObjectRef, t trigger, bound, floor int, now time.Time) (int, error) {
+	consumer := state.Consumer{Namespace: ref.GetNamespace(), ScaledObject: ref.GetName(), Trigger: t.fingerprint, Bucket: state.Key{Provider: t.provider, Model: t.model, Key: CombinedKey}}
+	ceiling, err := s.store.UpdateCeiling(consumer, func(previous state.Ceiling, known bool) state.Ceiling {
+		limited, _ := headroom.LimitRaise(t.cfg, headroom.Previous{Ceiling: previous.Bound, Known: known, At: previous.BoundChangedAt}, min(bound, t.cfg.MaxReplicas), now)
+		next := state.Ceiling{Value: min(max(limited, floor), t.cfg.MaxReplicas), Bound: limited, Mode: state.ModeCombined, BoundChangedAt: previous.BoundChangedAt, Seen: now}
+		if !known || limited != previous.Bound {
+			next.BoundChangedAt = now
+		}
+		return next
+	})
+	if err != nil {
+		return 0, ceilingError(err)
+	}
+	return ceiling.Value, nil
+}
+
+func ceilingError(err error) error {
+	if errors.Is(err, state.ErrTooManyConsumers) {
+		return status.Error(codes.ResourceExhausted, err.Error())
+	}
+	return status.Error(codes.Internal, err.Error())
 }
 
 type sharedBound struct {
@@ -548,11 +573,8 @@ func (s *Service) evaluate(consumer state.Consumer, t trigger, obs headroom.Obse
 		}
 		return next
 	})
-	switch {
-	case errors.Is(err, state.ErrTooManyConsumers):
-		return state.Ceiling{}, status.Error(codes.ResourceExhausted, err.Error())
-	case err != nil:
-		return state.Ceiling{}, status.Error(codes.Internal, err.Error())
+	if err != nil {
+		return state.Ceiling{}, ceilingError(err)
 	}
 	if change != nil {
 		s.logger.Info("ceiling changed",

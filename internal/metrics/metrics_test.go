@@ -97,7 +97,7 @@ quotaware_scaled_objects_rejected_total 1
 # HELP quotaware_429_total Responses with status 429.
 # TYPE quotaware_429_total counter
 quotaware_429_total{key="ab12",model="gpt-4.1-mini",provider="openai"} 1
-# HELP quotaware_ceiling Replica ceiling of one bucket for a scaled object and trigger, before the credentials of the trigger are combined.
+# HELP quotaware_ceiling Replica ceiling of a scaled object and trigger: one series per credential bucket, and key="combined" for the value KEDA receives.
 # TYPE quotaware_ceiling gauge
 quotaware_ceiling{key="ab12",model="gpt-4.1-mini",namespace="jobs",provider="openai",scaledobject="llm-workers",trigger="7c1d"} 4
 # HELP quotaware_inflight Calls currently open through the proxy.

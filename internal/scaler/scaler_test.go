@@ -134,6 +134,26 @@ func capMetadata() map[string]string {
 	return map[string]string{"bucket": "openai/gpt-4.1-mini", "concurrency": "4", "maxStepUp": "100", "defaultCeiling": "1"}
 }
 
+func bucketCeilings(f *fixture) []state.Ceiling {
+	var buckets []state.Ceiling
+	for _, c := range f.store.Ceilings() {
+		if c.Consumer.Bucket.Key != scaler.CombinedKey {
+			buckets = append(buckets, c)
+		}
+	}
+	return buckets
+}
+
+func combinedCeilings(f *fixture) []state.Ceiling {
+	var combined []state.Ceiling
+	for _, c := range f.store.Ceilings() {
+		if c.Consumer.Bucket.Key == scaler.CombinedKey {
+			combined = append(combined, c)
+		}
+	}
+	return combined
+}
+
 func perCredentialMetadata() map[string]string {
 	metadata := capMetadata()
 	metadata["quotaScope"] = "credential"
@@ -249,7 +269,7 @@ func TestGetMetrics(t *testing.T) {
 		if got := metric(t, f, capMetadata()); got != 1 {
 			t.Fatalf("ceiling = %d, want the default of 1", got)
 		}
-		if ceilings := f.store.Ceilings(); len(ceilings) != 1 || ceilings[0].Value != 1 || ceilings[0].Consumer.Bucket.Model != "gpt-4.1-mini" {
+		if ceilings := bucketCeilings(f); len(ceilings) != 1 || ceilings[0].Value != 1 || ceilings[0].Consumer.Bucket.Model != "gpt-4.1-mini" {
 			t.Fatalf("recorded = %+v, want the default ceiling recorded for the consumer", ceilings)
 		}
 	})
@@ -299,6 +319,73 @@ func TestGetMetrics(t *testing.T) {
 		}
 	})
 
+	t.Run("limits a raise of the value KEDA receives when a new credential reports more headroom", func(t *testing.T) {
+		f := newFixture(t)
+		metadata := capMetadata()
+		metadata["maxStepUp"] = "2"
+		f.observe(bucketA, 0, 0)
+		exhausted := metric(t, f, metadata)
+		f.clock.Advance(20 * time.Second)
+		f.observe(state.Key{Provider: "openai", Model: "gpt-4.1-mini", Key: "b"}, 900, 500000)
+
+		recovering := metric(t, f, metadata)
+
+		if exhausted != 1 || recovering != 3 {
+			t.Fatalf("ceilings = %d then %d, want 1 and then one step of 2, not the new credential's 4", exhausted, recovering)
+		}
+	})
+
+	t.Run("never raises twice when KEDA polls in parallel", func(t *testing.T) {
+		f := newFixture(t)
+		metadata := capMetadata()
+		metadata["maxStepUp"] = "2"
+		f.observe(bucketA, 0, 0)
+		metric(t, f, metadata)
+		f.clock.Advance(20 * time.Second)
+		f.observe(bucketA, 900, 500000)
+		results := make(chan *externalscaler.GetMetricsResponse, 16)
+		failures := make(chan error, 16)
+		var wg sync.WaitGroup
+
+		for range 16 {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				response, err := f.service.GetMetrics(context.Background(), &externalscaler.GetMetricsRequest{ScaledObjectRef: ref(metadata), MetricName: scaler.MetricName})
+				if err != nil {
+					failures <- err
+					return
+				}
+				results <- response
+			}()
+		}
+		wg.Wait()
+		close(results)
+		close(failures)
+
+		for err := range failures {
+			t.Fatal(err)
+		}
+		for response := range results {
+			if got := response.GetMetricValues()[0].GetMetricValue(); got != 3 {
+				t.Fatalf("ceiling = %d, want every parallel poll to see the one raise from 1 to 3", got)
+			}
+		}
+	})
+
+	t.Run("records the value KEDA receives under the combined key", func(t *testing.T) {
+		f := newFixture(t)
+		f.observe(bucketA, 900, 500000)
+		f.observe(state.Key{Provider: "openai", Model: "gpt-4.1-mini", Key: "b"}, 900, 500000)
+
+		metric(t, f, capMetadata())
+
+		combined := combinedCeilings(f)
+		if len(combined) != 1 || combined[0].Value != 4 || len(bucketCeilings(f)) != 2 {
+			t.Fatalf("combined = %+v buckets = %+v, want one combined ceiling of 4 beside the two bucket ceilings", combined, bucketCeilings(f))
+		}
+	})
+
 	t.Run("sums the ceilings of credentials when each has a quota of its own", func(t *testing.T) {
 		f := newFixture(t)
 		f.observe(bucketA, 900, 500000)
@@ -335,7 +422,7 @@ func TestGetMetrics(t *testing.T) {
 		if got := metric(t, f, capMetadata()); got != 4 {
 			t.Fatalf("ceiling = %d, want 4 with the refused credential ignored", got)
 		}
-		if ceilings := f.store.Ceilings(); len(ceilings) != 1 {
+		if ceilings := bucketCeilings(f); len(ceilings) != 1 {
 			t.Fatalf("recorded = %+v, want no ceiling tracked for the refused credential", ceilings)
 		}
 	})
@@ -455,7 +542,7 @@ func TestGetMetrics(t *testing.T) {
 
 		metric(t, f, capMetadata())
 
-		ceilings := f.store.Ceilings()
+		ceilings := bucketCeilings(f)
 		if len(ceilings) != 1 || ceilings[0].Value != 4 || ceilings[0].Consumer.ScaledObject != "llm-workers" || !ceilings[0].BoundChangedAt.Equal(now) {
 			t.Fatalf("recorded ceilings = %+v, want one for llm-workers at 4 changed now", ceilings)
 		}
@@ -532,7 +619,7 @@ func TestGetMetrics(t *testing.T) {
 		if got := metric(t, f, capMetadata()); got != 4 {
 			t.Fatalf("ceiling = %d, want the trigger's own ceiling untouched by the other caller", got)
 		}
-		if ceilings := f.store.Ceilings(); len(ceilings) != 2 || ceilings[0].Consumer.Trigger == ceilings[1].Consumer.Trigger {
+		if ceilings := bucketCeilings(f); len(ceilings) != 2 || ceilings[0].Consumer.Trigger == ceilings[1].Consumer.Trigger {
 			t.Fatalf("recorded = %+v, want one entry per trigger", ceilings)
 		}
 	})
@@ -545,7 +632,7 @@ func TestGetMetrics(t *testing.T) {
 
 		metric(t, f, resplit)
 
-		if ceilings := f.store.Ceilings(); len(ceilings) != 2 {
+		if ceilings := bucketCeilings(f); len(ceilings) != 2 {
 			t.Fatalf("recorded = %+v, want the re-split metadata kept in its own entry", ceilings)
 		}
 	})
@@ -596,7 +683,7 @@ func TestGetMetrics(t *testing.T) {
 	})
 
 	t.Run("answers ResourceExhausted once too many scaled objects track a ceiling", func(t *testing.T) {
-		f := newFixtureWithLimits(t, state.Limits{Buckets: state.DefaultMaxBuckets, Consumers: 1})
+		f := newFixtureWithLimits(t, state.Limits{Buckets: state.DefaultMaxBuckets, Consumers: 2})
 		f.observe(bucketA, 900, 500000)
 		if _, err := f.service.GetMetrics(context.Background(), &externalscaler.GetMetricsRequest{ScaledObjectRef: ref(capMetadata())}); err != nil {
 			t.Fatal(err)
@@ -803,7 +890,7 @@ func TestAIMD(t *testing.T) {
 		if inflated != 10 || stillHeld != 10 {
 			t.Fatalf("ceilings = %d then %d, want the drain floor of 10 reported while the guarded bound of 2 stays recorded", inflated, stillHeld)
 		}
-		if ceilings := f.store.Ceilings(); len(ceilings) != 1 || ceilings[0].Bound != 2 {
+		if ceilings := bucketCeilings(f); len(ceilings) != 1 || ceilings[0].Bound != 2 {
 			t.Fatalf("ceilings = %+v, want the halved value kept apart from the reported value", ceilings)
 		}
 	})

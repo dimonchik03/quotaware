@@ -139,17 +139,23 @@ func Compute(cfg Config, obs Observation, previous Previous, now time.Time) Resu
 	if float64(result.Ceiling) != raw {
 		result.Reason = ReasonClamped
 	}
-	if previous.Known && result.Ceiling > previous.Ceiling {
-		switch {
-		case now.Sub(previous.At) < cfg.StepInterval:
-			result.Ceiling = max(previous.Ceiling, cfg.MinReplicas)
-			result.Reason = ReasonStepUp
-		case result.Ceiling > previous.Ceiling+cfg.MaxStepUp:
-			result.Ceiling = max(previous.Ceiling+cfg.MaxStepUp, cfg.MinReplicas)
-			result.Reason = ReasonStepUp
-		}
+	if limited, held := LimitRaise(cfg, previous, result.Ceiling, now); held {
+		result.Ceiling, result.Reason = limited, ReasonStepUp
 	}
 	return guard(cfg, obs, result)
+}
+
+func LimitRaise(cfg Config, previous Previous, ceiling int, now time.Time) (int, bool) {
+	if !previous.Known || ceiling <= previous.Ceiling {
+		return ceiling, false
+	}
+	switch {
+	case now.Sub(previous.At) < cfg.StepInterval:
+		return max(previous.Ceiling, cfg.MinReplicas), true
+	case ceiling-previous.Ceiling > cfg.MaxStepUp:
+		return max(previous.Ceiling+cfg.MaxStepUp, cfg.MinReplicas), true
+	}
+	return ceiling, false
 }
 
 func defaultResult(cfg Config) Result {

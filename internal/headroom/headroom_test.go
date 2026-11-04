@@ -395,3 +395,33 @@ func withReportedAt(obs headroom.Observation, at time.Time) headroom.Observation
 	obs.ProjectTokens.ReportedAt = at
 	return obs
 }
+
+func TestLimitRaise(t *testing.T) {
+	cases := []struct {
+		name      string
+		maxStepUp int
+		previous  headroom.Previous
+		ceiling   int
+		want      int
+		held      bool
+	}{
+		{"lets the first ceiling through", 2, headroom.Previous{}, 40, 40, false},
+		{"lets a drop through", 2, changedAt(known(10), now), 3, 3, false},
+		{"holds a raise within the step interval", 2, changedAt(known(4), now.Add(-5*time.Second)), 9, 4, true},
+		{"caps a raise after the step interval at max_step_up", 2, changedAt(known(4), now.Add(-time.Minute)), 9, 6, true},
+		{"lets a raise within max_step_up through", 2, changedAt(known(4), now.Add(-time.Minute)), 6, 6, false},
+		{"never overflows on a huge max_step_up", math.MaxInt, changedAt(known(4), now.Add(-time.Minute)), 9, 9, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := config()
+			cfg.MaxStepUp = tc.maxStepUp
+
+			got, held := headroom.LimitRaise(cfg, tc.previous, tc.ceiling, now)
+
+			if got != tc.want || held != tc.held {
+				t.Fatalf("LimitRaise = %d, %v, want %d, %v", got, held, tc.want, tc.held)
+			}
+		})
+	}
+}

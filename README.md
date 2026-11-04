@@ -252,7 +252,9 @@ not to the key, so the credentials that match a trigger count as views of one qu
 the newest headers among them decide the ceiling, and one drain floor covers the calls
 open on all of them. A trigger whose keys each have a quota of their own, keys of
 separate organizations for instance, sets `quotaScope: credential` to add their
-ceilings up instead (ADR 0010). A key the provider has only answered with 401 or 403
+ceilings up instead (ADR 0010). `maxStepUp` limits the value KEDA receives as well as
+each credential's ceiling, so a new key cannot lift it past one step, and
+`quotaware_ceiling{key="combined"}` is that value next to the per-credential series. A key the provider has only answered with 401 or 403
 counts for nothing. Set `credential` when other teams' keys for the same model go
 through the same proxy, or their headers may be the newest.
 The remaining knobs (`credential`, `quotaScope`, `safety`, `share`,

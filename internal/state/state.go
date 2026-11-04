@@ -179,6 +179,7 @@ type Mode string
 const (
 	ModeHeadroom Mode = "headroom"
 	ModeAIMD     Mode = "aimd"
+	ModeCombined Mode = "combined"
 )
 
 type Ceiling struct {
