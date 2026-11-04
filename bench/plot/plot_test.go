@@ -185,3 +185,24 @@ func TestReport(t *testing.T) {
 		}
 	})
 }
+
+func TestDrainTimeRunsFromTheEndOfTheLastLoadedPhase(t *testing.T) {
+	root := t.TempDir()
+	writeRun(t, root, "A",
+		[][2]float64{{at(0), 1}, {at(60), 4}, {at(120), 8}, {at(180), 8}, {at(240), 2}},
+		[][2]float64{{at(0), 0}, {at(60), 0}, {at(120), 0}, {at(180), 0}, {at(240), 0}},
+		[][2]float64{{at(0), 0}, {at(60), 10}, {at(120), 400}, {at(180), 300}, {at(240), 0}},
+		[][2]float64{{at(0), 1}, {at(60), 1}, {at(120), 2}, {at(180), 0}, {at(240), 0}},
+		nil,
+		map[string]float64{"jobs_total": 10, "completed_total": 10})
+	baseline, err := plot.LoadRun(filepath.Join(root, "A"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	table := plot.Build(baseline, nil, 2).Markdown()
+
+	if !strings.Contains(table, "| Time to drain the burst | 60 s |") {
+		t.Fatalf("table:\n%s\nwant the drain measured from the end of the 2x phase", table)
+	}
+}

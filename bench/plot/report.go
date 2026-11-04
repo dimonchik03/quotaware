@@ -89,7 +89,7 @@ func phaseLabel(multiplier float64) string {
 func drainTime(run Run, bands []Band) string {
 	var burstEnd time.Time
 	for _, band := range bands {
-		if strings.HasPrefix(band.Label, "3x") || (burstEnd.IsZero() && band.Label != "idle" && band.To.After(burstEnd)) {
+		if band.Label != "idle" && band.To.After(burstEnd) {
 			burstEnd = band.To
 		}
 	}
