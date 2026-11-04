@@ -13,6 +13,7 @@ import httpx
 PATHS = {"openai": "/v1/chat/completions", "anthropic": "/v1/messages"}
 OBSERVE_PATH = "/v1/observe"
 MAX_CAPTURE_BYTES = 4 << 20
+MAX_REQUEST_BYTES = 8 << 20
 LOGGER = logging.getLogger("quotaware_httpx")
 
 
@@ -68,8 +69,10 @@ def stream_tokens(provider, body):
 
 def rate_limit_headers(headers):
     picked = {}
-    for name, value in headers.items():
+    for name, value in headers.multi_items():
         lower = name.lower()
+        if lower in picked:
+            continue
         if lower.startswith("x-ratelimit-") or lower.startswith("anthropic-ratelimit-") or lower == "retry-after":
             picked[lower] = value
     return picked
@@ -161,12 +164,14 @@ def _succeeded(response):
 
 def _restart_in_child(reference):
     hook = reference()
-    if hook is not None:
-        hook._start()
+    if hook is None or hook._closed:
+        return
+    hook._counts = dict.fromkeys(hook._counts, 0)
+    hook._start()
 
 
 class QuotawareHook:
-    def __init__(self, quotaware, provider, token=None, queue_size=256, timeout=5.0):
+    def __init__(self, quotaware, provider, token=None, queue_size=256, timeout=5.0, max_request_bytes=MAX_REQUEST_BYTES):
         if provider not in PATHS:
             raise ValueError("provider must be openai or anthropic")
         url = httpx.URL(quotaware.rstrip("/") + OBSERVE_PATH)
@@ -176,11 +181,13 @@ class QuotawareHook:
         self.provider = provider
         self.token = token
         self.timeout = timeout
+        self.max_request_bytes = max_request_bytes
         self._queue_size = queue_size
-        self._counts = {"dropped": 0, "failed": 0, "errors": 0}
+        self._counts = {"dropped": 0, "failed": 0, "errors": 0, "unobserved": 0}
         self._start()
-        reference = weakref.ref(self)
-        os.register_at_fork(after_in_child=lambda: _restart_in_child(reference))
+        if hasattr(os, "register_at_fork"):
+            reference = weakref.ref(self)
+            os.register_at_fork(after_in_child=lambda: _restart_in_child(reference))
 
     def _start(self):
         self._lock = threading.Lock()
@@ -201,6 +208,10 @@ class QuotawareHook:
     @property
     def errors(self):
         return self._counts["errors"]
+
+    @property
+    def unobserved(self):
+        return self._counts["unobserved"]
 
     def _count(self, name):
         with self._lock:
@@ -261,11 +272,12 @@ class QuotawareHook:
         request = response.request
         if request.method != "POST" or not request.url.path.endswith(PATHS[self.provider]):
             return None
-        body = json.loads(request.content or b"{}")
-        model = body.get("model") if isinstance(body, dict) else None
-        if not model:
+        model = self._model(request.content)
+        if model is None:
+            self._count("unobserved")
             return None
         started = request.extensions.get("quotaware_started")
+        headers_at = time.monotonic()
         observation = {
             "provider": self.provider,
             "model": model,
@@ -273,7 +285,17 @@ class QuotawareHook:
             "status": response.status_code,
             "headers": rate_limit_headers(response.headers),
         }
-        return lambda complete, usage=None: self._enqueue(observation, started, complete, usage)
+        return lambda complete, usage=None: self._enqueue(observation, started, headers_at, complete, usage)
+
+    def _model(self, content):
+        if len(content) > self.max_request_bytes:
+            return None
+        try:
+            body = json.loads(content or b"{}")
+        except ValueError:
+            return None
+        model = body.get("model") if isinstance(body, dict) else None
+        return model if isinstance(model, str) and model else None
 
     def _stream_reporter(self, response, report):
         succeeded = _succeeded(response)
@@ -300,11 +322,13 @@ class QuotawareHook:
             return None
         return tokens(self.provider, payload)
 
-    def _enqueue(self, observation, started, complete, usage):
+    def _enqueue(self, observation, started, headers_at, complete, usage):
+        now = time.monotonic()
         observation = {
             **observation,
             "usage": usage,
-            "latency_ms": (time.monotonic() - started) * 1000 if started else 0.0,
+            "latency_ms": (now - started) * 1000 if started else 0.0,
+            "headers_age_ms": (now - headers_at) * 1000,
             "complete": complete,
         }
         if self._closed:
@@ -349,12 +373,13 @@ class QuotawareHook:
                 return 0
             self._closed = True
         deadline = time.monotonic() + self.timeout + 1
+        sentinel = 1
         try:
             self._queue.put(None, timeout=self.timeout)
         except queue.Full:
-            pass
+            sentinel = 0
         self._thread.join(timeout=max(deadline - time.monotonic(), 0))
-        undelivered = self._queue.qsize() if self._thread.is_alive() else 0
+        undelivered = max(self._queue.qsize() - sentinel, 0)
         if undelivered:
             LOGGER.warning("quotaware collector closed with %d observations undelivered", undelivered)
         return undelivered
