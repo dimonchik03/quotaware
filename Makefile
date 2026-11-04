@@ -16,8 +16,8 @@ fmt:
 	gofmt -l -w .
 
 e2e:
-	docker compose up -d --build --wait || { docker compose down -v; exit 1; }
-	go test -count=1 -tags e2e ./e2e/...; status=$$?; docker compose down -v; exit $$status
+	docker compose up -d --build --wait || { docker compose logs; docker compose down -v; exit 1; }
+	go test -count=1 -tags e2e ./e2e/...; status=$$?; [ $$status -eq 0 ] || docker compose logs; docker compose down -v; exit $$status
 
 demo:
 	bench/kind/demo.sh

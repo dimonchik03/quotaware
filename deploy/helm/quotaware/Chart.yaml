@@ -4,6 +4,7 @@ description: KEDA external scaler that sizes LLM workers by provider rate-limit 
 type: application
 version: 0.2.0
 appVersion: "0.2.0"
+kubeVersion: ">=1.21.0-0"
 home: https://github.com/dimonchik03/quotaware
 sources:
   - https://github.com/dimonchik03/quotaware

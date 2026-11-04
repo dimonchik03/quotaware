@@ -6,3 +6,7 @@
 /dist
 /docs
 /bench/results
+.env*
+bench/kind/.kubeconfig
+collector/python/build
+*.egg-info
