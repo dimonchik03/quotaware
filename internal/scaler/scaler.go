@@ -3,6 +3,7 @@ package scaler
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -144,15 +145,20 @@ func (s *Service) parse(ref *externalscaler.ScaledObjectRef) (trigger, error) {
 	return trigger{fingerprint: fingerprint(metadata), provider: provider, model: model, credential: metadata["credential"], cfg: cfg, aimd: fallback, queue: queue}, nil
 }
 
+const fingerprintBytes = 16
+
 func fingerprint(metadata map[string]string) string {
-	digest := sha256.New()
+	var encoded []byte
 	for _, name := range slices.Sorted(maps.Keys(metadata)) {
-		digest.Write([]byte(name))
-		digest.Write([]byte{0})
-		digest.Write([]byte(metadata[name]))
-		digest.Write([]byte{0})
+		encoded = appendField(encoded, name)
+		encoded = appendField(encoded, metadata[name])
 	}
-	return hex.EncodeToString(digest.Sum(nil))[:12]
+	sum := sha256.Sum256(encoded)
+	return hex.EncodeToString(sum[:fingerprintBytes])
+}
+
+func appendField(encoded []byte, field string) []byte {
+	return append(binary.AppendUvarint(encoded, uint64(len(field))), field...)
 }
 
 func (s *Service) parseAIMD(metadata map[string]string, cfg headroom.Config) (aimd.Config, error) {

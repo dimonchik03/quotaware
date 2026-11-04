@@ -398,6 +398,19 @@ func TestGetMetrics(t *testing.T) {
 		}
 	})
 
+	t.Run("keeps a trigger apart from a caller that moves its fields across keys", func(t *testing.T) {
+		f := newFixture(t)
+		f.observe(bucketA, 900, 500000)
+		metric(t, f, capMetadata())
+		resplit := map[string]string{"bucket": "openai/gpt-4.1-mini", "concurrency": "4", "defaultCeiling\x001\x00maxStepUp": "100"}
+
+		metric(t, f, resplit)
+
+		if ceilings := f.store.Ceilings(); len(ceilings) != 2 {
+			t.Fatalf("recorded = %+v, want the re-split metadata kept in its own entry", ceilings)
+		}
+	})
+
 	t.Run("queue mode returns the demand when it is below the ceiling", func(t *testing.T) {
 		f := newFixture(t)
 		f.observe(bucketA, 900, 500000)
