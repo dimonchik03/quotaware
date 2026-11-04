@@ -13,6 +13,7 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 
 	"github.com/dimonchik03/quotaware/internal/scaler/externalscaler"
+	"github.com/dimonchik03/quotaware/internal/usage"
 )
 
 func TestScalerAgainstTheFakeProvider(t *testing.T) {
@@ -31,9 +32,11 @@ func TestScalerAgainstTheFakeProvider(t *testing.T) {
 		Name:      "llm-workers",
 		Namespace: "e2e",
 		ScalerMetadata: map[string]string{
-			"bucket":      "openai/gpt-4.1-scaler",
-			"concurrency": "1",
-			"maxReplicas": "10",
+			"bucket":         "openai/gpt-4.1-scaler",
+			"concurrency":    "1",
+			"minReplicas":    "0",
+			"defaultCeiling": "7",
+			"maxReplicas":    "10",
 		},
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -63,12 +66,13 @@ func TestScalerAgainstTheFakeProvider(t *testing.T) {
 			t.Fatal(err)
 		}
 		value := metrics.GetMetricValues()[0]
-		if value.GetMetricName() != "s1-quotaware-ceiling" || value.GetMetricValue() < 1 {
-			t.Fatalf("value = %+v, want the requested name and a ceiling of at least one", value)
+		if value.GetMetricName() != "s1-quotaware-ceiling" || value.GetMetricValue() != 0 {
+			t.Fatalf("value = %+v, want the requested name and 0 from 3 requests per minute, not the default of 7", value)
 		}
 		exposition := metricsText(t, adminURL)
-		if ceiling := metricValue(t, exposition, "quotaware_ceiling", `scaledobject="llm-workers"`, `model="gpt-4.1-scaler"`); ceiling < 1 {
-			t.Fatalf("quotaware_ceiling = %v, want at least one", ceiling)
+		credential := `key="` + usage.CredentialHash(http.Header{"Authorization": {"Bearer sk-scaler-e2e"}}) + `"`
+		if ceiling := metricValue(t, exposition, "quotaware_ceiling", `scaledobject="llm-workers"`, `model="gpt-4.1-scaler"`, credential); ceiling != 0 {
+			t.Fatalf("quotaware_ceiling = %v, want 0 on the bucket of the credential the proxy saw", ceiling)
 		}
 		if !strings.Contains(exposition, `namespace="e2e"`) {
 			t.Fatalf("exposition lacks the consumer namespace label:\n%s", exposition)
