@@ -7,6 +7,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"time"
@@ -20,14 +21,18 @@ type Point struct {
 type Series []Point
 
 type Run struct {
-	Name   string
-	Label  string
-	Commit string
-	Dirty  bool
-	Start  time.Time
-	End    time.Time
-	Series map[string]Series
-	Totals map[string]float64
+	Name       string
+	Label      string
+	Commit     string
+	Dirty      bool
+	Profile    string
+	Phases     string
+	RPMWindows []int
+	Adaptive   bool
+	Start      time.Time
+	End        time.Time
+	Series     map[string]Series
+	Totals     map[string]float64
 }
 
 func (r Run) Title() string {
@@ -55,17 +60,22 @@ func LoadRun(dir string) (Run, error) {
 		return Run{}, err
 	}
 	var bounds struct {
-		Start  int64  `json:"start"`
-		End    int64  `json:"end"`
-		Label  string `json:"label"`
-		Commit string `json:"commit"`
-		Dirty  bool   `json:"dirty"`
+		Start      int64  `json:"start"`
+		End        int64  `json:"end"`
+		Label      string `json:"label"`
+		Commit     string `json:"commit"`
+		Dirty      bool   `json:"dirty"`
+		Profile    string `json:"profile"`
+		Phases     string `json:"phases"`
+		RPMWindows []int  `json:"rpm_windows"`
+		Adaptive   bool   `json:"adaptive"`
 	}
 	if err := json.Unmarshal(window, &bounds); err != nil {
 		return Run{}, fmt.Errorf("run.json: %w", err)
 	}
 	run.Start, run.End = time.Unix(bounds.Start, 0).UTC(), time.Unix(bounds.End, 0).UTC()
 	run.Label, run.Commit, run.Dirty = bounds.Label, bounds.Commit, bounds.Dirty
+	run.Profile, run.Phases, run.RPMWindows, run.Adaptive = bounds.Profile, bounds.Phases, bounds.RPMWindows, bounds.Adaptive
 	files, err := filepath.Glob(filepath.Join(dir, "*.json"))
 	if err != nil {
 		return Run{}, err
@@ -130,6 +140,35 @@ func (r Run) validate() error {
 		}
 		if len(points) == 0 && name != "ceiling" {
 			return fmt.Errorf("no samples for %s", name)
+		}
+	}
+	if r.Profile == "changing" {
+		if r.Phases == "" || len(r.RPMWindows) < 2 {
+			return errors.New("missing changing-quota experiment schedule")
+		}
+		var observed []int
+		for _, p := range r.Series["provider_rpm"] {
+			rpm := int(p.Value)
+			if float64(rpm) != p.Value || rpm <= 0 {
+				return fmt.Errorf("invalid provider_rpm %v", p.Value)
+			}
+			observed = append(observed, rpm)
+		}
+		if transitions := slices.Compact(observed); !slices.Equal(transitions, slices.Compact(slices.Clone(r.RPMWindows))) {
+			return fmt.Errorf("provider_rpm transitions %v, want %v", transitions, r.RPMWindows)
+		}
+		if r.Adaptive && len(r.Series["ceiling"]) == 0 {
+			return errors.New("missing adaptive ceiling samples")
+		}
+		last := r.Start
+		for _, point := range r.Series["replicas"] {
+			if point.At.Sub(last) > 30*time.Second {
+				return errors.New("replica sampling gap exceeds two 15-second export steps")
+			}
+			last = point.At
+		}
+		if r.End.Sub(last) > 30*time.Second {
+			return errors.New("replica samples end before the measurement window")
 		}
 	}
 	return nil

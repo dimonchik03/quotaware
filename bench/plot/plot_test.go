@@ -206,3 +206,29 @@ func TestDrainTimeRunsFromTheEndOfTheLastLoadedPhase(t *testing.T) {
 		t.Fatalf("table:\n%s\nwant the drain measured from the end of the 2x phase", table)
 	}
 }
+
+func TestChangingQuotaChartShowsMeasuredWindowAndOnlyLiveCeilings(t *testing.T) {
+	series := func(v ...float64) plot.Series {
+		var s plot.Series
+		for i, n := range v {
+			s = append(s, plot.Point{At: start.Add(time.Duration(i) * time.Minute), Value: n})
+		}
+		return s
+	}
+	baseline := plot.Run{Name: "A", Label: "queue only", Start: start, Series: map[string]plot.Series{"replicas": series(2, 20, 30), "provider_rpm": series(600, 180, 600), "multiplier": series(1.5, 1.5, 0)}}
+	fixed := plot.Run{Name: "B", Label: "static maximum of 10", Start: start, Series: map[string]plot.Series{"replicas": series(2, 10, 10)}}
+	adaptive := plot.Run{Name: "C", Label: "quotaware, safety 1", Start: start, Series: map[string]plot.Series{"replicas": series(2, 3, 8), "ceiling": series(3, 3, 8)}}
+	report := plot.Build(baseline, []plot.Run{fixed, adaptive}, 2)
+	svg := report.Charts()["replicas.svg"]
+	for _, want := range []string{"180 RPM", "static maximum of 10", "quotaware, safety 1"} {
+		if !strings.Contains(svg, want) {
+			t.Fatalf("chart omits %q", want)
+		}
+	}
+	if comparison := report.Charts()["static-vs-adaptive.svg"]; !strings.Contains(comparison, "Static cap of 10") || !strings.Contains(comparison, "180 RPM") {
+		t.Fatal("missing direct comparison during the restricted quota window")
+	}
+	if strings.Contains(svg, "B ceiling") || strings.Contains(svg, "2x quota") {
+		t.Fatal("static arm has a phantom ceiling or incorrect load label")
+	}
+}

@@ -10,6 +10,15 @@ profile="${BENCH_PROFILE:-fixed}"
 if [[ "$profile" == changing ]]; then
   phases="${BENCH_PHASES:-load:2m:1.5,idle:1m:0}"
   results="${BENCH_RESULTS:-bench/results/$(date +%Y-%m-%d)-changing}"
+  rpm_windows=600,180,600
+  if [[ -e "$results" ]]; then
+    echo "choose a new BENCH_RESULTS directory to preserve $results" >&2
+    exit 1
+  fi
+  if [[ ! "$phases" =~ ^[[:alnum:]_.:,+-]+$ ]]; then
+    echo "invalid changing-quota phase schedule" >&2
+    exit 1
+  fi
 elif [[ "$profile" != fixed ]]; then
   echo "unknown BENCH_PROFILE: $profile" >&2
   exit 1
@@ -28,7 +37,7 @@ install_keda
 deploy_base
 if [[ "$profile" == changing ]]; then
   kubectl -n "$namespace" patch deploy fakeprovider --type=json \
-    -p='[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"-openai-window-rpm=600,180,600"}]' >/dev/null
+    -p='[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"-openai-window-rpm='"$rpm_windows"'"}]' >/dev/null
 fi
 
 log "deploying Prometheus"
@@ -75,7 +84,7 @@ stop_forward() {
 trap stop_forward EXIT
 
 export_series() {
-  local dir=$1 start=$2 end=$3 window=$4 label=$5
+  local dir=$1 start=$2 end=$3 window=$4 label=$5 adaptive=$6
   kubectl -n "$namespace" port-forward svc/prometheus "$local_port:9090" >/dev/null 2>&1 &
   forward_pid=$!
   local ready=false
@@ -119,7 +128,12 @@ export_series() {
   instant backoff_seconds_total 'sum(max_over_time(worker_backoff_seconds_total['"$window"'s]))'
   instant latency_p50 'histogram_quantile(0.5, sum(max_over_time(worker_job_latency_seconds_bucket['"$window"'s])) by (le))'
   instant latency_p95 'histogram_quantile(0.95, sum(max_over_time(worker_job_latency_seconds_bucket['"$window"'s])) by (le))'
-  printf '{"start":%s,"end":%s,"label":"%s","commit":"%s","dirty":%s}\n' "$start" "$end" "$label" "$commit" "$dirty" > "$dir/run.json"
+  if [[ "$profile" == changing ]]; then
+    printf '{"start":%s,"end":%s,"label":"%s","commit":"%s","dirty":%s,"profile":"changing","phases":"%s","rpm_windows":[%s],"adaptive":%s}\n' \
+      "$start" "$end" "$label" "$commit" "$dirty" "$phases" "$rpm_windows" "$adaptive" > "$dir/run.json"
+  else
+    printf '{"start":%s,"end":%s,"label":"%s","commit":"%s","dirty":%s}\n' "$start" "$end" "$label" "$commit" "$dirty" > "$dir/run.json"
+  fi
   stop_forward
 }
 
@@ -148,7 +162,9 @@ run_variant() {
   kubectl -n "$namespace" wait --for=condition=complete job/producer --timeout "$(( schedule_seconds + 1200 ))s" >/dev/null
   end=$(date -u +%s)
   log "run $name finished after $(( end - start ))s, exporting series"
-  export_series "$dir" "$start" "$end" "$(( end - start ))" "$label"
+  local adaptive=false
+  if [[ "$manifest" == *scaledobject-b.yaml || "$manifest" == *scaledobject-c.yaml ]]; then adaptive=true; fi
+  export_series "$dir" "$start" "$end" "$(( end - start ))" "$label" "$adaptive"
 }
 
 if [[ "$profile" == changing ]]; then
