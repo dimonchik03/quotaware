@@ -229,7 +229,12 @@ the ceiling; give the collectors the same token.
 
     import "github.com/dimonchik03/quotaware/collector"
 
-    c, err := collector.New(collector.DefaultConfig("http://quotaware:9100", "openai"))
+    cfg := collector.DefaultConfig("http://quotaware:9100", "openai")
+    cfg.Token = os.Getenv("QUOTAWARE_OBSERVE_TOKEN")
+    c, err := collector.New(cfg)
+    if err != nil {
+        return err
+    }
     defer c.Close()
     client := &http.Client{Transport: c.Wrap(http.DefaultTransport)}
 
