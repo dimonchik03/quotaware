@@ -74,13 +74,13 @@ func bucketAt(t *testing.T, s *state.Store, at time.Time) state.Bucket {
 func TestStore(t *testing.T) {
 	t.Run("begin and end keep the in-flight count balanced", func(t *testing.T) {
 		s := store(t, 0.5)
-		s.Begin(key, now)
-		s.Begin(key, now)
+		s.Begin(key, now, "")
+		s.Begin(key, now, "")
 		if got := bucket(t, s).InFlight; got != 2 {
 			t.Fatalf("in flight = %d, want 2", got)
 		}
 
-		s.End(key, success(1000, time.Second))
+		s.End(key, success(1000, time.Second), "")
 
 		if got := bucket(t, s).InFlight; got != 1 {
 			t.Fatalf("in flight = %d, want 1", got)
@@ -101,7 +101,7 @@ func TestStore(t *testing.T) {
 	t.Run("end without begin never drives in-flight below zero", func(t *testing.T) {
 		s := store(t, 0.5)
 
-		s.End(key, success(1000, time.Second))
+		s.End(key, success(1000, time.Second), "")
 
 		if got := bucket(t, s).InFlight; got != 0 {
 			t.Fatalf("in flight = %d, want 0", got)
@@ -111,7 +111,7 @@ func TestStore(t *testing.T) {
 	t.Run("the first success sets tokens per call and latency directly", func(t *testing.T) {
 		s := store(t, 0.5)
 
-		s.End(key, success(1000, 2*time.Second))
+		s.End(key, success(1000, 2*time.Second), "")
 
 		b := bucket(t, s)
 		if b.TokensPerCall != 1000 || b.Latency != 2*time.Second {
@@ -124,9 +124,9 @@ func TestStore(t *testing.T) {
 
 	t.Run("later successes are smoothed with the alpha", func(t *testing.T) {
 		s := store(t, 0.5)
-		s.End(key, success(1000, 2*time.Second))
+		s.End(key, success(1000, 2*time.Second), "")
 
-		s.End(key, success(2000, 4*time.Second))
+		s.End(key, success(2000, 4*time.Second), "")
 
 		b := bucket(t, s)
 		if b.TokensPerCall != 1500 || b.Latency != 3*time.Second {
@@ -136,7 +136,7 @@ func TestStore(t *testing.T) {
 
 	t.Run("a 429 updates the quotas and retry-after but not the averages", func(t *testing.T) {
 		s := store(t, 0.5)
-		s.End(key, success(1000, 2*time.Second))
+		s.End(key, success(1000, 2*time.Second), "")
 		limited := success(0, 50*time.Millisecond)
 		limited.Status = http.StatusTooManyRequests
 		limited.HasUsage = false
@@ -144,7 +144,7 @@ func TestStore(t *testing.T) {
 		limited.RetryAfter = 20 * time.Second
 		limited.HeadersAt, limited.At = now.Add(time.Second), now.Add(time.Second)
 
-		s.End(key, limited)
+		s.End(key, limited, "")
 
 		b := bucket(t, s)
 		if b.RateLimited != 1 || b.RetryAfter != 20*time.Second {
@@ -183,7 +183,7 @@ func TestStore(t *testing.T) {
 		late := success(1000, time.Second)
 		late.At = now.Add(2 * time.Minute)
 
-		s.End(key, late)
+		s.End(key, late, "")
 
 		if recent := bucketAt(t, s, now.Add(2*time.Minute)).Recent; recent.Responses != 1 || recent.RateLimited != 0 {
 			t.Fatalf("recent = %+v, want only the sample inside the last minute", recent)
@@ -194,11 +194,11 @@ func TestStore(t *testing.T) {
 		s := store(t, 0.5)
 		limited := success(0, time.Second)
 		limited.Status = http.StatusTooManyRequests
-		s.End(key, limited)
+		s.End(key, limited, "")
 		late := success(100, time.Second)
 		late.At = now.Add(-time.Minute)
 
-		s.End(key, late)
+		s.End(key, late, "")
 
 		if b := bucketAt(t, s, now); b.Recent.Responses != 1 || b.Recent.RateLimited != 1 {
 			t.Fatalf("recent = %+v, want the 429 kept and the response from a window back ignored", b.Recent)
@@ -210,7 +210,7 @@ func TestStore(t *testing.T) {
 		old := success(100, time.Second)
 		old.At = time.Unix(-7, 0)
 
-		s.End(key, old)
+		s.End(key, old, "")
 
 		if b := bucket(t, s); b.Responses != 1 {
 			t.Fatalf("responses = %d, want the response counted", b.Responses)
@@ -220,8 +220,8 @@ func TestStore(t *testing.T) {
 	t.Run("the 429 window ignores responses the provider did not accept", func(t *testing.T) {
 		s := store(t, 0.5)
 
-		s.End(key, state.Sample{Status: http.StatusUnauthorized, Complete: true, Headers: state.HeadersMissing, At: now})
-		s.End(key, state.Sample{Status: http.StatusServiceUnavailable, Complete: true, Headers: state.HeadersMissing, At: now})
+		s.End(key, state.Sample{Status: http.StatusUnauthorized, Complete: true, Headers: state.HeadersMissing, At: now}, "")
+		s.End(key, state.Sample{Status: http.StatusServiceUnavailable, Complete: true, Headers: state.HeadersMissing, At: now}, "")
 
 		b := bucketAt(t, s, now)
 		if b.Recent.Responses != 0 || b.Recent.RateLimited != 0 {
@@ -239,11 +239,11 @@ func TestStore(t *testing.T) {
 		exhausted.HeadersAt, exhausted.At = now.Add(50*time.Second), now.Add(51*time.Second)
 		older := success(100, time.Second)
 		older.At = now.Add(60 * time.Second)
-		s.Begin(key, now)
-		s.Begin(key, now)
+		s.Begin(key, now, "")
+		s.Begin(key, now, "")
 
-		s.End(key, exhausted)
-		s.End(key, older)
+		s.End(key, exhausted, "")
+		s.End(key, older, "")
 
 		b := bucketAt(t, s, now.Add(60*time.Second))
 		if b.Quotas.Requests.Remaining != 0 || !b.ObservedAt.Equal(now.Add(50*time.Second)) {
@@ -256,7 +256,7 @@ func TestStore(t *testing.T) {
 		sample := success(100, time.Second)
 		sample.HeadersAt = now.Add(-3 * time.Second)
 
-		s.End(key, sample)
+		s.End(key, sample, "")
 
 		b := bucket(t, s)
 		if !b.Quotas.Requests.ReportedAt.Equal(now.Add(-3*time.Second)) || !b.Quotas.Tokens.ReportedAt.Equal(now.Add(-3*time.Second)) || !b.Quotas.ProjectTokens.ReportedAt.IsZero() {
@@ -266,11 +266,11 @@ func TestStore(t *testing.T) {
 
 	t.Run("a window the new sample does not know keeps its last value", func(t *testing.T) {
 		s := store(t, 0.5)
-		s.End(key, success(1000, 2*time.Second))
+		s.End(key, success(1000, 2*time.Second), "")
 		partial := success(1000, 2*time.Second)
 		partial.Quotas = state.Quotas{Requests: headroom.Quota{Limit: 1000, Remaining: 500, ResetAt: now.Add(time.Minute)}}
 
-		s.End(key, partial)
+		s.End(key, partial, "")
 
 		b := bucket(t, s)
 		if b.Quotas.Requests.Remaining != 500 || b.Quotas.Tokens.Remaining != 590000 {
@@ -280,13 +280,13 @@ func TestStore(t *testing.T) {
 
 	t.Run("a success without limits counts as headers missing and keeps the last quotas", func(t *testing.T) {
 		s := store(t, 0.5)
-		s.End(key, success(1000, 2*time.Second))
+		s.End(key, success(1000, 2*time.Second), "")
 		bare := success(1200, 2*time.Second)
 		bare.Headers = state.HeadersMissing
 		bare.Quotas = state.Quotas{}
 		bare.At = now.Add(time.Second)
 
-		s.End(key, bare)
+		s.End(key, bare, "")
 
 		b := bucket(t, s)
 		if b.HeadersMissing != 1 || b.Quotas.Requests.Remaining != 990 || !b.ObservedAt.Equal(now) {
@@ -303,7 +303,7 @@ func TestStore(t *testing.T) {
 		broken.Headers = state.HeadersMalformed
 		broken.Quotas = state.Quotas{}
 
-		s.End(key, broken)
+		s.End(key, broken, "")
 
 		b := bucket(t, s)
 		if b.HeadersMalformed != 1 || b.HeadersMissing != 0 {
@@ -320,7 +320,7 @@ func TestStore(t *testing.T) {
 		partial.Headers = state.HeadersMalformed
 		partial.Quotas = state.Quotas{Requests: headroom.Quota{Limit: 60, Remaining: 59}}
 
-		s.End(key, partial)
+		s.End(key, partial, "")
 
 		b := bucket(t, s)
 		if b.HeadersMalformed != 1 || b.Quotas.Requests.Remaining != 59 || !b.ObservedAt.Equal(now) {
@@ -333,7 +333,7 @@ func TestStore(t *testing.T) {
 		broken := success(1000, time.Second)
 		broken.Complete, broken.Failed = false, true
 
-		s.End(key, broken)
+		s.End(key, broken, "")
 
 		b := bucket(t, s)
 		if b.UpstreamErrors != 1 || b.Aborted != 0 || b.Latency != 0 {
@@ -343,9 +343,9 @@ func TestStore(t *testing.T) {
 
 	t.Run("an abort before any response releases the slot and counts", func(t *testing.T) {
 		s := store(t, 0.5)
-		s.Begin(key, now)
+		s.Begin(key, now, "")
 
-		s.Abort(key, now)
+		s.Abort(key, now, "")
 
 		b := bucket(t, s)
 		if b.InFlight != 0 || b.Aborted != 1 || b.Responses != 0 || b.UpstreamErrors != 0 {
@@ -354,15 +354,15 @@ func TestStore(t *testing.T) {
 	})
 
 	t.Run("refuses a new bucket beyond the limit and counts the rejection", func(t *testing.T) {
-		s, err := state.New(0.5, state.Limits{Buckets: 1, Consumers: 1})
+		s, err := state.New(0.5, state.Limits{Buckets: 1, Consumers: 2})
 		if err != nil {
 			t.Fatal(err)
 		}
 		other := state.Key{Provider: "openai", Model: "gpt-4.1", Key: "cd34"}
 
-		s.Begin(key, now)
-		s.Begin(other, now)
-		s.End(other, success(1000, time.Second))
+		s.Begin(key, now, "")
+		s.Begin(other, now, "")
+		s.End(other, success(1000, time.Second), "")
 
 		if _, ok := lookup(s, other, now); ok {
 			t.Fatal("bucket beyond the limit was created")
@@ -370,14 +370,14 @@ func TestStore(t *testing.T) {
 		if stats := s.Stats(); stats.Buckets != 1 || stats.RejectedBuckets != 2 {
 			t.Fatalf("stats = %+v, want one bucket and two rejected touches", stats)
 		}
-		s.End(key, success(1000, time.Second))
+		s.End(key, success(1000, time.Second), "")
 		if b := bucket(t, s); b.Responses != 1 || b.InFlight != 0 {
 			t.Fatalf("bucket = %+v, want the known bucket still updated at the limit", b)
 		}
 	})
 
 	t.Run("refuses a new scaled object beyond the limit", func(t *testing.T) {
-		s, err := state.New(0.5, state.Limits{Buckets: 1, Consumers: 1})
+		s, err := state.New(0.5, state.Limits{Buckets: 1, Consumers: 2})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -388,6 +388,9 @@ func TestStore(t *testing.T) {
 		if _, err := s.UpdateCeiling(first, keep); err != nil {
 			t.Fatal(err)
 		}
+		if _, err := s.UpdateCeiling(state.Consumer{Namespace: "jobs", ScaledObject: "c"}, keep); err != nil {
+			t.Fatal(err)
+		}
 		_, err = s.UpdateCeiling(second, keep)
 
 		if !errors.Is(err, state.ErrTooManyConsumers) {
@@ -396,7 +399,7 @@ func TestStore(t *testing.T) {
 		if _, err := s.UpdateCeiling(first, keep); err != nil {
 			t.Fatalf("known scaled object rejected at the limit: %v", err)
 		}
-		if stats := s.Stats(); stats.Consumers != 1 || stats.RejectedConsumers != 1 {
+		if stats := s.Stats(); stats.Consumers != 2 || stats.RejectedConsumers != 1 {
 			t.Fatalf("stats = %+v, want one scaled object and one rejection", stats)
 		}
 	})
@@ -412,7 +415,7 @@ func TestStore(t *testing.T) {
 		noUsage := success(0, time.Second)
 		noUsage.HasUsage = false
 
-		s.End(key, noUsage)
+		s.End(key, noUsage, "")
 
 		b := bucket(t, s)
 		if b.UsageMissing != 1 || b.TokensPerCall != 0 {
@@ -422,12 +425,12 @@ func TestStore(t *testing.T) {
 
 	t.Run("an aborted response keeps its quotas but skips latency and usage", func(t *testing.T) {
 		s := store(t, 0.5)
-		s.Begin(key, now)
+		s.Begin(key, now, "")
 		aborted := success(0, 400*time.Millisecond)
 		aborted.Complete = false
 		aborted.HasUsage = false
 
-		s.End(key, aborted)
+		s.End(key, aborted, "")
 
 		b := bucket(t, s)
 		if b.InFlight != 0 || b.Aborted != 1 || b.Responses != 1 {
@@ -440,9 +443,9 @@ func TestStore(t *testing.T) {
 
 	t.Run("an upstream failure only releases the slot and counts the error", func(t *testing.T) {
 		s := store(t, 0.5)
-		s.Begin(key, now)
+		s.Begin(key, now, "")
 
-		s.Fail(key, now.Add(time.Second))
+		s.Fail(key, now.Add(time.Second), "")
 
 		b := bucket(t, s)
 		if b.InFlight != 0 || b.UpstreamErrors != 1 || b.Responses != 0 || !b.LastSeen.Equal(now.Add(time.Second)) {
@@ -453,7 +456,7 @@ func TestStore(t *testing.T) {
 	t.Run("a 5xx without limits is not counted as headers missing", func(t *testing.T) {
 		s := store(t, 0.5)
 
-		s.End(key, state.Sample{Status: http.StatusBadGateway, Complete: true, Headers: state.HeadersMissing, At: now})
+		s.End(key, state.Sample{Status: http.StatusBadGateway, Complete: true, Headers: state.HeadersMissing, At: now}, "")
 
 		b := bucket(t, s)
 		if b.Responses != 1 || b.HeadersMissing != 0 {
@@ -465,11 +468,11 @@ func TestStore(t *testing.T) {
 		s := store(t, 0.5)
 		idle := state.Key{Provider: "openai", Model: "typo", Key: "a"}
 		busy := state.Key{Provider: "openai", Model: "busy", Key: "a"}
-		s.Begin(idle, now)
-		s.End(idle, success(10, time.Second))
-		s.Begin(busy, now)
-		s.Begin(key, now.Add(9*time.Minute))
-		s.End(key, success(10, time.Second))
+		s.Begin(idle, now, "")
+		s.End(idle, success(10, time.Second), "")
+		s.Begin(busy, now, "")
+		s.Begin(key, now.Add(9*time.Minute), "")
+		s.End(key, success(10, time.Second), "")
 
 		evicted := s.Evict(now.Add(11*time.Minute), 10*time.Minute)
 
@@ -531,9 +534,9 @@ func TestStore(t *testing.T) {
 
 	t.Run("buckets are listed in a stable order", func(t *testing.T) {
 		s := store(t, 0.5)
-		s.Begin(state.Key{Provider: "openai", Model: "gpt-4.1", Key: "b"}, now)
-		s.Begin(state.Key{Provider: "anthropic", Model: "claude-sonnet-4-5", Key: "a"}, now)
-		s.Begin(state.Key{Provider: "openai", Model: "gpt-4.1", Key: "a"}, now)
+		s.Begin(state.Key{Provider: "openai", Model: "gpt-4.1", Key: "b"}, now, "")
+		s.Begin(state.Key{Provider: "anthropic", Model: "claude-sonnet-4-5", Key: "a"}, now, "")
+		s.Begin(state.Key{Provider: "openai", Model: "gpt-4.1", Key: "a"}, now, "")
 
 		all := s.Buckets(now)
 
@@ -554,9 +557,9 @@ func TestStore(t *testing.T) {
 
 	t.Run("a bucket converts to a headroom observation", func(t *testing.T) {
 		s := store(t, 0.5)
-		s.Begin(key, now)
-		s.Begin(key, now)
-		s.End(key, success(1000, 2*time.Second))
+		s.Begin(key, now, "")
+		s.Begin(key, now, "")
+		s.End(key, success(1000, 2*time.Second), "")
 
 		obs := bucket(t, s).Observation()
 
@@ -592,7 +595,7 @@ func TestBucketAccepted(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			s := store(t, 0.5)
 			for _, status := range tc.statuses {
-				s.End(key, state.Sample{Status: status, Complete: true, Headers: state.HeadersMissing, At: now})
+				s.End(key, state.Sample{Status: status, Complete: true, Headers: state.HeadersMissing, At: now}, "")
 			}
 
 			got := bucketAt(t, s, now).Accepted()
@@ -618,9 +621,9 @@ func TestBucketRefusedOnly(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			s := store(t, 0.5)
-			s.Begin(key, now)
+			s.Begin(key, now, "")
 			for _, status := range tc.statuses {
-				s.End(key, state.Sample{Status: status, Complete: true, Headers: state.HeadersMissing, At: now})
+				s.End(key, state.Sample{Status: status, Complete: true, Headers: state.HeadersMissing, At: now}, "")
 			}
 
 			got := bucketAt(t, s, now).RefusedOnly()
@@ -638,14 +641,14 @@ func minuteOfTraffic(t *testing.T) *state.Store {
 	for i := range 10 {
 		sample := success(1000, time.Second)
 		sample.At = now.Add(time.Duration(i) * 4 * time.Second)
-		s.End(key, sample)
+		s.End(key, sample, "")
 	}
 	limited := success(0, 50*time.Millisecond)
 	limited.Status, limited.HasUsage = http.StatusTooManyRequests, false
 	limited.RetryAfter, limited.At = 20*time.Second, now.Add(45*time.Second)
-	s.End(key, limited)
+	s.End(key, limited, "")
 	limited.RetryAfter, limited.At = 5*time.Second, now.Add(50*time.Second)
-	s.End(key, limited)
+	s.End(key, limited, "")
 	return s
 }
 
@@ -656,4 +659,10 @@ func lookup(s *state.Store, wanted state.Key, at time.Time) (state.Bucket, bool)
 		}
 	}
 	return state.Bucket{}, false
+}
+
+func TestRefusesASlotBudgetThatCannotServeOneTrigger(t *testing.T) {
+	if _, err := state.New(.5, state.Limits{Buckets: 10, Consumers: 1}); err == nil {
+		t.Fatal("one slot accepted")
+	}
 }

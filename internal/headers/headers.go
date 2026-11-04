@@ -43,7 +43,7 @@ type Limits struct {
 }
 
 func (l Limits) Usable() bool {
-	return l.Requests.Known() || l.Tokens.Known()
+	return l.Requests.Known() || l.Tokens.Known() || l.ProjectTokens.Known()
 }
 
 func (l *Limits) collect(w Window, malformed *MalformedError) Window {

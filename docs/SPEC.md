@@ -146,7 +146,7 @@ A gRPC server implementing KEDA's `ExternalScaler` service
 (`pkg/scalers/externalscaler/externalscaler.proto`, vendored):
 
 - `GetMetricSpec` returns metric `quotaware-ceiling` with `targetSize: 1` (the
-  Prometheus series of the same number is `quotaware_ceiling{key="combined"}`; the
+  quota ceiling before queue demand is `quotaware_ceiling{key="combined"}`; the
   other `quotaware_ceiling` series are the per-credential ceilings it combines).
 - `GetMetrics` returns the ceiling as `metricValue`. With KEDA's default
   `AverageValue` semantics the HPA computes `ceil(metricValue / targetSize)`, so the
@@ -382,3 +382,5 @@ a record of its own.
 - KEDA external scalers: https://keda.sh/docs/latest/concepts/external-scalers/
 - KEDA scaling modifiers: https://keda.sh/docs/latest/concepts/scaling-deployments/
 - KEDA external trigger: https://keda.sh/docs/latest/scalers/external/
+
+The optional `workload` trigger label matches the `X-Quotaware-Workload` request header for drain and activation. An omitted label includes all matching calls. In shared mode, every active credential hold bounds the shared estimate. See [ADR 0012](adr/0012-shared-holds-and-workload-drain.md).

@@ -128,6 +128,7 @@ type trigger struct {
 	provider    string
 	model       string
 	credential  string
+	workload    string
 	scope       quotaScope
 	cfg         headroom.Config
 	aimd        aimd.Config
@@ -160,6 +161,9 @@ func (s *Service) parse(ref *externalscaler.ScaledObjectRef) (trigger, error) {
 	if credential, present := metadata["credential"]; present && !usage.ValidCredential(credential) {
 		return trigger{}, status.Error(codes.InvalidArgument, `metadata "credential" must be the 12-character key hash from the key label, or anonymous`)
 	}
+	if w, ok := metadata["workload"]; ok && !usage.ValidWorkload(w) {
+		return trigger{}, status.Error(codes.InvalidArgument, "workload must be a DNS label of at most 63 bytes")
+	}
 	cfg, err := s.parseConfig(metadata)
 	if err != nil {
 		return trigger{}, err
@@ -176,7 +180,7 @@ func (s *Service) parse(ref *externalscaler.ScaledObjectRef) (trigger, error) {
 	if err != nil {
 		return trigger{}, err
 	}
-	return trigger{fingerprint: fingerprint(metadata), provider: provider, model: model, credential: metadata["credential"], scope: scope, cfg: cfg, aimd: fallback, queue: queue}, nil
+	return trigger{fingerprint: fingerprint(metadata), provider: provider, model: model, credential: metadata["credential"], workload: metadata["workload"], scope: scope, cfg: cfg, aimd: fallback, queue: queue}, nil
 }
 
 func parseScope(metadata map[string]string) (quotaScope, error) {
@@ -454,7 +458,7 @@ func drainFloor(t trigger, buckets []state.Bucket) int {
 	open := 0
 	for _, b := range buckets {
 		if t.matches(b.Key) && !b.RefusedOnly() {
-			open += b.InFlight
+			open += b.OpenCalls(t.workload)
 		}
 	}
 	return headroom.DrainFloor(t.cfg, headroom.Observation{InFlight: open})
@@ -486,39 +490,40 @@ func (s *Service) queueDepth(ctx context.Context, q *queueTrigger) (int64, error
 func (s *Service) ceiling(ref *externalscaler.ScaledObjectRef, t trigger, buckets []state.Bucket, now time.Time) (int, error) {
 	sum, matched, waiting := 0, 0, 0
 	var shared sharedBound
+	sharedHold := t.cfg.MaxReplicas
 	for _, b := range buckets {
 		if !t.matches(b.Key) {
 			continue
 		}
 		if !b.Accepted() {
 			if !b.RefusedOnly() {
-				waiting += b.InFlight
+				waiting += b.OpenCalls(t.workload)
 			}
 			continue
 		}
 		matched++
 		consumer := state.Consumer{Namespace: ref.GetNamespace(), ScaledObject: ref.GetName(), Trigger: t.fingerprint, Bucket: b.Key}
-		ceiling, err := s.evaluate(consumer, t, b.Observation(), b.Recent, now)
+		obs := b.Observation()
+		obs.InFlight = b.OpenCalls(t.workload)
+		ceiling, err := s.evaluate(consumer, t, obs, b.Recent, now)
 		if err != nil {
 			return 0, err
 		}
 		sum += ceiling.Value
 		shared = shared.add(b.ObservedAt, ceiling.Bound)
+		if now.Before(ceiling.HoldUntil) {
+			sharedHold = min(sharedHold, ceiling.Bound)
+		}
 	}
 	floor := drainFloor(t, buckets)
 	switch {
 	case matched == 0:
-		consumer := state.Consumer{Namespace: ref.GetNamespace(), ScaledObject: ref.GetName(), Trigger: t.fingerprint, Bucket: state.Key{Provider: t.provider, Model: t.model, Key: t.credential}}
-		fallback, err := s.evaluate(consumer, t, headroom.Observation{}, state.Recent{}, now)
-		if err != nil {
-			return 0, err
-		}
-		return s.report(ref, t, fallback.Value, floor, now)
+		return s.report(ref, t, t.cfg.DefaultCeiling, floor, now)
 	case t.scope == quotaPerCredential:
 		unanswered := headroom.DrainFloor(t.cfg, headroom.Observation{InFlight: waiting})
 		return s.report(ref, t, sum+unanswered, floor, now)
 	default:
-		return s.report(ref, t, shared.bound(), floor, now)
+		return s.report(ref, t, min(shared.bound(), sharedHold), floor, now)
 	}
 }
 
@@ -612,9 +617,11 @@ func (s *Service) evaluate(consumer state.Consumer, t trigger, obs headroom.Obse
 
 func decide(t trigger, obs headroom.Observation, recent state.Recent, previous state.Ceiling, known bool, now time.Time) decision {
 	signal := aimd.Signal{Responses: recent.Responses, RateLimited: recent.RateLimited, RetryAfter: recent.RetryAfter}
-	aimdState := aimd.State{Ceiling: previous.Bound, Known: known && previous.Mode == state.ModeAIMD, ChangedAt: previous.BoundChangedAt, HoldUntil: previous.HoldUntil}
+	aimdState := aimd.State{Ceiling: previous.Bound, Known: known && (previous.Mode == state.ModeAIMD || now.Before(previous.HoldUntil)), ChangedAt: previous.BoundChangedAt, HoldUntil: previous.HoldUntil}
 	drainFloor := headroom.DrainFloor(t.cfg, obs)
-	if !headroom.Usable(t.cfg, obs, now) {
+	age := now.Sub(obs.ObservedAt)
+	frozen := known && previous.Mode == state.ModeHeadroom && age > t.cfg.StaleAfter && age <= t.cfg.StaleHard
+	if !frozen && !headroom.Usable(t.cfg, obs, now) {
 		step := aimd.Step(t.aimd, aimdState, signal, now)
 		return decision{value: max(step.Ceiling, drainFloor), bound: step.Ceiling, mode: state.ModeAIMD, reason: "aimd_" + string(step.Action), holdUntil: step.HoldUntil}
 	}

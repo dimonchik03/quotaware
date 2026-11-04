@@ -260,11 +260,18 @@ open on all of them. A trigger whose keys each have a quota of their own, keys o
 separate organizations for instance, sets `quotaScope: credential` to add their
 ceilings up instead (ADR 0010). `maxStepUp` limits the value KEDA receives as well as
 each credential's ceiling, so a new key cannot lift it past one step, and
-`quotaware_ceiling{key="combined"}` is that value next to the per-credential series. A key the provider has only answered with 401 or 403
+`quotaware_ceiling{key="combined"}` shows the quota ceiling before Redis demand is applied. With an empty queue the gauge can read 4 while KEDA receives 0. A key the provider has only answered with 401 or 403
 counts for nothing. Set `credential`, the 12-character hash in the `key` label, when other teams' keys for
 the same model go through the same proxy, or their headers may be the newest. The
 scaler rejects a provider other than openai or anthropic, a model longer than 256
 bytes, a `credential` that is not such a hash, and requests over 64 KiB.
+When multiple queues use the same provider key and model, give each worker deployment
+a unique DNS label in the `X-Quotaware-Workload` request header and set its trigger’s
+`workload` metadata to the same label. The proxy removes the header before
+forwarding. Quota stays shared, while an empty queue retains workers only for calls
+from its own deployment. Without a label, matching open calls from every workload
+count toward the drain floor. The scaler needs at least two ceiling slots, one
+combined slot per trigger plus one for each accepted credential it observes.
 The remaining knobs (`credential`, `quotaScope`, `safety`, `share`,
 `maxStepUp`, `stepInterval`, `defaultCeiling`, `minReplicas`, `staleAfter`,
 `staleHard`, `window`) and their defaults are listed in `docs/SPEC.md`. A Grafana
@@ -451,7 +458,7 @@ Upgrading from v0.2.0: the scaler now refuses trigger metadata it used to accept
 check each ScaledObject: `bucket` must name openai or anthropic and a model of at
 most 256 bytes, `credential` must be the 12-character key hash, `maxReplicas` at
 most 100000, `maxStepUp` and `aimdIncrease` at most `maxReplicas`, and `concurrency`
-at most 1000000. `quotaware_ceiling{key="combined"}` is the value KEDA receives; the
+at most 1000000. `quotaware_ceiling{key="combined"}` shows the quota ceiling before queue demand is applied; the
 dashboard's ceiling panel reads it. A `retry-after` beyond a day counts as malformed,
 and an unreadable observation body is now 400.
 
@@ -470,4 +477,5 @@ is cut. Specification in `docs/SPEC.md`, decisions in `docs/adr`.
 
 ## License
 
-MIT
+Quotaware is [MIT licensed](LICENSE). The vendored KEDA protocol files retain their
+[Apache 2.0 license](internal/scaler/externalscaler/LICENSE) and [attribution](internal/scaler/externalscaler/NOTICE).

@@ -2,6 +2,7 @@ package state
 
 import (
 	"errors"
+	"maps"
 	"math"
 	"net/http"
 	"sort"
@@ -34,7 +35,7 @@ type Quotas struct {
 }
 
 func (q Quotas) Usable() bool {
-	return q.Requests.Known() || q.Tokens.Known()
+	return q.Requests.Known() || q.Tokens.Known() || q.ProjectTokens.Known()
 }
 
 func (q Quotas) merge(update Quotas) Quotas {
@@ -89,6 +90,7 @@ type Bucket struct {
 	TokensPerCall    float64
 	Latency          time.Duration
 	InFlight         int
+	workloads        map[string]int
 	ObservedAt       time.Time
 	LastSeen         time.Time
 	Responses        int64
@@ -148,6 +150,25 @@ func (w *window) recent(at time.Time) Recent {
 		}
 	}
 	return r
+}
+
+func (b Bucket) OpenCalls(workload string) int {
+	if workload == "" {
+		return b.InFlight
+	}
+	return b.workloads[workload]
+}
+
+func (b *Bucket) finish(workload string) {
+	b.InFlight = max(b.InFlight-1, 0)
+	if workload == "" {
+		return
+	}
+	if b.workloads[workload] <= 1 {
+		delete(b.workloads, workload)
+		return
+	}
+	b.workloads[workload]--
 }
 
 func (b Bucket) Accepted() bool {
@@ -232,8 +253,8 @@ func New(alpha float64, limits Limits) (*Store, error) {
 	switch {
 	case math.IsNaN(alpha) || alpha <= 0 || alpha > 1:
 		return nil, errors.New("alpha must be within (0, 1]")
-	case limits.Buckets <= 0 || limits.Consumers <= 0:
-		return nil, errors.New("bucket and scaled object limits must be positive")
+	case limits.Buckets <= 0 || limits.Consumers < 2:
+		return nil, errors.New("max-buckets must be positive and max-scaled-objects at least 2")
 	}
 	return &Store{alpha: alpha, limits: limits, buckets: map[Key]*Bucket{}, windows: map[Key]*window{}, ceilings: map[Consumer]Ceiling{}}, nil
 }
@@ -286,49 +307,56 @@ func (c Consumer) less(other Consumer) bool {
 	}
 }
 
-func (s *Store) Begin(key Key, now time.Time) {
+func (s *Store) Begin(key Key, now time.Time, workload string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	b, ok := s.bucket(key)
 	if !ok {
-		return
+		return false
 	}
 	b.InFlight++
+	if workload != "" {
+		if b.workloads == nil {
+			b.workloads = make(map[string]int)
+		}
+		b.workloads[workload]++
+	}
 	b.LastSeen = latest(b.LastSeen, now)
+	return true
 }
 
-func (s *Store) Fail(key Key, now time.Time) {
+func (s *Store) Fail(key Key, now time.Time, workload string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	b, ok := s.bucket(key)
 	if !ok {
 		return
 	}
-	b.InFlight = max(b.InFlight-1, 0)
+	b.finish(workload)
 	b.UpstreamErrors++
 	b.LastSeen = latest(b.LastSeen, now)
 }
 
-func (s *Store) Abort(key Key, now time.Time) {
+func (s *Store) Abort(key Key, now time.Time, workload string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	b, ok := s.bucket(key)
 	if !ok {
 		return
 	}
-	b.InFlight = max(b.InFlight-1, 0)
+	b.finish(workload)
 	b.Aborted++
 	b.LastSeen = latest(b.LastSeen, now)
 }
 
-func (s *Store) End(key Key, sample Sample) {
+func (s *Store) End(key Key, sample Sample, workload string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	b, ok := s.bucket(key)
 	if !ok {
 		return
 	}
-	b.InFlight = max(b.InFlight-1, 0)
+	b.finish(workload)
 	s.record(key, b, sample)
 }
 
@@ -443,6 +471,7 @@ func (k Key) less(other Key) bool {
 
 func (s *Store) snapshot(b *Bucket, now time.Time) Bucket {
 	copied := *b
+	copied.workloads = maps.Clone(b.workloads)
 	if w, ok := s.windows[b.Key]; ok {
 		copied.Recent = w.recent(now)
 	}

@@ -103,7 +103,7 @@ func newFixtureWithLimits(t *testing.T, limits state.Limits) *fixture {
 
 func (f *fixture) observe(key state.Key, remainingRequests, remainingTokens float64) {
 	at := f.clock.Now()
-	f.store.Begin(key, at)
+	f.store.Begin(key, at, "")
 	f.store.End(key, state.Sample{
 		Status:   http.StatusOK,
 		Complete: true,
@@ -117,13 +117,13 @@ func (f *fixture) observe(key state.Key, remainingRequests, remainingTokens floa
 		Latency:   2 * time.Second,
 		HeadersAt: at,
 		At:        at,
-	})
+	}, "")
 }
 
 func (f *fixture) respond(key state.Key, status int, headersStatus state.HeadersStatus, retryAfter time.Duration) {
 	at := f.clock.Now()
-	f.store.Begin(key, at)
-	f.store.End(key, state.Sample{Status: status, Complete: true, Headers: headersStatus, RetryAfter: retryAfter, Latency: time.Second, At: at})
+	f.store.Begin(key, at, "")
+	f.store.End(key, state.Sample{Status: status, Complete: true, Headers: headersStatus, RetryAfter: retryAfter, Latency: time.Second, At: at}, "")
 }
 
 func ref(metadata map[string]string) *externalscaler.ScaledObjectRef {
@@ -272,7 +272,7 @@ func TestGetMetrics(t *testing.T) {
 		if got := metric(t, f, capMetadata()); got != 1 {
 			t.Fatalf("ceiling = %d, want the default of 1", got)
 		}
-		if ceilings := bucketCeilings(f); len(ceilings) != 1 || ceilings[0].Value != 1 || ceilings[0].Consumer.Bucket.Model != "gpt-4.1-mini" {
+		if ceilings := combinedCeilings(f); len(ceilings) != 1 || ceilings[0].Value != 1 || ceilings[0].Consumer.Bucket.Model != "gpt-4.1-mini" {
 			t.Fatalf("recorded = %+v, want the default ceiling recorded for the consumer", ceilings)
 		}
 	})
@@ -304,7 +304,7 @@ func TestGetMetrics(t *testing.T) {
 		f := newFixture(t)
 		tokensOnly := func() {
 			at := f.clock.Now()
-			f.store.Begin(bucketA, at)
+			f.store.Begin(bucketA, at, "")
 			f.store.End(bucketA, state.Sample{
 				Status:    http.StatusOK,
 				Complete:  true,
@@ -313,7 +313,7 @@ func TestGetMetrics(t *testing.T) {
 				Latency:   time.Second,
 				HeadersAt: at,
 				At:        at,
-			})
+			}, "")
 		}
 		tokensOnly()
 		started := metric(t, f, capMetadata())
@@ -433,8 +433,8 @@ func TestGetMetrics(t *testing.T) {
 		other := state.Key{Provider: "openai", Model: "gpt-4.1-mini", Key: "b"}
 		f.observe(other, 900, 500000)
 		for range 20 {
-			f.store.Begin(bucketA, f.clock.Now())
-			f.store.Begin(other, f.clock.Now())
+			f.store.Begin(bucketA, f.clock.Now(), "")
+			f.store.Begin(other, f.clock.Now(), "")
 		}
 
 		if got := metric(t, f, capMetadata()); got != 10 {
@@ -460,7 +460,7 @@ func TestGetMetrics(t *testing.T) {
 	t.Run("keeps the drain floor of calls open on a credential the provider has not answered yet", func(t *testing.T) {
 		f := newFixture(t)
 		for range 40 {
-			f.store.Begin(bucketA, f.clock.Now())
+			f.store.Begin(bucketA, f.clock.Now(), "")
 		}
 
 		if got := metric(t, f, capMetadata()); got != 10 {
@@ -472,7 +472,7 @@ func TestGetMetrics(t *testing.T) {
 		f := newFixture(t)
 		f.observe(bucketA, 900, 500000)
 		for range 40 {
-			f.store.Begin(state.Key{Provider: "openai", Model: "gpt-4.1-mini", Key: "b"}, f.clock.Now())
+			f.store.Begin(state.Key{Provider: "openai", Model: "gpt-4.1-mini", Key: "b"}, f.clock.Now(), "")
 		}
 
 		if got := metric(t, f, capMetadata()); got != 10 {
@@ -486,7 +486,7 @@ func TestGetMetrics(t *testing.T) {
 		failing := state.Key{Provider: "openai", Model: "gpt-4.1-mini", Key: "b"}
 		f.respond(failing, http.StatusServiceUnavailable, state.HeadersMissing, 0)
 		for range 40 {
-			f.store.Begin(failing, f.clock.Now())
+			f.store.Begin(failing, f.clock.Now(), "")
 		}
 
 		if got := metric(t, f, capMetadata()); got != 10 {
@@ -498,7 +498,7 @@ func TestGetMetrics(t *testing.T) {
 		f := newFixture(t)
 		f.observe(bucketA, 900, 500000)
 		for range 40 {
-			f.store.Begin(state.Key{Provider: "openai", Model: "gpt-4.1-mini", Key: "b"}, f.clock.Now())
+			f.store.Begin(state.Key{Provider: "openai", Model: "gpt-4.1-mini", Key: "b"}, f.clock.Now(), "")
 		}
 
 		if got := metric(t, f, perCredentialMetadata()); got != 14 {
@@ -512,7 +512,7 @@ func TestGetMetrics(t *testing.T) {
 		refused := state.Key{Provider: "openai", Model: "gpt-4.1-mini", Key: "b"}
 		f.respond(refused, http.StatusUnauthorized, state.HeadersMissing, 0)
 		for range 40 {
-			f.store.Begin(refused, f.clock.Now())
+			f.store.Begin(refused, f.clock.Now(), "")
 		}
 
 		if got := metric(t, f, capMetadata()); got != 4 {
@@ -524,7 +524,7 @@ func TestGetMetrics(t *testing.T) {
 		f := newFixture(t)
 		f.observe(bucketA, 900, 500000)
 		for _, credential := range []string{"b", "c", "d", "e"} {
-			f.store.Begin(state.Key{Provider: "openai", Model: "gpt-4.1-mini", Key: credential}, f.clock.Now())
+			f.store.Begin(state.Key{Provider: "openai", Model: "gpt-4.1-mini", Key: credential}, f.clock.Now(), "")
 		}
 
 		if got := metric(t, f, perCredentialMetadata()); got != 5 {
@@ -622,7 +622,7 @@ func TestGetMetrics(t *testing.T) {
 		metric(t, f, capMetadata())
 		f.clock.Advance(20 * time.Second)
 		for range 8 {
-			f.store.Begin(bucketA, f.clock.Now())
+			f.store.Begin(bucketA, f.clock.Now(), "")
 		}
 		draining := metric(t, f, capMetadata())
 		f.clock.Advance(5 * time.Second)
@@ -699,7 +699,7 @@ func TestGetMetrics(t *testing.T) {
 		f := newFixture(t)
 		f.observe(bucketA, 900, 500000)
 		for range 40 {
-			f.store.Begin(bucketA, f.clock.Now())
+			f.store.Begin(bucketA, f.clock.Now(), "")
 		}
 		f.queue.set(0, nil)
 
@@ -917,7 +917,7 @@ func TestAIMD(t *testing.T) {
 			f.respond(bucketA, http.StatusTooManyRequests, state.HeadersPresent, 0)
 		}
 		for range 40 {
-			f.store.Begin(bucketA, f.clock.Now())
+			f.store.Begin(bucketA, f.clock.Now(), "")
 		}
 
 		inflated := metric(t, f, capMetadata())
@@ -994,7 +994,7 @@ func TestIsActive(t *testing.T) {
 	t.Run("a queue trigger stays active while calls are open on an empty list", func(t *testing.T) {
 		f := newFixture(t)
 		f.observe(bucketA, 900, 500000)
-		f.store.Begin(bucketA, f.clock.Now())
+		f.store.Begin(bucketA, f.clock.Now(), "")
 		f.queue.set(0, nil)
 
 		response, err := f.service.IsActive(context.Background(), ref(queueMetadata()))
@@ -1210,5 +1210,83 @@ func TestShutdownEndsParkedStreams(t *testing.T) {
 
 	if _, err := stream.Recv(); code(err) != codes.Unavailable {
 		t.Fatalf("err = %v, want the parked stream ended with Unavailable", err)
+	}
+}
+
+func TestSoftStaleQuotaFreezesUntilHardExpiry(t *testing.T) {
+	f := newFixture(t)
+	f.observe(bucketA, 900, 500000)
+	m := capMetadata()
+	fresh := metric(t, f, m)
+	f.clock.Advance(121 * time.Second)
+	frozen := metric(t, f, m)
+	f.clock.Advance(480 * time.Second)
+	expired := metric(t, f, m)
+	if fresh != 4 || frozen != fresh || expired != 1 {
+		t.Fatalf("fresh, soft-stale, expired = %d, %d, %d; want 4, 4, 1", fresh, frozen, expired)
+	}
+}
+
+func TestRetryHoldSurvivesNewHeadersOnAnotherSharedKey(t *testing.T) {
+	for _, tc := range []struct {
+		scope  string
+		during int64
+	}{{"shared", 2}, {"credential", 6}} {
+		t.Run(tc.scope, func(t *testing.T) {
+			f := newFixture(t)
+			f.observe(bucketA, 900, 500000)
+			m := capMetadata()
+			m["quotaScope"] = tc.scope
+			metric(t, f, m)
+			f.clock.Advance(time.Second)
+			f.respond(bucketA, 429, state.HeadersMissing, 90*time.Second)
+			if held := metric(t, f, m); held != 2 {
+				t.Fatalf("after 429 = %d, want 2", held)
+			}
+			f.clock.Advance(20 * time.Second)
+			other := bucketA
+			other.Key = "bbbbbbbbbbbb"
+			f.observe(other, 900, 500000)
+			if got := metric(t, f, m); got != tc.during {
+				t.Fatalf("during hold = %d, want %d", got, tc.during)
+			}
+			f.clock.Advance(71 * time.Second)
+			f.observe(other, 900, 500000)
+			if got := metric(t, f, m); got < 4 {
+				t.Fatalf("after hold = %d, want recovery", got)
+			}
+		})
+	}
+}
+
+func TestSingleTriggerDrainsOnlyItsOwnWorkers(t *testing.T) {
+	f := newFixture(t)
+	for range 5 {
+		f.store.Begin(bucketA, now, "indexer")
+	}
+	for _, tc := range []struct {
+		workload string
+		want     int64
+	}{{"indexer", 2}, {"summarizer", 0}} {
+		m := queueMetadata()
+		m["workload"] = tc.workload
+		m["listName"] = tc.workload
+		active, err := f.service.IsActive(context.Background(), ref(m))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := metric(t, f, m); got != tc.want || active.Result != (tc.want > 0) {
+			t.Fatalf("%s: value=%d active=%v, want %d", tc.workload, got, active.Result, tc.want)
+		}
+	}
+}
+func TestMinimumCapacityCanServeAColdThenAWarmTrigger(t *testing.T) {
+	f := newFixtureWithLimits(t, state.Limits{Buckets: 2, Consumers: 2})
+	m := capMetadata()
+	metric(t, f, m)
+	f.clock.Advance(16 * time.Second)
+	f.observe(bucketA, 900, 500000)
+	if got := metric(t, f, m); got != 4 {
+		t.Fatalf("warm ceiling = %d", got)
 	}
 }
