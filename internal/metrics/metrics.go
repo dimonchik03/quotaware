@@ -70,9 +70,9 @@ func NewCollector(store *state.Store, now func() time.Time) *Collector {
 		usageMissing:      describe("usage_missing_total", "Successful responses without a usable usage object."),
 		ceiling:           prometheus.NewDesc("quotaware_ceiling", "Replica ceiling of one bucket for a scaled object and trigger, before the sum KEDA receives.", consumerLabels, nil),
 		buckets:           prometheus.NewDesc("quotaware_buckets", "Buckets currently tracked.", nil, nil),
-		consumers:         prometheus.NewDesc("quotaware_scaled_objects", "Scaled objects currently tracking a ceiling.", nil, nil),
-		bucketsRejected:   prometheus.NewDesc("quotaware_buckets_rejected_total", "Calls on new buckets refused because the bucket limit was reached.", nil, nil),
-		consumersRejected: prometheus.NewDesc("quotaware_scaled_objects_rejected_total", "Ceiling evaluations refused because the scaled object limit was reached.", nil, nil),
+		consumers:         prometheus.NewDesc("quotaware_scaled_objects", "Ceilings currently tracked, one per scaled object, trigger and credential.", nil, nil),
+		bucketsRejected:   prometheus.NewDesc("quotaware_buckets_rejected_total", "Store updates on new buckets refused because the bucket limit was reached; a refused proxied call counts at its start and at its end.", nil, nil),
+		consumersRejected: prometheus.NewDesc("quotaware_scaled_objects_rejected_total", "Ceiling evaluations refused because the ceiling limit was reached.", nil, nil),
 	}
 }
 

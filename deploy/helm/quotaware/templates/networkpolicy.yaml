@@ -18,7 +18,7 @@ spec:
               kubernetes.io/metadata.name: {{ .Values.networkPolicy.keda.namespace }}
           podSelector:
             matchLabels:
-              {{- toYaml (.Values.networkPolicy.keda.podSelector | default (dict "app" "keda-operator")) | nindent 14 }}
+              {{- toYaml (.Values.networkPolicy.keda.podLabels | default (dict "app" "keda-operator")) | nindent 14 }}
         {{- with .Values.networkPolicy.grpcFrom }}
         {{- toYaml . | nindent 8 }}
         {{- end }}

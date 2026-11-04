@@ -1,9 +1,17 @@
 quotaware is running as {{ include "quotaware.fullname" . }} in {{ .Release.Namespace }}.
 
 Point your workers at the proxy:
-  base_url: http://{{ include "quotaware.fullname" . }}.{{ .Release.Namespace }}.svc:{{ .Values.ports.proxy }}
+  OpenAI SDKs:    base_url=http://{{ include "quotaware.fullname" . }}.{{ .Release.Namespace }}.svc:{{ .Values.ports.proxy }}/v1
+  Anthropic SDKs: base_url=http://{{ include "quotaware.fullname" . }}.{{ .Release.Namespace }}.svc:{{ .Values.ports.proxy }}
 
 Reference the scaler from a ScaledObject:
   scalerAddress: {{ include "quotaware.fullname" . }}.{{ .Release.Namespace }}.svc:{{ .Values.ports.grpc }}
 
-Metrics are on port {{ .Values.ports.admin }} at /metrics.
+Collectors post to http://{{ include "quotaware.fullname" . }}.{{ .Release.Namespace }}.svc:{{ .Values.ports.admin }}/v1/observe
+with the observe token; metrics are on the same port at /metrics.
+{{- if .Values.networkPolicy.enabled }}
+
+The NetworkPolicy admits the proxy and admin ports from this namespace only. Workers,
+collectors or a Prometheus in other namespaces go under networkPolicy.proxyFrom and
+networkPolicy.adminFrom.
+{{- end }}

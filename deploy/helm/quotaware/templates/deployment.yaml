@@ -18,8 +18,10 @@ spec:
     metadata:
       labels:
         {{- include "quotaware.selectorLabels" . | nindent 8 }}
-      {{- if or .Values.prometheusAnnotations .Values.podAnnotations }}
       annotations:
+        {{- if and .Values.observe.token (not .Values.observe.existingSecret) }}
+        checksum/observe-token: {{ .Values.observe.token | sha256sum }}
+        {{- end }}
         {{- if .Values.prometheusAnnotations }}
         prometheus.io/scrape: "true"
         prometheus.io/port: {{ .Values.ports.admin | quote }}
@@ -28,12 +30,20 @@ spec:
         {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
-      {{- end }}
     spec:
+      automountServiceAccountToken: false
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       containers:
         - name: quotaware
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           args:
             - all
             - -listen=:{{ .Values.ports.proxy }}
@@ -42,7 +52,7 @@ spec:
             - -openai-upstream={{ .Values.upstreams.openai }}
             - -anthropic-upstream={{ .Values.upstreams.anthropic }}
             - -ewma-alpha={{ .Values.ewmaAlpha }}
-            - -max-buckets={{ .Values.maxBuckets }}
+            - -max-buckets={{ .Values.maxBuckets | int }}
             {{- with .Values.redisAddresses }}
             - -redis-address={{ join "," . }}
             {{- end }}
