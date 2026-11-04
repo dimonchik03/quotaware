@@ -153,8 +153,12 @@ The chart runs `quotaware all`: the proxy, the metrics endpoint and the KEDA
 external scaler in one pod, from the image `ghcr.io/dimonchik03/quotaware` that
 every release publishes for linux/amd64 and linux/arm64:
 
+    git clone --branch v0.2.0 https://github.com/dimonchik03/quotaware && cd quotaware
     helm install quotaware deploy/helm/quotaware -n llm --create-namespace \
       --set observe.token="$(openssl rand -hex 16)"
+
+Install from a release tag: the chart's `appVersion` picks the image, and the chart
+on `main` may already pass flags that only the next release understands.
 
 The chart refuses to render without `observe.token`, `observe.existingSecret` or an
 explicit `observe.insecure=true`. The proxy, gRPC and admin ports carry no
@@ -290,12 +294,23 @@ Not a gateway, not a rate limiter, not a cost dashboard. See `docs/SPEC.md`.
 
 ## Status
 
-v0.1.0 is released: binaries for Linux and macOS on the releases page, the image on
-`ghcr.io`, everything in `docs/SPEC.md` implemented and benchmarked. `main` adds the
-network defaults of ADR 0008 and 0009, the store limits, a worker that never retries before
-`retry-after` and the three-run benchmark above, for the next release. See
-`docs/design.md` for how the pieces fit and `docs/release.md` for how a release is
-cut. Specification in `docs/SPEC.md`, decisions in `docs/adr`.
+v0.2.0 is the current release: binaries for Linux and macOS on the releases page, the
+image `ghcr.io/dimonchik03/quotaware:0.2.0`, everything in `docs/SPEC.md`
+implemented and benchmarked. Over v0.1.0 it adds the network defaults of ADR 0008
+and 0009 (observe token, NetworkPolicy, Redis allow list, ceiling state bound to the
+trigger), the store limits, async hooks for the Python collector and the three-run
+benchmark above.
+
+Upgrading from v0.1.0: quotaware now refuses to start without an observe token and
+the chart refuses to render without `observe.token`, `observe.existingSecret` or
+`observe.insecure=true`; give collectors the same token. The NetworkPolicy is on by
+default, so on a CNI that enforces it list workers, collectors and Prometheus from
+other namespaces under `networkPolicy.proxyFrom` and `networkPolicy.adminFrom`, and a
+KEDA outside the `keda` namespace under `networkPolicy.keda`. Single-trigger mode
+needs its Redis addresses in `redisAddresses`.
+
+See `docs/design.md` for how the pieces fit and `docs/release.md` for how a release
+is cut. Specification in `docs/SPEC.md`, decisions in `docs/adr`.
 
 ## License
 
