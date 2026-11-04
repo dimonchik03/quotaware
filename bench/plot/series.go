@@ -114,7 +114,9 @@ func matrix(parsed response) (Series, error) {
 			if err != nil {
 				return nil, err
 			}
-			series = append(series, point)
+			if !math.IsNaN(point.Value) {
+				series = append(series, point)
+			}
 		}
 	}
 	sort.Slice(series, func(i, j int) bool { return series[i].At.Before(series[j].At) })
@@ -122,12 +124,19 @@ func matrix(parsed response) (Series, error) {
 }
 
 func vector(parsed response) (float64, error) {
-	if len(parsed.Data.Result) == 0 {
+	switch len(parsed.Data.Result) {
+	case 0:
 		return 0, nil
+	case 1:
+	default:
+		return 0, fmt.Errorf("want one series, got %d", len(parsed.Data.Result))
 	}
 	point, err := point(parsed.Data.Result[0].Value)
 	if err != nil {
 		return 0, err
+	}
+	if math.IsNaN(point.Value) {
+		return 0, errors.New("value is not a number")
 	}
 	return point.Value, nil
 }
@@ -147,9 +156,6 @@ func point(pair []any) (Point, error) {
 	value, err := strconv.ParseFloat(text, 64)
 	if err != nil {
 		return Point{}, err
-	}
-	if math.IsNaN(value) {
-		value = 0
 	}
 	return Point{At: time.Unix(0, int64(stamp*float64(time.Second))).UTC(), Value: value}, nil
 }
