@@ -257,10 +257,17 @@ the ceiling; give the collectors the same token.
 The Python hook is one module in `collector/python/` with a `pyproject.toml`; copy
 the file or `pip install ./collector/python`. `hooks()` is for `httpx.Client`,
 `async_hooks()` for `httpx.AsyncClient`; httpx awaits every hook of an async
-client, so the two cannot be swapped. It reads usage from JSON responses;
-a stream is observed when it is closed, with the latency measured to the end and
-`complete` false if the caller abandoned it. Collector traffic is not counted as in
-flight, so the drain guard only sees proxied calls (ADR 0007).
+client, so the two cannot be swapped. Both collectors read usage from JSON bodies and
+from SSE streams (OpenAI with `stream_options.include_usage`, Anthropic always),
+gzip included; a body that is not JSON still reports its headers. A stream is
+observed when it is closed, with the latency measured to the end and `complete`
+false if the caller abandoned it; a body that breaks reaches the caller with its own
+error. The Python hook logs through the `quotaware_httpx` logger when deliveries
+start failing and when they recover, restarts its delivery thread in a forked child
+(Celery prefork, gunicorn `--preload`), and `close()` returns how many observations
+it could not deliver; the Go collector's `Close` returns `ErrUndelivered` then.
+Collector traffic is not counted as in flight, so the drain guard only sees proxied
+calls (ADR 0007).
 
 ## When the headers are missing
 
