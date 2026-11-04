@@ -112,10 +112,11 @@ func (f *fixture) observe(key state.Key, remainingRequests, remainingTokens floa
 			Requests: headroom.Quota{Limit: 1000, Remaining: remainingRequests, ResetAt: at.Add(30 * time.Second)},
 			Tokens:   headroom.Quota{Limit: 600000, Remaining: remainingTokens, ResetAt: at.Add(30 * time.Second)},
 		},
-		HasUsage: true,
-		Usage:    1000,
-		Latency:  2 * time.Second,
-		At:       at,
+		HasUsage:  true,
+		Usage:     1000,
+		Latency:   2 * time.Second,
+		HeadersAt: at,
+		At:        at,
 	})
 }
 

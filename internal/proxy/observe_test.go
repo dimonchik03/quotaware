@@ -62,6 +62,27 @@ func TestObserver(t *testing.T) {
 		}
 	})
 
+	t.Run("dates the headers and their resets by the age the collector reports", func(t *testing.T) {
+		o, store := observer(t)
+
+		observe(o, `{"provider":"openai","model":"gpt-4.1-mini","credential":"ab12ab12ab12","status":200,"headers":{"x-ratelimit-limit-requests":"60","x-ratelimit-remaining-requests":"59","x-ratelimit-reset-requests":"30s"},"latency_ms":20000,"headers_age_ms":20000,"complete":true}`)
+
+		b, _ := store.Bucket(state.Key{Provider: "openai", Model: "gpt-4.1-mini", Key: "ab12ab12ab12"}, start)
+		if !b.ObservedAt.Equal(start.Add(-20*time.Second)) || !b.Quotas.Requests.ResetAt.Equal(start.Add(10*time.Second)) {
+			t.Fatalf("observed at %v reset at %v, want the headers dated 20 s back and the reset 30 s after them", b.ObservedAt, b.Quotas.Requests.ResetAt)
+		}
+	})
+
+	t.Run("rejects a negative headers age", func(t *testing.T) {
+		o, _ := observer(t)
+
+		recorder := observe(o, `{"provider":"openai","model":"gpt-4.1-mini","credential":"ab12ab12ab12","status":200,"latency_ms":10,"headers_age_ms":-1,"complete":true}`)
+
+		if recorder.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400 for a negative headers age", recorder.Code)
+		}
+	})
+
 	t.Run("counts an observation without headers as missing", func(t *testing.T) {
 		o, store := observer(t)
 

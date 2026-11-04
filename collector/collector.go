@@ -241,6 +241,7 @@ func (r roundTripper) RoundTrip(request *http.Request) (*http.Response, error) {
 		c.unobserved.Add(1)
 		return nil, err
 	}
+	headersAt := time.Now()
 	observation := Observation{
 		Provider:   c.cfg.Provider,
 		Model:      payload.Model,
@@ -254,6 +255,7 @@ func (r roundTripper) RoundTrip(request *http.Request) (*http.Response, error) {
 	response.Body = usage.NewCapture(response.Body, c.cfg.MaxCaptureBytes, func(captured []byte, outcome usage.Outcome) {
 		complete := outcome == usage.Completed
 		observation.LatencyMS = float64(time.Since(started)) / float64(time.Millisecond)
+		observation.HeadersAgeMS = float64(time.Since(headersAt)) / float64(time.Millisecond)
 		observation.Complete = complete
 		if complete && succeeded {
 			if decoded, ok := usage.Decompress(encoding, captured, c.cfg.MaxCaptureBytes); ok {

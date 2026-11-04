@@ -47,6 +47,15 @@ func (q Quotas) merge(update Quotas) Quotas {
 	}
 }
 
+func (q Quotas) reportedAt(at time.Time) Quotas {
+	for _, window := range []*headroom.Quota{&q.Requests, &q.Tokens, &q.ProjectTokens, &q.InputTokens, &q.OutputTokens} {
+		if window.Known() {
+			window.ReportedAt = at
+		}
+	}
+	return q
+}
+
 func keep(current, update headroom.Quota) headroom.Quota {
 	if update.Known() {
 		return update
@@ -64,6 +73,7 @@ type Sample struct {
 	Usage      float64
 	Latency    time.Duration
 	RetryAfter time.Duration
+	HeadersAt  time.Time
 	At         time.Time
 }
 
@@ -336,8 +346,7 @@ func (s *Store) End(key Key, sample Sample) {
 	}
 	switch sample.Headers {
 	case HeadersPresent:
-		b.Quotas = b.Quotas.merge(sample.Quotas)
-		b.ObservedAt = sample.At
+		b.apply(sample)
 	case HeadersMissing:
 		if carriesLimits(sample.Status) {
 			b.HeadersMissing++
@@ -345,8 +354,7 @@ func (s *Store) End(key Key, sample Sample) {
 	case HeadersMalformed:
 		b.HeadersMalformed++
 		if sample.Quotas.Usable() {
-			b.Quotas = b.Quotas.merge(sample.Quotas)
-			b.ObservedAt = sample.At
+			b.apply(sample)
 		}
 	}
 	if sample.Failed {
@@ -366,6 +374,14 @@ func (s *Store) End(key Key, sample Sample) {
 	} else {
 		b.UsageMissing++
 	}
+}
+
+func (b *Bucket) apply(sample Sample) {
+	if sample.HeadersAt.Before(b.ObservedAt) {
+		return
+	}
+	b.Quotas = b.Quotas.merge(sample.Quotas.reportedAt(sample.HeadersAt))
+	b.ObservedAt = sample.HeadersAt
 }
 
 func (s *Store) Evict(now time.Time, idleFor time.Duration) int {

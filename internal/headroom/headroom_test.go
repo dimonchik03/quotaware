@@ -233,6 +233,14 @@ func TestCompute(t *testing.T) {
 			wantReason:  headroom.ReasonHeadroom,
 		},
 		{
+			name:        "a project token window not reported for longer than stale_after no longer bounds the ceiling",
+			config:      config(),
+			observation: withReportedAt(withProjectTokens(observation(900, 500000, midWindow), 300000, 300000, midWindow), now.Add(-5*time.Minute)),
+			now:         now,
+			wantCeiling: 4,
+			wantReason:  headroom.ReasonHeadroom,
+		},
+		{
 			name:        "a depleted project token window lowers the ceiling before the organization window does",
 			config:      config(),
 			observation: withProjectTokens(observation(900, 500000, midWindow), 600000, 240000, midWindow),
@@ -381,4 +389,9 @@ func withShare(c headroom.Config, share float64) headroom.Config {
 func withMinReplicas(c headroom.Config, minReplicas int) headroom.Config {
 	c.MinReplicas = minReplicas
 	return c
+}
+
+func withReportedAt(obs headroom.Observation, at time.Time) headroom.Observation {
+	obs.ProjectTokens.ReportedAt = at
+	return obs
 }

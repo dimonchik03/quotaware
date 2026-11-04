@@ -51,12 +51,13 @@ func (o *Observer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	provider := headers.Provider(observation.Provider)
 	now := o.now()
+	headersAt := now.Add(-time.Duration(observation.HeadersAgeMS * float64(time.Millisecond)))
 	h := http.Header{}
 	for name, value := range observation.Headers {
 		h.Set(name, value)
 	}
-	quotas, status := parseLimits(o.logger, provider, observation.Model, h, now)
-	retryAfter, err := headers.RetryAfter(h, now)
+	quotas, status := parseLimits(o.logger, provider, observation.Model, h, headersAt)
+	retryAfter, err := headers.RetryAfter(h, headersAt)
 	if err != nil {
 		o.logger.Warn("retry-after malformed", "provider", provider, "model", observation.Model, "error", err.Error())
 		retryAfter, status = 0, state.HeadersMalformed
@@ -68,6 +69,7 @@ func (o *Observer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		Quotas:     quotas,
 		Latency:    time.Duration(observation.LatencyMS * float64(time.Millisecond)),
 		RetryAfter: retryAfter,
+		HeadersAt:  headersAt,
 		At:         now,
 	}
 	if observation.Usage != nil && *observation.Usage > 0 {

@@ -89,8 +89,11 @@ Each input line is one JSON object describing a bucket at a point in time:
 `at` is the evaluation time. `observed_at` is optional and defaults to `at`; set it
 earlier to replay a stale bucket. `requests` and `tokens` carry the provider's
 limit, remaining and reset for the window; leave one out when the provider does
-not report it. `project_tokens` is the optional OpenAI project-level token window. `tokens_per_call` and `latency_ms` are the smoothed averages the
-proxy would hold, `in_flight` the calls currently open. Unknown keys are rejected.
+not report it. `project_tokens` is the optional OpenAI project-level token window.
+Each window may carry `reported_at`; one reported longer than `-stale-after` before
+`at` no longer bounds the ceiling, as with a project limit that was lifted.
+`tokens_per_call` and `latency_ms` are the smoothed averages the proxy would hold,
+`in_flight` the calls currently open. Unknown keys are rejected.
 
 Output is tab-separated. The reason column says which rule produced the number:
 the headroom formula, a clamp to `-min` or `-max`, the step-up rule (a raise waits

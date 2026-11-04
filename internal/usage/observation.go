@@ -16,14 +16,15 @@ const (
 var credentialPattern = regexp.MustCompile(`^([0-9a-f]{12}|anonymous)$`)
 
 type Observation struct {
-	Provider   string            `json:"provider"`
-	Model      string            `json:"model"`
-	Credential string            `json:"credential"`
-	Status     int               `json:"status"`
-	Headers    map[string]string `json:"headers"`
-	Usage      *float64          `json:"usage,omitempty"`
-	LatencyMS  float64           `json:"latency_ms"`
-	Complete   bool              `json:"complete"`
+	Provider     string            `json:"provider"`
+	Model        string            `json:"model"`
+	Credential   string            `json:"credential"`
+	Status       int               `json:"status"`
+	Headers      map[string]string `json:"headers"`
+	Usage        *float64          `json:"usage,omitempty"`
+	LatencyMS    float64           `json:"latency_ms"`
+	HeadersAgeMS float64           `json:"headers_age_ms,omitempty"`
+	Complete     bool              `json:"complete"`
 }
 
 func (o Observation) Validate() error {
@@ -38,6 +39,8 @@ func (o Observation) Validate() error {
 		return errors.New("status must be an HTTP status code")
 	case o.LatencyMS < 0 || o.LatencyMS > float64(MaxLatency/time.Millisecond):
 		return errors.New("latency_ms must be between 0 and one hour")
+	case o.HeadersAgeMS < 0 || o.HeadersAgeMS > float64(MaxLatency/time.Millisecond):
+		return errors.New("headers_age_ms must be between 0 and one hour")
 	case o.Usage != nil && (*o.Usage < 0 || *o.Usage > MaxUsageTokens):
 		return errors.New("usage must be between 0 and 1e9 tokens")
 	}

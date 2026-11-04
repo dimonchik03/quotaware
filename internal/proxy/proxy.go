@@ -143,13 +143,13 @@ func (p *Proxy) observe(response *http.Response) error {
 	encoding := response.Header.Get("Content-Encoding")
 	response.Body = usage.NewCapture(response.Body, p.cfg.MaxCaptureBytes, func(body []byte, outcome usage.Outcome) {
 		c.once.Do(func() {
-			p.store.End(c.key, p.sample(c, status, headersStatus, quotas, retryAfter, contentType, encoding, body, outcome))
+			p.store.End(c.key, p.sample(c, status, headersStatus, quotas, retryAfter, now, contentType, encoding, body, outcome))
 		})
 	})
 	return nil
 }
 
-func (p *Proxy) sample(c *call, status int, headersStatus state.HeadersStatus, quotas state.Quotas, retryAfter time.Duration, contentType, encoding string, body []byte, outcome usage.Outcome) state.Sample {
+func (p *Proxy) sample(c *call, status int, headersStatus state.HeadersStatus, quotas state.Quotas, retryAfter time.Duration, headersAt time.Time, contentType, encoding string, body []byte, outcome usage.Outcome) state.Sample {
 	now := p.now()
 	complete := outcome == usage.Completed
 	s := state.Sample{
@@ -160,6 +160,7 @@ func (p *Proxy) sample(c *call, status int, headersStatus state.HeadersStatus, q
 		Quotas:     quotas,
 		Latency:    now.Sub(c.started),
 		RetryAfter: retryAfter,
+		HeadersAt:  headersAt,
 		At:         now,
 	}
 	if complete && status >= 200 && status < 300 {

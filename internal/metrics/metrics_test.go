@@ -31,19 +31,20 @@ func populated(t *testing.T) *state.Store {
 	s.Begin(key, now)
 	s.Begin(key, now)
 	s.End(key, state.Sample{
-		Status:   http.StatusOK,
-		Complete: true,
-		Headers:  state.HeadersPresent,
-		Quotas:   quotas,
-		HasUsage: true,
-		Usage:    1200,
-		Latency:  1500 * time.Millisecond,
-		At:       now,
+		Status:    http.StatusOK,
+		Complete:  true,
+		Headers:   state.HeadersPresent,
+		Quotas:    quotas,
+		HasUsage:  true,
+		Usage:     1200,
+		Latency:   1500 * time.Millisecond,
+		HeadersAt: now,
+		At:        now,
 	})
 	quotas.Requests.Remaining = 0
 	quotas.Tokens.Remaining = 0
 	s.Begin(key, now)
-	s.End(key, state.Sample{Status: http.StatusTooManyRequests, Complete: true, Headers: state.HeadersPresent, Quotas: quotas, RetryAfter: 20 * time.Second, At: now})
+	s.End(key, state.Sample{Status: http.StatusTooManyRequests, Complete: true, Headers: state.HeadersPresent, Quotas: quotas, RetryAfter: 20 * time.Second, HeadersAt: now, At: now})
 	s.Begin(key, now)
 	s.Fail(key, now)
 	_, err = s.UpdateCeiling(state.Consumer{Namespace: "jobs", ScaledObject: "llm-workers", Trigger: "7c1d", Bucket: key}, func(state.Ceiling, bool) state.Ceiling {

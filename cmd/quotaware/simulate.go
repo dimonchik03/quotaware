@@ -15,9 +15,10 @@ import (
 )
 
 type quotaLine struct {
-	Limit     float64   `json:"limit"`
-	Remaining float64   `json:"remaining"`
-	ResetAt   time.Time `json:"reset_at"`
+	Limit      float64   `json:"limit"`
+	Remaining  float64   `json:"remaining"`
+	ResetAt    time.Time `json:"reset_at"`
+	ReportedAt time.Time `json:"reported_at"`
 }
 
 type observationLine struct {

@@ -34,14 +34,15 @@ func quotas() state.Quotas {
 
 func success(usage float64, latency time.Duration) state.Sample {
 	return state.Sample{
-		Status:   http.StatusOK,
-		Complete: true,
-		Headers:  state.HeadersPresent,
-		Quotas:   quotas(),
-		HasUsage: true,
-		Usage:    usage,
-		Latency:  latency,
-		At:       now,
+		Status:    http.StatusOK,
+		Complete:  true,
+		Headers:   state.HeadersPresent,
+		Quotas:    quotas(),
+		HasUsage:  true,
+		Usage:     usage,
+		Latency:   latency,
+		HeadersAt: now,
+		At:        now,
 	}
 }
 
@@ -128,7 +129,7 @@ func TestStore(t *testing.T) {
 		limited.HasUsage = false
 		limited.Quotas.Requests.Remaining = 0
 		limited.RetryAfter = 20 * time.Second
-		limited.At = now.Add(time.Second)
+		limited.HeadersAt, limited.At = now.Add(time.Second), now.Add(time.Second)
 
 		s.End(key, limited)
 
@@ -190,6 +191,38 @@ func TestStore(t *testing.T) {
 		}
 		if b.Responses != 2 {
 			t.Fatalf("responses = %d, want both still counted as responses", b.Responses)
+		}
+	})
+
+	t.Run("headers older than the ones applied never replace them", func(t *testing.T) {
+		s := store(t, 0.5)
+		exhausted := success(100, time.Second)
+		exhausted.Quotas.Requests.Remaining = 0
+		exhausted.HeadersAt, exhausted.At = now.Add(50*time.Second), now.Add(51*time.Second)
+		older := success(100, time.Second)
+		older.At = now.Add(60 * time.Second)
+		s.Begin(key, now)
+		s.Begin(key, now)
+
+		s.End(key, exhausted)
+		s.End(key, older)
+
+		b := bucketAt(t, s, now.Add(60*time.Second))
+		if b.Quotas.Requests.Remaining != 0 || !b.ObservedAt.Equal(now.Add(50*time.Second)) {
+			t.Fatalf("remaining = %v observed at %v, want the newer headers kept and dated when they arrived", b.Quotas.Requests.Remaining, b.ObservedAt)
+		}
+	})
+
+	t.Run("dates each window by the headers that reported it", func(t *testing.T) {
+		s := store(t, 0.5)
+		sample := success(100, time.Second)
+		sample.HeadersAt = now.Add(-3 * time.Second)
+
+		s.End(key, sample)
+
+		b := bucket(t, s)
+		if !b.Quotas.Requests.ReportedAt.Equal(now.Add(-3*time.Second)) || !b.Quotas.Tokens.ReportedAt.Equal(now.Add(-3*time.Second)) || !b.Quotas.ProjectTokens.ReportedAt.IsZero() {
+			t.Fatalf("quotas = %+v, want the reported windows dated by their headers and the absent one left undated", b.Quotas)
 		}
 	})
 

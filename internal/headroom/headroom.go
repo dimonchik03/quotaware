@@ -7,13 +7,18 @@ import (
 )
 
 type Quota struct {
-	Limit     float64
-	Remaining float64
-	ResetAt   time.Time
+	Limit      float64
+	Remaining  float64
+	ResetAt    time.Time
+	ReportedAt time.Time
 }
 
 func (q Quota) Known() bool {
 	return q.Limit > 0
+}
+
+func (q Quota) current(cfg Config, now time.Time) bool {
+	return q.Known() && (q.ReportedAt.IsZero() || now.Sub(q.ReportedAt) <= cfg.StaleAfter)
 }
 
 type Observation struct {
@@ -173,45 +178,45 @@ func podRate(cfg Config, obs Observation) float64 {
 }
 
 func allowedRate(cfg Config, obs Observation, now time.Time) (float64, bool) {
-	rate, ok := steadyRate(cfg, obs)
+	rate, ok := steadyRate(cfg, obs, now)
 	if !ok {
 		return 0, false
 	}
-	if instant, ok := instantRate(obs, now); ok {
+	if instant, ok := instantRate(cfg, obs, now); ok {
 		rate = min(rate, instant)
 	}
 	return rate * cfg.Safety * cfg.Share, true
 }
 
-func steadyRate(cfg Config, obs Observation) (float64, bool) {
+func steadyRate(cfg Config, obs Observation, now time.Time) (float64, bool) {
 	window := cfg.Window.Seconds()
 	rate := math.Inf(1)
-	if obs.Requests.Known() {
+	if obs.Requests.current(cfg, now) {
 		rate = min(rate, obs.Requests.Limit/window)
 	}
 	for _, tokens := range []Quota{obs.Tokens, obs.ProjectTokens} {
-		if tokens.Known() && obs.TokensPerCall > 0 {
+		if tokens.current(cfg, now) && obs.TokensPerCall > 0 {
 			rate = min(rate, tokens.Limit/obs.TokensPerCall/window)
 		}
 	}
 	return rate, !math.IsInf(rate, 1)
 }
 
-func instantRate(obs Observation, now time.Time) (float64, bool) {
+func instantRate(cfg Config, obs Observation, now time.Time) (float64, bool) {
 	rate := math.Inf(1)
-	if requestRate, ok := quotaRate(obs.Requests, 1, now); ok {
+	if requestRate, ok := quotaRate(cfg, obs.Requests, 1, now); ok {
 		rate = min(rate, requestRate)
 	}
 	for _, tokens := range []Quota{obs.Tokens, obs.ProjectTokens} {
-		if tokenRate, ok := quotaRate(tokens, obs.TokensPerCall, now); ok {
+		if tokenRate, ok := quotaRate(cfg, tokens, obs.TokensPerCall, now); ok {
 			rate = min(rate, tokenRate)
 		}
 	}
 	return rate, !math.IsInf(rate, 1)
 }
 
-func quotaRate(q Quota, perCall float64, now time.Time) (float64, bool) {
-	if !q.Known() || perCall <= 0 || q.ResetAt.IsZero() {
+func quotaRate(cfg Config, q Quota, perCall float64, now time.Time) (float64, bool) {
+	if !q.current(cfg, now) || perCall <= 0 || q.ResetAt.IsZero() {
 		return 0, false
 	}
 	untilReset := q.ResetAt.Sub(now).Seconds()
