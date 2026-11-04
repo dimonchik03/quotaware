@@ -47,7 +47,7 @@ func populated(t *testing.T) *state.Store {
 	s.Begin(key, now)
 	s.Fail(key, now)
 	_, err = s.UpdateCeiling(state.Consumer{Namespace: "jobs", ScaledObject: "llm-workers", Trigger: "7c1d", Bucket: key}, func(state.Ceiling, bool) state.Ceiling {
-		return state.Ceiling{Value: 4, Bound: 4, Mode: state.ModeHeadroom, ChangedAt: now, Seen: now}
+		return state.Ceiling{Value: 4, Bound: 4, Mode: state.ModeHeadroom, BoundChangedAt: now, Seen: now}
 	})
 	if err != nil {
 		t.Fatal(err)

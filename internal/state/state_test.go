@@ -422,13 +422,13 @@ func TestStore(t *testing.T) {
 			if known {
 				t.Fatal("a previous ceiling was reported before any update")
 			}
-			return state.Ceiling{Value: 4, ChangedAt: now, Seen: now}
+			return state.Ceiling{Value: 4, BoundChangedAt: now, Seen: now}
 		})
 		second := updateCeiling(t, s, consumer, func(previous state.Ceiling, known bool) state.Ceiling {
 			if !known || previous.Value != 4 {
 				t.Fatalf("previous = %+v known = %v, want the first update", previous, known)
 			}
-			return state.Ceiling{Value: 6, ChangedAt: now.Add(time.Minute), Seen: now.Add(time.Minute)}
+			return state.Ceiling{Value: 6, BoundChangedAt: now.Add(time.Minute), Seen: now.Add(time.Minute)}
 		})
 
 		if first.Value != 4 || second.Value != 6 || second.Consumer != consumer || len(s.Ceilings()) != 1 {

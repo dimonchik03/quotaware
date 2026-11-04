@@ -468,9 +468,11 @@ func (s *Service) evaluate(consumer state.Consumer, t trigger, obs headroom.Obse
 	var from int
 	ceiling, err := s.store.UpdateCeiling(consumer, func(previous state.Ceiling, known bool) state.Ceiling {
 		d := decide(t, obs, recent, previous, known, now)
-		next := state.Ceiling{Value: d.value, Bound: d.bound, Mode: d.mode, ChangedAt: previous.ChangedAt, Seen: now, HoldUntil: d.holdUntil}
+		next := state.Ceiling{Value: d.value, Bound: d.bound, Mode: d.mode, BoundChangedAt: previous.BoundChangedAt, Seen: now, HoldUntil: d.holdUntil}
+		if !known || d.bound != previous.Bound {
+			next.BoundChangedAt = now
+		}
 		if !known || d.value != previous.Value {
-			next.ChangedAt = now
 			change, from = &d, previous.Value
 		}
 		return next
@@ -493,14 +495,14 @@ func (s *Service) evaluate(consumer state.Consumer, t trigger, obs headroom.Obse
 
 func decide(t trigger, obs headroom.Observation, recent state.Recent, previous state.Ceiling, known bool, now time.Time) decision {
 	signal := aimd.Signal{Responses: recent.Responses, RateLimited: recent.RateLimited, RetryAfter: recent.RetryAfter}
-	aimdState := aimd.State{Ceiling: previous.Bound, Known: known && previous.Mode == state.ModeAIMD, ChangedAt: previous.ChangedAt, HoldUntil: previous.HoldUntil}
+	aimdState := aimd.State{Ceiling: previous.Bound, Known: known && previous.Mode == state.ModeAIMD, ChangedAt: previous.BoundChangedAt, HoldUntil: previous.HoldUntil}
 	drainFloor := headroom.DrainFloor(t.cfg, obs)
 	usable := (obs.Requests.Known() || obs.Tokens.Known()) && !obs.ObservedAt.IsZero() && now.Sub(obs.ObservedAt) <= t.cfg.StaleHard
 	if !usable {
 		step := aimd.Step(t.aimd, aimdState, signal, now)
 		return decision{value: max(step.Ceiling, drainFloor), bound: step.Ceiling, mode: state.ModeAIMD, reason: "aimd_" + string(step.Action), holdUntil: step.HoldUntil}
 	}
-	result := headroom.Compute(t.cfg, obs, headroom.Previous{Ceiling: previous.Bound, Known: known, At: previous.ChangedAt}, now)
+	result := headroom.Compute(t.cfg, obs, headroom.Previous{Ceiling: previous.Bound, Known: known, At: previous.BoundChangedAt}, now)
 	d := decision{value: result.Ceiling, bound: result.Bound, mode: state.ModeHeadroom, reason: string(result.Reason), allowedRate: result.AllowedRate, podRate: result.PodRate}
 	guardState := aimd.State{Ceiling: previous.Bound, Known: known, HoldUntil: previous.HoldUntil}
 	if guarded, held, until := aimd.Guard(t.aimd, result.Bound, guardState, signal, now); held {

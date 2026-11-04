@@ -385,7 +385,7 @@ func TestGetMetrics(t *testing.T) {
 		metric(t, f, capMetadata())
 
 		ceilings := f.store.Ceilings()
-		if len(ceilings) != 1 || ceilings[0].Value != 4 || ceilings[0].Consumer.ScaledObject != "llm-workers" || !ceilings[0].ChangedAt.Equal(now) {
+		if len(ceilings) != 1 || ceilings[0].Value != 4 || ceilings[0].Consumer.ScaledObject != "llm-workers" || !ceilings[0].BoundChangedAt.Equal(now) {
 			t.Fatalf("recorded ceilings = %+v, want one for llm-workers at 4 changed now", ceilings)
 		}
 		if !strings.Contains(f.logs.String(), "ceiling changed") {
@@ -424,6 +424,25 @@ func TestGetMetrics(t *testing.T) {
 
 		if first != 2 || second != 2 || third != 2 {
 			t.Fatalf("ceilings = %d, %d, %d, want one raise held for the step interval", first, second, third)
+		}
+	})
+
+	t.Run("measures the step interval from the last change of the bound, not from a drain floor that moved", func(t *testing.T) {
+		f := newFixture(t)
+		f.observe(bucketA, 0, 0)
+		metric(t, f, capMetadata())
+		f.clock.Advance(20 * time.Second)
+		for range 8 {
+			f.store.Begin(bucketA, f.clock.Now())
+		}
+		draining := metric(t, f, capMetadata())
+		f.clock.Advance(5 * time.Second)
+		f.observe(bucketA, 900, 500000)
+
+		recovered := metric(t, f, capMetadata())
+
+		if draining != 2 || recovered != 4 {
+			t.Fatalf("ceilings = %d then %d, want the drain floor of 2 and then the raise to 4, since the bound last changed 25 s ago", draining, recovered)
 		}
 	})
 

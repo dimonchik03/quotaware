@@ -116,10 +116,10 @@ func simulate(cfg headroom.Config, in io.Reader, out io.Writer) error {
 		result := headroom.Compute(cfg, line.observation(), previous, line.At)
 		fmt.Fprintf(out, "%s\t%d\t%s\t%.2f\t%.2f\n",
 			line.At.Format(time.RFC3339), result.Ceiling, result.Reason, result.AllowedRate, result.PodRate)
-		if !previous.Known || previous.Ceiling != result.Ceiling {
+		if !previous.Known || previous.Ceiling != result.Bound {
 			previous.At = line.At
 		}
-		previous.Ceiling, previous.Known = result.Ceiling, true
+		previous.Ceiling, previous.Known = result.Bound, true
 	}
 	if err := scanner.Err(); err != nil {
 		return fmt.Errorf("line %d: %w", number+1, err)

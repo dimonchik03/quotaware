@@ -22,8 +22,9 @@ func TestSimulate(t *testing.T) {
 			"2026-11-01T18:00:20Z\t3\theadroom\t7.44\t2.00",
 			"2026-11-01T18:00:55Z\t3\theadroom\t6.80\t2.00",
 			"2026-11-01T18:00:59Z\t3\tdrain\t0.00\t2.00",
-			"2026-11-01T18:01:05Z\t4\theadroom\t8.50\t2.00",
-			"2026-11-01T18:04:00Z\t4\tfrozen\t0.00\t0.00",
+			"2026-11-01T18:01:05Z\t2\tdrain\t8.50\t2.00",
+			"2026-11-01T18:01:25Z\t3\tstep_up\t8.50\t2.00",
+			"2026-11-01T18:04:00Z\t3\tfrozen\t0.00\t0.00",
 		}
 		if len(lines) != len(want) {
 			t.Fatalf("got %d lines, want %d:\n%s", len(lines), len(want), stdout.String())
@@ -32,6 +33,19 @@ func TestSimulate(t *testing.T) {
 			if lines[i] != want[i] {
 				t.Fatalf("line %d = %q, want %q", i+1, lines[i], want[i])
 			}
+		}
+	})
+
+	t.Run("steps up from the bound before the drain guard, as the scaler does", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		input := `{"at":"2026-11-01T18:00:00Z","requests":{"limit":600,"remaining":600,"reset_at":"2026-11-01T18:01:00Z"},"latency_ms":2000,"in_flight":40}` + "\n" +
+			`{"at":"2026-11-01T18:00:30Z","requests":{"limit":1200,"remaining":1200,"reset_at":"2026-11-01T18:01:00Z"},"latency_ms":2000,"in_flight":0}` + "\n"
+
+		code := run([]string{"simulate", "-concurrency", "4", "-max", "40"}, strings.NewReader(input), &stdout, &stderr)
+
+		lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
+		if code != 0 || len(lines) != 3 || !strings.HasPrefix(lines[1], "2026-11-01T18:00:00Z\t10\tdrain") || !strings.HasPrefix(lines[2], "2026-11-01T18:00:30Z\t6\tstep_up") {
+			t.Fatalf("exit = %d, stdout = %q, want the drain floor of 10 and then a raise from the bound of 4 by two to 6", code, stdout.String())
 		}
 	})
 
