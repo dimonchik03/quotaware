@@ -20,6 +20,7 @@ const (
 
 type Config struct {
 	RequestsPerMinute int
+	OpenAIWindowRPM   []int
 	TokensPerMinute   int
 	Latency           time.Duration
 	Jitter            time.Duration
@@ -40,6 +41,11 @@ func DefaultConfig() Config {
 }
 
 func (c Config) Validate() error {
+	for _, rpm := range c.OpenAIWindowRPM {
+		if rpm <= 0 {
+			return fmt.Errorf("scheduled requests per minute must be positive")
+		}
+	}
 	switch {
 	case c.RequestsPerMinute <= 0:
 		return fmt.Errorf("requests per minute must be positive")
@@ -119,6 +125,9 @@ func (s *Server) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		window, found := s.windows[model]
 		if !found {
 			window = &fixedWindow{epoch: s.epoch}
+			if len(s.cfg.OpenAIWindowRPM) > 0 {
+				window.epoch = s.now()
+			}
 			s.windows[model] = window
 		}
 		return window

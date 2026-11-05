@@ -47,10 +47,15 @@ func DefaultConfig(quotaware, provider string) Config {
 
 type Observation = usage.Observation
 
+type pendingObservation struct {
+	observation Observation
+	headersAt   time.Time
+}
+
 type Collector struct {
 	cfg        Config
 	path       string
-	queue      chan Observation
+	queue      chan pendingObservation
 	dropped    atomic.Int64
 	failed     atomic.Int64
 	unobserved atomic.Int64
@@ -77,7 +82,7 @@ func New(cfg Config) (*Collector, error) {
 	case cfg.PostTimeout <= 0 || cfg.CloseTimeout <= 0:
 		return nil, errors.New("post and close timeouts must be positive")
 	}
-	c := &Collector{cfg: cfg, path: path, queue: make(chan Observation, cfg.QueueSize), stop: make(chan struct{})}
+	c := &Collector{cfg: cfg, path: path, queue: make(chan pendingObservation, cfg.QueueSize), stop: make(chan struct{})}
 	c.wg.Add(1)
 	go c.deliver()
 	return c, nil
@@ -125,7 +130,7 @@ func (c *Collector) Close() error {
 	return err
 }
 
-func (c *Collector) enqueue(observation Observation) {
+func (c *Collector) enqueue(observation pendingObservation) {
 	c.gate.Lock()
 	defer c.gate.Unlock()
 	if c.closing {
@@ -166,8 +171,9 @@ func (c *Collector) deliver() {
 	}
 }
 
-func (c *Collector) post(observation Observation) {
-	body, err := json.Marshal(observation)
+func (c *Collector) post(pending pendingObservation) {
+	pending.observation.HeadersAgeMS = float64(time.Since(pending.headersAt)) / float64(time.Millisecond)
+	body, err := json.Marshal(pending.observation)
 	if err != nil {
 		c.failure(err)
 		return
@@ -260,7 +266,6 @@ func (r roundTripper) RoundTrip(request *http.Request) (*http.Response, error) {
 	response.Body = usage.NewCapture(response.Body, c.cfg.MaxCaptureBytes, func(captured []byte, outcome usage.Outcome) {
 		complete := outcome == usage.Completed
 		observation.LatencyMS = float64(time.Since(started)) / float64(time.Millisecond)
-		observation.HeadersAgeMS = float64(time.Since(headersAt)) / float64(time.Millisecond)
 		observation.Complete = complete
 		if complete && succeeded {
 			if decoded, ok := usage.Decompress(encoding, captured, c.cfg.MaxCaptureBytes); ok {
@@ -269,7 +274,7 @@ func (r roundTripper) RoundTrip(request *http.Request) (*http.Response, error) {
 				}
 			}
 		}
-		c.enqueue(observation)
+		c.enqueue(pendingObservation{observation: observation, headersAt: headersAt})
 	})
 	return response, nil
 }

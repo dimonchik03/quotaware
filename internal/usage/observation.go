@@ -16,6 +16,12 @@ const (
 
 var credentialPattern = regexp.MustCompile(`^([0-9a-f]{12}|anonymous)$`)
 
+const WorkloadHeader = "X-Quotaware-Workload"
+
+var workloadPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
+
+func ValidWorkload(value string) bool { return workloadPattern.MatchString(value) }
+
 func ValidCredential(credential string) bool {
 	return credentialPattern.MatchString(credential)
 }

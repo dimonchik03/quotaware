@@ -8,6 +8,8 @@ on:
       - .goreleaser.yaml
       - Dockerfile
       - .dockerignore
+      - internal/scaler/externalscaler/LICENSE
+      - internal/scaler/externalscaler/NOTICE
       - go.mod
 
 permissions:
@@ -29,6 +31,14 @@ jobs:
         with:
           version: v2.19.0
           args: release --snapshot --clean
+
+      - name: verify upstream license and attribution in every archive
+        run: |
+          for archive in dist/*.tar.gz; do
+            for file in LICENSE NOTICE; do
+              tar -xOzf "$archive" "internal/scaler/externalscaler/$file" | cmp - "internal/scaler/externalscaler/$file"
+            done
+          done
 
   image:
     runs-on: ubuntu-latest

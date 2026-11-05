@@ -13,6 +13,16 @@ import (
 func runDir(t *testing.T, files map[string]string) string {
 	t.Helper()
 	dir := t.TempDir()
+	for _, name := range []string{"jobs_total", "completed_total", "failed_total", "abandoned_total", "rate_limited_total", "retries_total", "backoff_seconds_total", "latency_p50", "latency_p95"} {
+		if _, ok := files[name+".json"]; !ok {
+			files[name+".json"] = `{"status":"success","data":{"resultType":"vector","result":[{"value":[1793556000,"0"]}]}}`
+		}
+	}
+	for _, name := range []string{"replicas", "multiplier", "queue_length", "retries_per_minute", "ceiling"} {
+		if _, ok := files[name+".json"]; !ok {
+			files[name+".json"] = `{"status":"success","data":{"resultType":"matrix","result":[{"values":[[1793556000,"0"]]}]}}`
+		}
+	}
 	files["run.json"] = `{"start":` + strconvFloat(float64(start.Unix())) + `,"end":` + strconvFloat(float64(start.Add(time.Minute).Unix())) + `}`
 	for name, body := range files {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
@@ -58,4 +68,41 @@ func TestLoadRun(t *testing.T) {
 			t.Fatalf("err = %v, want a refusal naming the file", err)
 		}
 	})
+}
+
+func TestLoadRunRejectsAnAbsentRetryCount(t *testing.T) {
+	dir := runDir(t, map[string]string{})
+	if err := os.Remove(filepath.Join(dir, "retries_total.json")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := plot.LoadRun(dir); err == nil || !strings.Contains(err.Error(), "retries_total") {
+		t.Fatalf("missing retries export: %v", err)
+	}
+}
+func TestLoadRunRejectsAnEmptyRetryVector(t *testing.T) {
+	dir := runDir(t, map[string]string{"retries_total.json": `{"status":"success","data":{"resultType":"vector","result":[]}}`})
+	if _, err := plot.LoadRun(dir); err == nil || !strings.Contains(err.Error(), "retries_total") {
+		t.Fatalf("empty retries measurement: %v", err)
+	}
+}
+
+func TestChangingRunRequiresBothQuotaTransitionsAndAnAdaptiveCeiling(t *testing.T) {
+	dir := runDir(t, map[string]string{})
+	metadata := `{"start":1793556000,"end":1793556200,"label":"adaptive","profile":"changing","phases":"load:2m:1.5,idle:1m:0","rpm_windows":[600,180,600],"adaptive":true}`
+	if err := os.WriteFile(filepath.Join(dir, "run.json"), []byte(metadata), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := plot.LoadRun(dir); err == nil || !strings.Contains(err.Error(), "provider_rpm") {
+		t.Fatalf("missing transition: %v", err)
+	}
+	rpm := matrixJSON(t, [][2]float64{{at(15), 600}, {at(75), 180}, {at(135), 600}})
+	if err := os.WriteFile(filepath.Join(dir, "provider_rpm.json"), rpm, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "ceiling.json"), matrixJSON(t, nil), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := plot.LoadRun(dir); err == nil || !strings.Contains(err.Error(), "ceiling") {
+		t.Fatalf("missing adaptive observations: %v", err)
+	}
 }

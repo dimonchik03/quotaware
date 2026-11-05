@@ -658,3 +658,59 @@ func TestProxy(t *testing.T) {
 type roundTripperFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestRejectedCallFinishingAfterEvictionLeavesNewCallInFlight(t *testing.T) {
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Quotaware-Workload") != "" {
+			t.Error("workload metadata reached provider")
+		}
+		close(entered)
+		<-release
+	}))
+	defer upstream.Close()
+	store, err := state.New(.5, state.Limits{Buckets: 1, Consumers: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := &clock{now: start}
+	cfg := proxy.DefaultConfig()
+	cfg.OpenAI, _ = url.Parse(upstream.URL)
+	cfg.Anthropic = cfg.OpenAI
+	handler, err := proxy.New(cfg, store, c.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	front := httptest.NewServer(handler)
+	defer front.Close()
+	store.Observe(state.Key{Provider: "openai", Model: "occupied", Key: "anonymous"}, state.Sample{At: start})
+	c.Advance(11 * time.Minute)
+	finished := make(chan error, 1)
+	go func() {
+		req, err := http.NewRequest(http.MethodPost, front.URL+"/v1/chat/completions", strings.NewReader(`{"model":"next"}`))
+		if err != nil {
+			finished <- err
+			return
+		}
+		req.Header.Set("X-Quotaware-Workload", "indexer")
+		resp, err := http.DefaultClient.Do(req)
+		if err == nil {
+			_, err = io.Copy(io.Discard, resp.Body)
+			_ = resp.Body.Close()
+		}
+		finished <- err
+	}()
+	<-entered
+	store.Evict(c.Now(), 10*time.Minute)
+	key := state.Key{Provider: "openai", Model: "next", Key: "anonymous"}
+	store.Begin(key, c.Now(), "")
+	close(release)
+	if err := <-finished; err != nil {
+		t.Fatal(err)
+	}
+	b := store.Buckets(c.Now())[0]
+	if b.InFlight != 1 || b.Responses != 0 || store.Stats().RejectedBuckets != 1 {
+		t.Fatalf("bucket = %+v, stats = %+v", b, store.Stats())
+	}
+}

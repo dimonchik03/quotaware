@@ -1,12 +1,94 @@
 # Benchmark
 
+## Changing quota against a static cap, 2026-11-05
+
+The current six-trial experiment is saved with its raw Prometheus exports and charts
+under [2026-11-05-changing](../bench/results/2026-11-05-changing/).
+It ran on one GitHub-hosted Ubuntu 24.04 amd64 runner from clean commit
+[4b602e1](https://github.com/dimonchik03/quotaware/commit/4b602e16c46a0eefed44002e16dbc223820ca2a1).
+[CI execution](https://github.com/dimonchik03/quotaware/actions/runs/41928303907).
+
+Each cell shows pass 1 / pass 2. The second pass reverses A/B/C to C/B/A.
+Quotaware uses `safety: "1"` and `maxStepUp: "4"`. The default safety setting is
+0.85. All arms use two concurrent provider calls per worker.
+
+| Metric | Queue only | Static cap of 10 | Quotaware |
+|---|---|---|---|
+| Jobs completed, out of 1,800 | 1,800 / 1,800 | 1,800 / 1,800 | 1,784 / 1,782 |
+| Jobs abandoned on shutdown | 0 / 0 | 0 / 0 | 16 / 18 |
+| HTTP 429 responses | 158 / 150 | 24 / 24 | 18 / 20 |
+| Worker pod-seconds | 4,875 / 5,280 | 2,385 / 2,310 | 2,032.5 / 2,295 |
+| Job latency p95 | 92.1 s / 92.1 s | 136.5 s / 136.5 s | 197.9 s / 206.9 s |
+| Time from end of load phase to empty queue | 75 s / 75 s | 105 s / 105 s | 150 s / 165 s |
+
+The adaptive ceiling follows the reduction in available quota and keeps fewer
+workers alive through it. Across these two trials it uses about 8% fewer worker
+pod-seconds than the static cap, while p95 rises into the next histogram bucket.
+Its worker also abandons jobs when a scale-down interrupts retry backoff. Completed
+jobs alone enter the latency histogram, so the resource totals must be read with
+the completion counts. The static ten-worker cap completes this workload sooner
+and preserves every job.
+
+The worker uses a destructive Redis pop. A production worker needs queue leases
+or requeue-on-shutdown behavior for work between provider calls. Quotaware's drain
+floor sees open HTTP calls. It cannot preserve a job sleeping between retries,
+and KEDA can choose any worker to terminate.
+
+The experiment demonstrates adaptation and its cost under a brief quota reduction.
+The static cap performs well for this schedule. Performance for other quota schedules and real providers remains unmeasured.
+
+### Method
+
+`make bench-changing` compares three KEDA policies on the same Redis queue. A reads
+queue depth with a maximum of 30 workers. B reads the same queue with a static
+maximum of 10. C allows up to 30 workers and applies Quotaware with `safety: "1"`
+and `maxStepUp: "4"`. Ten workers match the nominal 600 RPM at two concurrent
+calls per worker and about two seconds per call.
+
+The producer enqueues 15 jobs per second for two minutes, then stops adding work.
+The fake provider starts its window clock on the first request for the model. It
+admits 600 requests in the first minute, 180 in the second, and 600 in every
+subsequent minute. Its token limit stays at two million per minute. The provider
+and scaler restart between arms, and each arm uses fresh workers, the same seed
+and the same HPA settings. The second pass reverses the order from A/B/C to C/B/A. On a Mac,
+`caffeinate -i make bench-changing` keeps the host awake for the experiment.
+The experiment changes the provider's advertised RPM directly. The kind demo in
+the README exercises a separate workload spending a shared quota.
+
+Prometheus scrapes every five seconds. The replica, queue, ceiling and observed
+provider RPM series are exported on a 15-second grid. Pod-seconds integrate live
+worker metrics endpoints, including their 15-second shutdown linger. Job latency
+includes queue wait and is interpolated from a histogram. With two repetitions per
+arm, report both observations and avoid extrapolating to production latency or cost.
+
+The worker pops jobs from Redis before processing them. It finishes a provider call
+already in progress, but SIGTERM interrupts a retry wait. A popped job can then
+be abandoned; the worker counts it separately. The retry and backoff counters
+are charged when a wait is scheduled. Only completed jobs enter the latency
+histogram. An open-call drain floor cannot protect a job that is between attempts.
+
+
+The CI workflow runs on application, chart and benchmark source pushes. It excludes
+saved measurements and documentation-only commits. Workflow-only edits can be checked
+with its manual dispatch trigger.
+
+### Scope of the conclusion
+
+This schedule contains a one-minute reduction followed by recovery. It tests an
+advertised request quota, while token quota, model and latency distribution stay
+fixed. Its fixed-window fake provider charges admitted calls only. Repeat counts
+are small, and the latency histogram is coarse. A longer reduction, continuously
+refilled limits or reliable job requeueing would be separate experiments.
+
+## Historical fixed-quota experiment, 2026-11-02
+
 Three runs on a laptop `kind` cluster, zero provider tokens spent. They share the
 workers, the producer schedule and seed and the HPA behaviour; only the ScaledObject
 differs by design. The fake provider and Prometheus ran on across the runs, so each run
 met the minute window at a different phase, and each variant ran once, in the order
 A, B, C.
 
-## Setup
+### Setup
 
 - Provider: `bench/fakeprovider`, 600 requests and 2,000,000 tokens per minute for
   the model in one fixed minute window that every key shares, 2 s latency with 200 ms
@@ -35,14 +117,14 @@ A, B, C.
   table. Everything, including the commit the images were built from, is committed
   under `bench/results/<date>/`.
 
-## Hypothesis, written before the first run
+### Hypothesis, written before the first run
 
 Under quota both runs look the same, and quotaware must not hurt there. At and above
 quota, run B shows fewer 429s, fewer pod-seconds and a lower p95 at the same
 throughput, because throughput is capped by the quota either way. If B does not win,
 that is still the write-up, and a bug hunt.
 
-## What is measured per run
+### What is measured per run
 
 Replicas over time, 429 per minute, retries, jobs completed per minute, job latency
 p50 and p95 from enqueue to completion, time to drain the burst (from the end of the
@@ -51,7 +133,7 @@ curve), idle pod-seconds (seconds spent in backoff divided by the calls per pod)
 jobs abandoned on shutdown and jobs unaccounted for (produced minus completed,
 failed and abandoned).
 
-## Running it
+### Running it
 
     make bench          # full schedule, about an hour for the three runs
     make bench-smoke    # short schedule, about three minutes per run, to check the pipeline
@@ -59,7 +141,7 @@ failed and abandoned).
 The cluster is the one `make demo` uses, with its own kubeconfig under `bench/kind/`;
 `make demo-down` deletes it.
 
-## Results, 2026-11-02
+### Results, 2026-11-02
 
 `bench/results/2026-11-02/`, built from commit `bfffc1c` with no changes to tracked files, produced
 by `make bench` on a MacBook with 16 GB of memory, kind v0.33, KEDA 2.21.0, Go 1.26.5.
@@ -98,7 +180,7 @@ by their headers. A run on the current commit may step up differently.
 | Idle pod-seconds (in backoff) | 13300 | 0 | 8 |
 | Time to drain the burst | 450 s | 720 s | 495 s |
 
-## Result against the hypothesis
+### Result against the hypothesis
 
 - *Under quota both runs look the same.* Holds in the 0.5x phase. In the 1.0x phase B
   already falls behind: its ceiling of 8 pods completes about 480 jobs per minute
@@ -160,7 +242,7 @@ counts each pod's 429 total; the per-minute row and chart use retries, because t
 429 series of a pod only appears at its first 429 and a rate misses that step. In
 these runs every retry followed a 429.
 
-## Superseded results, 2026-11-01
+### Superseded results, 2026-11-01
 
 `bench/results/2026-11-01/` is kept for the record and should not be quoted. The
 worker applied its jitter after `retry-after` and so retried up to 25 % early, which

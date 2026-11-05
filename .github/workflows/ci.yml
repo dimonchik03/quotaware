@@ -44,6 +44,9 @@ jobs:
         with:
           version: v4.3.1
       - run: helm lint deploy/helm/quotaware --set observe.insecure=true --strict
+      - run: |
+          if helm template quotaware deploy/helm/quotaware --set observe.insecure=true --set maxScaledObjects=1 > "$RUNNER_TEMP/slots.log" 2>&1; then exit 1; fi
+          grep -q "maxScaledObjects must be at least 2" "$RUNNER_TEMP/slots.log"
       - run: helm template quotaware deploy/helm/quotaware --set observe.token=example > /dev/null
       - run: helm template quotaware deploy/helm/quotaware --set observe.existingSecret=quotaware-observe > /dev/null
       - run: |
@@ -86,7 +89,7 @@ jobs:
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
         with:
           python-version: ${{ matrix.python }}
-      - run: pip install ./collector/python "${{ matrix.httpx }}" pytest
+      - run: pip install ./collector/python "${{ matrix.httpx }}" pytest "brotli>=1.2" zstandard
       - run: python -c "import quotaware_httpx; assert 'site-packages' in quotaware_httpx.__file__, quotaware_httpx.__file__"
       - run: python -m pytest -q --import-mode=importlib collector/python
 

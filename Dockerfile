@@ -11,4 +11,6 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldfl
 
 FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=build /out/app /app
+COPY LICENSE /licenses/quotaware/LICENSE
+COPY internal/scaler/externalscaler/LICENSE internal/scaler/externalscaler/NOTICE /licenses/keda/
 ENTRYPOINT ["/app"]

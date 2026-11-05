@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -24,6 +26,18 @@ func run(args []string) int {
 	cfg := fakeprovider.DefaultConfig()
 	listen := flags.String("listen", ":8081", "address to listen on")
 	flags.IntVar(&cfg.RequestsPerMinute, "rpm", cfg.RequestsPerMinute, "requests per minute per model")
+	flags.Func("openai-window-rpm", "comma-separated RPM limits for successive fixed minute windows, starting at the first call per model; the final limit persists", func(value string) error {
+		var schedule []int
+		for _, field := range strings.Split(value, ",") {
+			rpm, err := strconv.Atoi(field)
+			if err != nil || rpm <= 0 {
+				return fmt.Errorf("invalid RPM %q", field)
+			}
+			schedule = append(schedule, rpm)
+		}
+		cfg.OpenAIWindowRPM = schedule
+		return nil
+	})
 	flags.IntVar(&cfg.TokensPerMinute, "tpm", cfg.TokensPerMinute, "tokens per minute per model")
 	flags.DurationVar(&cfg.Latency, "latency", cfg.Latency, "response latency")
 	flags.DurationVar(&cfg.Jitter, "jitter", cfg.Jitter, "latency jitter")

@@ -39,7 +39,11 @@ func (w *fixedWindow) peek(cfg Config, now time.Time) decision {
 }
 
 func (w *fixedWindow) decide(cfg Config, now time.Time, tokens int, consume bool) decision {
-	start := w.epoch.Add(now.Sub(w.epoch).Truncate(time.Minute))
+	elapsed := now.Sub(w.epoch).Truncate(time.Minute)
+	if schedule := cfg.OpenAIWindowRPM; len(schedule) > 0 {
+		cfg.RequestsPerMinute = schedule[min(max(int(elapsed/time.Minute), 0), len(schedule)-1)]
+	}
+	start := w.epoch.Add(elapsed)
 	if !w.start.Equal(start) {
 		w.start, w.requests, w.tokens = start, 0, 0
 	}

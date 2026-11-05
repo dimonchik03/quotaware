@@ -71,9 +71,9 @@ written is retried.
 Collectors that remove the extra hop: a Go `http.RoundTripper` wrapper and a Python
 `httpx` event hook that post the same observation to `POST /v1/observe` on the admin
 port behind a bearer token that is required unless `-observe-insecure` is passed
-(ADR 0007, ADR 0008). An optional `headers_age_ms` says how long before the post the
-headers arrived, so the quotas and their duration resets are dated when the provider
-sent them.
+(ADR 0007, ADR 0008). An optional `headers_age_ms` measures the time from receipt of the provider headers
+to sending the report, including local delivery backlog. The observer uses this age to
+date quota windows and duration resets.
 
 Quotas are dated by when their headers arrived, on the proxy as on the observe path,
 and a sample whose headers are older than the ones already applied leaves the quotas
@@ -146,7 +146,7 @@ A gRPC server implementing KEDA's `ExternalScaler` service
 (`pkg/scalers/externalscaler/externalscaler.proto`, vendored):
 
 - `GetMetricSpec` returns metric `quotaware-ceiling` with `targetSize: 1` (the
-  Prometheus series of the same number is `quotaware_ceiling{key="combined"}`; the
+  quota ceiling before queue demand is `quotaware_ceiling{key="combined"}`; the
   other `quotaware_ceiling` series are the per-credential ceilings it combines).
 - `GetMetrics` returns the ceiling as `metricValue`. With KEDA's default
   `AverageValue` semantics the HPA computes `ceil(metricValue / targetSize)`, so the
@@ -193,6 +193,8 @@ streams, room for a parked `StreamIsActive` and a call in flight per ScaledObjec
 because KEDA multiplexes every ScaledObject of a scaler address over one connection;
 a caller that parks streams cannot grow the process beyond that (ADR 0009). Editing a trigger's metadata starts its ceiling state
 afresh, as a new quotaware process would.
+
+The optional `workload` trigger label matches the `X-Quotaware-Workload` request header for drain and activation. An omitted label includes all matching calls. In shared mode, every active credential hold bounds the shared estimate. See [ADR 0012](adr/0012-shared-holds-and-workload-drain.md).
 
 ### 5. Combining with the existing queue trigger
 

@@ -41,16 +41,23 @@ func Build(baseline Run, capped []Run, concurrency int) Report {
 		return count(r.Totals["jobs_total"] - r.Totals["completed_total"] - r.Totals["failed_total"] - r.Totals["abandoned_total"])
 	})
 	measure("429 responses", func(r Run) string { return count(r.Totals["rate_limited_total"]) })
-	measure("Retries", func(r Run) string { return count(r.Totals["retries_total"]) })
-	measure("Peak retries per minute", func(r Run) string { return fmt.Sprintf("%.0f", r.Series["retries_per_minute"].Max()) })
+	retryLabel, peakLabel, backoffLabel, drainLabel := "Retries", "Peak retries per minute", "Idle pod-seconds (in backoff)", "Time to drain the burst"
+	if len(baseline.Series["provider_rpm"]) > 0 {
+		retryLabel = "Retries scheduled"
+		peakLabel = "Peak scheduled retries per minute"
+		backoffLabel = "Scheduled backoff (pod-seconds)"
+		drainLabel = "Time from last load phase to empty queue"
+	}
+	measure(retryLabel, func(r Run) string { return count(r.Totals["retries_total"]) })
+	measure(peakLabel, func(r Run) string { return fmt.Sprintf("%.0f", r.Series["retries_per_minute"].Max()) })
 	measure("Job latency p50", func(r Run) string { return seconds(r.Totals["latency_p50"]) })
 	measure("Job latency p95", func(r Run) string { return seconds(r.Totals["latency_p95"]) })
 	measure("Peak replicas", func(r Run) string { return fmt.Sprintf("%.0f", r.Series["replicas"].Max()) })
 	measure("Pod-seconds", func(r Run) string { return fmt.Sprintf("%.0f", r.Series["replicas"].Integral()) })
-	measure("Idle pod-seconds (in backoff)", func(r Run) string {
+	measure(backoffLabel, func(r Run) string {
 		return fmt.Sprintf("%.0f", r.Totals["backoff_seconds_total"]/float64(max(concurrency, 1)))
 	})
-	measure("Time to drain the burst", func(r Run) string { return drainTime(r, phases(r)) })
+	measure(drainLabel, func(r Run) string { return drainTime(r, phases(r)) })
 	return report
 }
 
@@ -82,7 +89,7 @@ func phaseLabel(multiplier float64) string {
 	case multiplier < 1:
 		return fmt.Sprintf("%.1fx quota", multiplier)
 	default:
-		return fmt.Sprintf("%.0fx quota", multiplier)
+		return fmt.Sprintf("%gx quota", multiplier)
 	}
 }
 
@@ -152,20 +159,52 @@ func (r Report) Charts() map[string]string {
 	for i, band := range r.Phases {
 		bands[i] = Band{Label: band.Label, From: origin.Add(band.From.Sub(r.Baseline.Start)), To: origin.Add(band.To.Sub(r.Baseline.Start))}
 	}
+	changing := len(r.Baseline.Series["provider_rpm"]) > 0
+	if changing {
+		bands = nil
+		for _, point := range r.Baseline.Series["provider_rpm"] {
+			label := fmt.Sprintf("%.0f RPM", point.Value)
+			if len(bands) > 0 {
+				bands[len(bands)-1].To = point.At
+				if bands[len(bands)-1].Label == label {
+					continue
+				}
+			}
+			bands = append(bands, Band{Label: label, From: point.At, To: point.At})
+		}
+	}
 	var replicaLines, retryLines, queueLines []Line
 	for i, run := range r.runs() {
 		color := palette[i%len(palette)]
-		replicaLines = append(replicaLines, Line{Label: run.Name + " replicas", Color: color, Series: shifted(run.Series["replicas"], run.Start)})
-		if i > 0 {
-			replicaLines = append(replicaLines, Line{Label: run.Name + " ceiling", Color: color, Dashed: true, Series: shifted(run.Series["ceiling"], run.Start)})
+		name := run.Name
+		if changing {
+			name = run.Label
 		}
-		retryLines = append(retryLines, Line{Label: run.Name, Color: color, Series: shifted(run.Series["retries_per_minute"], run.Start)})
-		queueLines = append(queueLines, Line{Label: run.Name, Color: color, Series: shifted(run.Series["queue_length"], run.Start)})
+		replicaLines = append(replicaLines, Line{Label: name, Color: color, Series: shifted(run.Series["replicas"], run.Start)})
+		if i > 0 && len(run.Series["ceiling"]) > 0 {
+			replicaLines = append(replicaLines, Line{Label: name + " ceiling", Color: color, Dashed: true, Series: shifted(run.Series["ceiling"], run.Start)})
+		}
+		retryLines = append(retryLines, Line{Label: name, Color: color, Series: shifted(run.Series["retries_per_minute"], run.Start)})
+		queueLines = append(queueLines, Line{Label: name, Color: color, Series: shifted(run.Series["queue_length"], run.Start)})
 	}
 	replicas := Chart{Title: "Worker replicas", YLabel: "pods", Origin: origin, Bands: bands, Lines: replicaLines}
-	retries := Chart{Title: "Retries per minute", YLabel: "retries / min", Origin: origin, Bands: bands, Lines: retryLines}
+	retries := Chart{Title: "Retries scheduled per minute", YLabel: "retries / min", Origin: origin, Bands: bands, Lines: retryLines}
 	queue := Chart{Title: "Queue length", YLabel: "jobs", Origin: origin, Bands: bands, Lines: queueLines}
-	return map[string]string{"replicas.svg": replicas.SVG(), "retries.svg": retries.SVG(), "queue.svg": queue.SVG()}
+	charts := map[string]string{"replicas.svg": replicas.SVG(), "retries.svg": retries.SVG(), "queue.svg": queue.SVG()}
+	if changing && len(r.Capped) == 2 {
+		static, adaptive := r.Capped[0], r.Capped[1]
+		var constrained []Band
+		nominal := fmt.Sprintf("%.0f RPM", r.Baseline.Series["provider_rpm"].Max())
+		for _, band := range bands {
+			if band.Label != nominal {
+				constrained = append(constrained, band)
+			}
+		}
+		chart := Chart{Title: "Static and adaptive worker counts as provider quota changes", YLabel: "worker pods", Origin: origin, Bands: constrained,
+			Lines: []Line{{Label: "Static cap of 10", Color: palette[1], Series: shifted(static.Series["replicas"], static.Start)}, {Label: "Quotaware", Color: palette[2], Series: shifted(adaptive.Series["replicas"], adaptive.Start)}}}
+		charts["static-vs-adaptive.svg"] = chart.SVG()
+	}
+	return charts
 }
 
 func (r Report) Write(dir string) error {

@@ -79,6 +79,7 @@ type callContextKey struct{}
 type call struct {
 	key      state.Key
 	provider headers.Provider
+	workload string
 	started  time.Time
 	once     sync.Once
 }
@@ -87,6 +88,7 @@ func (p *Proxy) route(provider headers.Provider, upstream *url.URL) http.Handler
 	reverse := &httputil.ReverseProxy{
 		Rewrite: func(request *httputil.ProxyRequest) {
 			request.SetURL(upstream)
+			request.Out.Header.Del(usage.WorkloadHeader)
 		},
 		Transport:      p.transport,
 		ModifyResponse: p.observe,
@@ -113,7 +115,13 @@ func (p *Proxy) route(provider headers.Provider, upstream *url.URL) http.Handler
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
+		workload := r.Header.Get(usage.WorkloadHeader)
+		if workload != "" && !usage.ValidWorkload(workload) {
+			writeError(w, http.StatusBadRequest, "invalid workload label")
+			return
+		}
 		c := &call{
+			workload: workload,
 			key:      state.Key{Provider: string(provider), Model: model, Key: usage.CredentialHash(r.Header)},
 			provider: provider,
 			started:  p.now(),
@@ -121,7 +129,10 @@ func (p *Proxy) route(provider headers.Provider, upstream *url.URL) http.Handler
 		r.Body = io.NopCloser(bytes.NewReader(body))
 		r.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(body)), nil }
 		r.ContentLength = int64(len(body))
-		p.store.Begin(c.key, c.started)
+		if !p.store.Begin(c.key, c.started, workload) {
+			reverse.ServeHTTP(w, r)
+			return
+		}
 		reverse.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), callContextKey{}, c)))
 	})
 }
@@ -143,7 +154,7 @@ func (p *Proxy) observe(response *http.Response) error {
 	encoding := response.Header.Get("Content-Encoding")
 	response.Body = usage.NewCapture(response.Body, p.cfg.MaxCaptureBytes, func(body []byte, outcome usage.Outcome) {
 		c.once.Do(func() {
-			p.store.End(c.key, p.sample(c, status, headersStatus, quotas, retryAfter, now, contentType, encoding, body, outcome))
+			p.store.End(c.key, p.sample(c, status, headersStatus, quotas, retryAfter, now, contentType, encoding, body, outcome), c.workload)
 		})
 	})
 	return nil
@@ -179,13 +190,13 @@ func (p *Proxy) failed(w http.ResponseWriter, r *http.Request, err error) {
 	}
 	if errors.Is(err, context.Canceled) {
 		c.once.Do(func() {
-			p.store.Abort(c.key, p.now())
+			p.store.Abort(c.key, p.now(), c.workload)
 		})
 		p.cfg.Logger.Info("client gave up before the upstream answered", "provider", c.provider, "model", c.key.Model)
 		return
 	}
 	c.once.Do(func() {
-		p.store.Fail(c.key, p.now())
+		p.store.Fail(c.key, p.now(), c.workload)
 	})
 	p.cfg.Logger.Error("upstream request failed", "provider", c.provider, "model", c.key.Model, "error", err.Error())
 	writeError(w, http.StatusBadGateway, "upstream unavailable")

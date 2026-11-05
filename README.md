@@ -1,62 +1,55 @@
 # quotaware
 
-**Scale LLM workers on provider quota, not queue depth.**
+**Cap LLM worker replicas with the quota your provider can actually serve.**
 
-A KEDA external scaler for LLM worker deployments. It reads the rate-limit headers
-your provider already returns (OpenAI, Anthropic), computes how many worker pods the
-remaining quota can actually feed, and caps your existing queue-based trigger at that
-number.
+A backlog tells Kubernetes how much work is waiting. OpenAI and Anthropic rate-limit
+headers tell it how fast that work can finish. Quotaware combines those signals in a
+[KEDA](https://keda.sh/) external scaler. Workers can send requests through the proxy
+or report observations with the Go and Python collectors.
 
-## Why
+[Try the simulator](#try-it-without-a-cluster) · [Run on kind](#watch-it-on-kind) ·
+[Deploy with KEDA](#deploy-with-keda) · [Releases](https://github.com/dimonchik03/quotaware/releases)
 
-Past the provider's RPM/TPM limit, queue-depth autoscaling keeps adding pods the
-quota cannot feed: throughput stays at the quota, and the extra capacity goes into
-429s and backoff while the queue still looks long. The headers that say how much
-quota is left are on every response; nothing wires them to the autoscaler.
+## When the provider changes its quota
 
-## What it changes
+We compared queue-only scaling, a static maximum of ten workers and Quotaware on a
+kind cluster on GitHub-hosted Ubuntu. Each run received 1,800 jobs. The fake provider
+allowed up to 600 requests in minute one, 180 in minute two and 600 per minute after that. Ten
+workers could consume the full nominal quota. The experiment asks what happens when
+that same cap outlasts the capacity it was chosen for.
 
-Same queue, same fake provider limited to 600 requests per minute, same job
-schedule. Run A scales on queue depth alone; runs B and C cap the same trigger with
-the quotaware ceiling, at the default safety factor 0.85 and at 1, both with
-`maxStepUp: "4"`, twice the default.
+![Static and adaptive worker counts while the provider quota changes](bench/results/2026-11-05-changing/pass-1/static-vs-adaptive.svg)
 
-![worker replicas](bench/results/2026-11-02/replicas.svg)
+Each cell shows pass 1 / pass 2. The second pass reverses A/B/C to C/B/A.
+Quotaware uses `safety: "1"` and `maxStepUp: "4"`. The default safety setting is
+0.85. All arms use two concurrent provider calls per worker.
 
-![retries per minute, each after a 429](bench/results/2026-11-02/retries.svg)
-
-| Metric | A (queue trigger) | B (queue trigger + quotaware, safety 0.85) | C (queue trigger + quotaware, safety 1) |
+| Metric | Queue only | Static cap of 10 | Quotaware |
 |---|---|---|---|
-| Jobs produced | 9900 | 9900 | 9900 |
-| Jobs completed | 9900 | 9900 | 9900 |
-| Jobs failed | 0 | 0 | 0 |
-| Jobs abandoned on shutdown | 0 | 0 | 0 |
-| Jobs unaccounted for | 0 | 0 | 0 |
-| 429 responses | 720 | 0 | 15 |
-| Retries | 720 | 0 | 15 |
-| Peak retries per minute | 91 | 0 | 5 |
-| Job latency p50 | 128.1 s | 263.6 s | 164.8 s |
-| Job latency p95 | 457.7 s | 689.5 s | 463.1 s |
-| Peak replicas | 30 | 8 | 10 |
-| Pod-seconds | 23580 | 10050 | 10125 |
-| Idle pod-seconds (in backoff) | 13300 | 0 | 8 |
-| Time to drain the burst | 450 s | 720 s | 495 s |
+| Jobs completed, out of 1,800 | 1,800 / 1,800 | 1,800 / 1,800 | 1,784 / 1,782 |
+| Jobs abandoned on shutdown | 0 / 0 | 0 / 0 | 16 / 18 |
+| HTTP 429 responses | 158 / 150 | 24 / 24 | 18 / 20 |
+| Worker pod-seconds | 4,875 / 5,280 | 2,385 / 2,310 | 2,032.5 / 2,295 |
+| Job latency p95 | 92.1 s / 92.1 s | 136.5 s / 136.5 s | 197.9 s / 206.9 s |
+| Time from end of load phase to empty queue | 75 s / 75 s | 105 s / 105 s | 150 s / 165 s |
 
-Read it as a trade-off set by `safety`. At 0.85 quotaware ends every 429 and cuts
-the pod-seconds by more than half, but leaves 20 % of the quota unused, so under
-sustained overload jobs wait longer: about 50 % at p95 and twice as long at p50, as
-far as the latency histogram resolves. At 1 it ties the baseline's p95 in the same
-histogram bucket, with 43 % of the pod-seconds and 2 % of the 429s, while its p50
-sits one bucket higher (about 29 %) and the burst takes 10 % longer to drain. The
-quota and the latency stay constant here, so a static `maxReplicaCount` of 10 would
-likely do as well as C. The ceiling is meant for headroom that moves: the kind demo
-below shows it following another credential's burst on the shared quota, a case the
-benchmark does not measure yet. The fixed window of the fake provider also hands the
-baseline a head start through the burst, about the size of C's p50 and drain gaps.
-`make bench` re-runs all three variants on a laptop, at the current commit rather than
-at `bfffc1c`; `docs/benchmark.md` has the
-setup, the hypothesis written before the first run (C was added after it), the result
-against it and how each number is measured.
+Quotaware follows the quota reduction and uses about 8% fewer worker pod-seconds
+than the static cap across these two trials. Its p95 is one histogram bucket higher,
+and it completes fewer jobs. The static cap finishes this schedule sooner and
+preserves every job.
+
+The benchmark worker uses a destructive Redis pop and abandons a job if shutdown
+interrupts retry backoff. Open-call tracking cannot protect work between HTTP
+attempts. Production workers need queue leases or requeue-on-shutdown behavior.
+The latency histogram includes completed jobs only.
+
+Run `make bench-changing` to reproduce the six trials. Each run starts fresh
+provider windows, workers and scaler state. The published measurements came from
+[commit 4b602e1](https://github.com/dimonchik03/quotaware/commit/4b602e16c46a0eefed44002e16dbc223820ca2a1)
+on one GitHub-hosted Ubuntu runner.
+[Raw data and both passes](bench/results/2026-11-05-changing/) ·
+[Method and earlier fixed-quota experiment](docs/benchmark.md) ·
+[CI execution](https://github.com/dimonchik03/quotaware/actions/runs/41928303907)
 
 ## How it works
 
@@ -170,6 +163,10 @@ it becomes a label.
 
 ## Deploy with KEDA
 
+The stable installation below uses v0.3.0. To reproduce the development-branch
+benchmark or try workload-scoped drain, use `make bench-changing` or `make demo`
+from this checkout. Both build their images locally.
+
 The chart runs `quotaware all`: the proxy, the metrics endpoint and the KEDA
 external scaler in one pod, from the image `ghcr.io/dimonchik03/quotaware` that
 every release publishes for linux/amd64 and linux/arm64:
@@ -243,7 +240,7 @@ that cover a call, or use the single-trigger mode, which keeps the floor. If quo
 is unreachable the HPA keeps the current replica count. Full manifests for this mode and for the
 single-trigger mode (quotaware reads the Redis list itself and returns the minimum,
 never below the pods the open calls need)
-are in `deploy/examples/`. Single-trigger mode only reads the Redis addresses listed
+are in [deploy/examples](deploy/examples/). Single-trigger mode only reads the Redis addresses listed
 in `redisAddresses` (the `-redis-address` flag); any other `redisAddress` in trigger
 metadata is answered with PermissionDenied; the reader connects without password or
 TLS, so keep that Redis inside the cluster network. Each quotaware tracks at most
@@ -260,15 +257,22 @@ open on all of them. A trigger whose keys each have a quota of their own, keys o
 separate organizations for instance, sets `quotaScope: credential` to add their
 ceilings up instead (ADR 0010). `maxStepUp` limits the value KEDA receives as well as
 each credential's ceiling, so a new key cannot lift it past one step, and
-`quotaware_ceiling{key="combined"}` is that value next to the per-credential series. A key the provider has only answered with 401 or 403
+`quotaware_ceiling{key="combined"}` shows the quota ceiling before Redis demand is applied. With an empty queue the gauge can read 4 while KEDA receives 0. A key the provider has only answered with 401 or 403
 counts for nothing. Set `credential`, the 12-character hash in the `key` label, when other teams' keys for
 the same model go through the same proxy, or their headers may be the newest. The
 scaler rejects a provider other than openai or anthropic, a model longer than 256
 bytes, a `credential` that is not such a hash, and requests over 64 KiB.
+
+**On the development branch.** When multiple queues use the same provider key and model, give each worker deployment
+a unique DNS label in the `X-Quotaware-Workload` request header and set its trigger’s
+`workload` metadata to the same label. The proxy removes the header before
+forwarding. Quota stays shared, while an empty queue retains workers only for calls
+from its own deployment. Without a label, matching open calls from every workload
+count toward the drain floor. The scaler needs at least two ceiling slots, one
+combined slot per trigger plus one for each accepted credential it observes.
 The remaining knobs (`credential`, `quotaScope`, `safety`, `share`,
 `maxStepUp`, `stepInterval`, `defaultCeiling`, `minReplicas`, `staleAfter`,
-`staleHard`, `window`) and their defaults are listed in `docs/SPEC.md`. A Grafana
-dashboard is in `deploy/grafana/`.
+`staleHard`, `window`) and their defaults are listed in `docs/SPEC.md`. A [Grafana dashboard](deploy/grafana/quotaware.json) is included.
 
 ## Without the proxy hop
 
@@ -315,8 +319,8 @@ false if the caller abandoned it; a body that breaks reaches the caller with its
 error. The Python hook logs through the `quotaware_httpx` logger when deliveries
 start failing and when they recover, restarts its delivery thread in a forked child
 (Celery prefork, gunicorn `--preload`) unless it was closed, and works where the
-platform has no fork hook. Both send how long before the end of the call the headers
-arrived, so quotaware dates the quotas by the headers. `close()` returns how many
+platform has no fork hook. Both measure header age at delivery, including time spent
+in the collector queue. Call latency still ends when the response body finishes. `close()` returns how many
 observations were still queued when it gave up, and the Go collector's `Close` returns
 `ErrUndelivered` then; deliveries quotaware refused count in `failed` (`Failed()`),
 observations dropped on a full queue in `dropped` (`Dropped()`), and calls whose
@@ -412,9 +416,10 @@ prints the build version.
 - The proxy and the Go collector read usage from identity and gzip bodies only; a
   response compressed with `br`, `zstd` or `deflate` counts in
   `quotaware_usage_missing_total` and leaves tokens per call unknown, so only the
-  request window bounds that bucket. The Python hook reads any encoding httpx decodes
-  for a JSON body, and identity or gzip for a stream. A stream larger than
-  `-max-capture-bytes` loses its usage the same way.
+  request window bounds that bucket. The Python hook captures bodies lazily as the caller reads. It caps both captured
+  and decoded content at 4 MiB. It handles identity, gzip and deflate, plus zstd
+  and Brotli when bounded decoders are installed. A larger body or unsupported
+  encoding still delivers headers and status.
 - Each open proxied call may buffer up to `-max-request-bytes` of request and
   `-max-capture-bytes` of response, 12 MiB with the defaults, so size the chart's
   256Mi memory limit for the calls you expect in flight or lower the two flags.
@@ -436,10 +441,11 @@ Not a gateway, not a rate limiter, not a cost dashboard. See `docs/SPEC.md`.
 
 ## Status
 
-v0.3.0 is the current release: binaries for Linux and macOS on the releases page, the
+v0.3.0 is the latest published release. It includes [Linux and macOS binaries](https://github.com/dimonchik03/quotaware/releases/tag/v0.3.0), the
 image `ghcr.io/dimonchik03/quotaware:0.3.0`, the v0.x scope of `docs/SPEC.md`
 implemented, and the two-trigger mode benchmarked against a fixed-window fake
-provider. Over v0.2.0 it dates quotas by when their headers arrived, limits raises of
+provider. This checkout adds shared retry holds, workload-scoped drain, bounded
+collector capture and the changing-quota experiment. Over v0.2.0 it dates quotas by when their headers arrived, limits raises of
 the value KEDA receives as well as each credential's, bounds the trigger metadata and
 the settings, caps `retry-after`, hands buckets without a computable rate to AIMD,
 bounds what the Python collector reads, hardens the chart's arguments, and builds
@@ -451,7 +457,7 @@ Upgrading from v0.2.0: the scaler now refuses trigger metadata it used to accept
 check each ScaledObject: `bucket` must name openai or anthropic and a model of at
 most 256 bytes, `credential` must be the 12-character key hash, `maxReplicas` at
 most 100000, `maxStepUp` and `aimdIncrease` at most `maxReplicas`, and `concurrency`
-at most 1000000. `quotaware_ceiling{key="combined"}` is the value KEDA receives; the
+at most 1000000. `quotaware_ceiling{key="combined"}` shows the quota ceiling before queue demand is applied; the
 dashboard's ceiling panel reads it. A `retry-after` beyond a day counts as malformed,
 and an unreadable observation body is now 400.
 
@@ -465,9 +471,10 @@ needs its Redis addresses in `redisAddresses` and stays active while calls are o
 The credentials of a model share one quota by default (ADR 0010); triggers whose keys
 belong to separate organizations set `quotaScope: credential`.
 
-See `docs/design.md` for how the pieces fit and `docs/release.md` for how a release
-is cut. Specification in `docs/SPEC.md`, decisions in `docs/adr`.
+See the [design](docs/design.md), [specification](docs/SPEC.md),
+[architecture decisions](docs/adr/) and [release process](docs/release.md).
 
 ## License
 
-MIT
+Quotaware is [MIT licensed](LICENSE). The vendored KEDA protocol files retain their
+[Apache 2.0 license](internal/scaler/externalscaler/LICENSE) and [attribution](internal/scaler/externalscaler/NOTICE).

@@ -1,0 +1,32 @@
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: llm-workers
+  namespace: quotaware-demo
+spec:
+  scaleTargetRef:
+    name: llm-workers
+  minReplicaCount: 1
+  maxReplicaCount: 10
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleDown:
+          stabilizationWindowSeconds: 0
+          policies:
+            - type: Percent
+              value: 100
+              periodSeconds: 10
+        scaleUp:
+          stabilizationWindowSeconds: 0
+          policies:
+            - type: Pods
+              value: 30
+              periodSeconds: 10
+  triggers:
+    - type: redis
+      name: demand
+      metadata:
+        address: redis.quotaware-demo.svc:6379
+        listName: jobs
+        listLength: "10"

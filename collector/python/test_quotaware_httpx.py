@@ -8,6 +8,7 @@ import sys
 import threading
 import time
 import weakref
+import zlib
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import httpx
@@ -21,10 +22,13 @@ class Sink(BaseHTTPRequestHandler):
     received = []
     status = 202
     delay = 0.0
+    gate = None
 
     def do_POST(self):
         length = int(self.headers.get("content-length", 0))
         Sink.received.append((dict(self.headers), json.loads(self.rfile.read(length))))
+        if Sink.gate is not None:
+            Sink.gate.wait(5)
         time.sleep(Sink.delay)
         self.send_response(Sink.status)
         self.end_headers()
@@ -471,7 +475,8 @@ def test_reports_how_long_before_the_end_of_a_stream_its_headers_arrived(sink):
     hook.close()
 
     _, observation = Sink.received[0]
-    assert 40 <= observation["headers_age_ms"] <= observation["latency_ms"]
+    assert observation["headers_age_ms"] >= 40
+    assert observation["latency_ms"] >= 40
 
 
 def test_leaves_a_request_body_over_the_limit_unobserved(sink):
@@ -563,3 +568,101 @@ def test_an_observed_stream_reports_only_when_it_is_closed():
     assert chunks == [b"data: [DONE]\n\n"]
     assert before_close == []
     assert reports == [True]
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+def test_streamed_json_is_read_lazily_and_usage_capture_is_bounded(sink, monkeypatch, asynchronous):
+    hook = QuotawareHook(sink, "openai")
+    monkeypatch.setattr(quotaware_httpx, "MAX_CAPTURE_BYTES", 64)
+    body = json.dumps({"usage": {"prompt_tokens": 5}, "text": "x" * 100}).encode()
+    reads = []
+    class Body(httpx.SyncByteStream, httpx.AsyncByteStream):
+        def __iter__(self):
+            reads.append(True)
+            yield body
+
+        async def __aiter__(self):
+            for chunk in self:
+                yield chunk
+
+    def transport(request):
+        return httpx.Response(200, headers={"content-type": "application/json"}, stream=Body())
+
+    async def consume():
+        async with async_client_with(hook, transport) as client:
+            async with client.stream("POST", "/v1/chat/completions", json={"model": "m"}) as response:
+                assert reads == []
+                assert await response.aread() == body
+
+    try:
+        if asynchronous:
+            asyncio.run(consume())
+        else:
+            with client_with(hook, transport) as client:
+                with client.stream("POST", "/v1/chat/completions", json={"model": "m"}) as response:
+                    assert reads == []
+                    assert response.read() == body
+    finally:
+        hook.close()
+    assert Sink.received[0][1]["complete"] is True
+    assert Sink.received[0][1]["usage"] is None
+
+
+def test_backlogged_delivery_includes_queue_time_in_header_age(sink, monkeypatch):
+    release = threading.Event()
+    monkeypatch.setattr(Sink, "gate", release)
+    hook = QuotawareHook(sink, "openai")
+    try:
+        with client_with(hook, fake_openai) as client:
+            chat(client)
+            wait_for(lambda: len(Sink.received) == 1)
+            chat(client)
+            time.sleep(0.05)
+    finally:
+        release.set()
+        hook.close()
+    assert Sink.received[1][1]["headers_age_ms"] >= 45
+
+
+def test_full_queue_at_close_eventually_stops_the_thread(sink, monkeypatch):
+    entered, release = threading.Event(), threading.Event()
+    hook = QuotawareHook(sink, "openai", queue_size=1, timeout=0.05)
+    post = httpx.Client.post
+
+    def slow_sink(client, url, *args, **kwargs):
+        if url == hook.endpoint:
+            entered.set()
+            release.wait(5)
+            return httpx.Response(202)
+        return post(client, url, *args, **kwargs)
+
+    monkeypatch.setattr(httpx.Client, "post", slow_sink)
+    with client_with(hook, fake_openai) as client:
+        chat(client)
+        assert entered.wait(2)
+        chat(client)
+    try:
+        assert hook.close() == 1
+    finally:
+        release.set()
+    hook._thread.join(2)
+    assert not hook._thread.is_alive()
+
+@pytest.mark.parametrize("encoding", ["gzip", "deflate", "br", "zstd"])
+def test_captures_bounded_compressed_json_and_leaves_oversize_usage_unknown(sink, monkeypatch, encoding):
+    compress = {"gzip": gzip.compress, "deflate": zlib.compress}.get(encoding)
+    if encoding == "br":
+        compress = pytest.importorskip("brotli", minversion="1.2.0").compress
+    if encoding == "zstd":
+        compress = pytest.importorskip("zstandard").ZstdCompressor().compress
+    hook = QuotawareHook(sink, "openai")
+    monkeypatch.setattr(quotaware_httpx, "MAX_CAPTURE_BYTES", 65536)
+    for size in (32768, 131072):
+        body = json.dumps({"text": "x" * size, "usage": {"prompt_tokens": 5}}).encode()
+        def transport(request):
+            return httpx.Response(200, headers={"content-type": "application/json", "content-encoding": encoding},
+                                  stream=httpx.ByteStream(compress(body)))
+        with client_with(hook, transport) as client:
+            assert chat(client).content == body
+    hook.close()
+    assert [message["usage"] for _, message in Sink.received] == [5.0, None]

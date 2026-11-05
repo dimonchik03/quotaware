@@ -1,4 +1,5 @@
 import hashlib
+import io
 import json
 import logging
 import os
@@ -78,34 +79,67 @@ def rate_limit_headers(headers):
     return picked
 
 
-def _decoded(encoding, body):
-    encoding = encoding.strip().lower()
-    if encoding == "":
-        return body
-    if encoding != "gzip":
-        return None
-    inflater = zlib.decompressobj(16 + zlib.MAX_WBITS)
+def _inflate(body, wbits):
+    inflater = zlib.decompressobj(wbits)
     decoded = inflater.decompress(body, MAX_CAPTURE_BYTES + 1)
-    return None if len(decoded) > MAX_CAPTURE_BYTES else decoded
+    return decoded if inflater.eof and len(decoded) <= MAX_CAPTURE_BYTES else None
+
+
+def _decoded(encoding, body):
+    for coding in reversed(encoding.lower().split(",")):
+        coding = coding.strip()
+        if coding in ("", "identity"):
+            continue
+        if coding == "gzip":
+            body = _inflate(body, 16 + zlib.MAX_WBITS)
+        elif coding == "deflate":
+            try:
+                body = _inflate(body, zlib.MAX_WBITS)
+            except zlib.error:
+                body = _inflate(body, -zlib.MAX_WBITS)
+        elif coding == "br":
+            try:
+                import brotli
+            except ImportError:
+                try:
+                    import brotlicffi as brotli
+                except ImportError:
+                    return None
+            decoder = brotli.Decompressor()
+            if not hasattr(decoder, "can_accept_more_data"):
+                return None
+            body = decoder.process(body, output_buffer_limit=MAX_CAPTURE_BYTES + 1)
+            if not decoder.is_finished():
+                return None
+        elif coding == "zstd":
+            try:
+                import zstandard
+            except ImportError:
+                return None
+            decoder = zstandard.ZstdDecompressor(max_window_size=max(1024, MAX_CAPTURE_BYTES))
+            with decoder.stream_reader(io.BytesIO(body), read_across_frames=True) as reader:
+                body = reader.read(MAX_CAPTURE_BYTES + 1)
+        else:
+            return None
+        if body is None or len(body) > MAX_CAPTURE_BYTES:
+            return None
+    return body
 
 
 class _Capture:
     def __init__(self):
-        self._chunks = []
-        self._size = 0
-        self._overflow = False
+        self._buffer = bytearray()
 
     def add(self, chunk):
-        if self._overflow:
+        if self._buffer is None:
             return
-        self._size += len(chunk)
-        if self._size > MAX_CAPTURE_BYTES:
-            self._overflow, self._chunks = True, []
+        if len(self._buffer) + len(chunk) > MAX_CAPTURE_BYTES:
+            self._buffer = None
             return
-        self._chunks.append(chunk)
+        self._buffer.extend(chunk)
 
     def body(self):
-        return None if self._overflow else b"".join(self._chunks)
+        return None if self._buffer is None else bytes(self._buffer)
 
 
 class ObservedStream(httpx.SyncByteStream):
@@ -231,34 +265,32 @@ class QuotawareHook:
         self.on_request(request)
 
     def on_response(self, response):
-        report = self._guarded(self._report_for, response)
-        if report is None:
-            return
-        if _is_stream(response):
-            response.stream = ObservedStream(response.stream, self._stream_reporter(response, report))
-            return
-        if _succeeded(response):
-            try:
-                response.read()
-            except Exception:
-                report(False)
-                raise
-        report(True, self._guarded(self._usage, response))
+        self._observe_response(response, ObservedStream)
 
     async def on_async_response(self, response):
+        self._observe_response(response, AsyncObservedStream)
+
+    def _observe_response(self, response, stream_type):
         report = self._guarded(self._report_for, response)
         if report is None:
             return
-        if _is_stream(response):
-            response.stream = AsyncObservedStream(response.stream, self._stream_reporter(response, report))
+        is_stream = _is_stream(response)
+        succeeded = _succeeded(response)
+        if not succeeded and not is_stream:
+            report(True)
             return
-        if _succeeded(response):
-            try:
-                await response.aread()
-            except Exception:
-                report(False)
-                raise
-        report(True, self._guarded(self._usage, response))
+        encoding = response.headers.get("content-encoding", "")
+
+        def on_close(complete, body, encoding=encoding):
+            usage = None
+            if complete and succeeded and body is not None and len(body) <= MAX_CAPTURE_BYTES:
+                usage = self._guarded(lambda _: self._body_usage(encoding, body, is_stream), response)
+            report(complete, usage)
+
+        if response.is_closed:
+            on_close(True, self._guarded(lambda r: r.content, response), "")
+        else:
+            response.stream = stream_type(response.stream, on_close)
 
     def _guarded(self, step, response):
         try:
@@ -297,27 +329,14 @@ class QuotawareHook:
         model = body.get("model") if isinstance(body, dict) else None
         return model if isinstance(model, str) and model else None
 
-    def _stream_reporter(self, response, report):
-        succeeded = _succeeded(response)
-        encoding = response.headers.get("content-encoding", "")
-
-        def on_close(complete, body):
-            usage = None
-            if complete and succeeded and body is not None:
-                usage = self._guarded(lambda _: self._stream_usage(encoding, body), response)
-            report(complete, usage)
-
-        return on_close
-
-    def _stream_usage(self, encoding, body):
+    def _body_usage(self, encoding, body, is_stream):
         decoded = _decoded(encoding, body)
-        return None if decoded is None else stream_tokens(self.provider, decoded)
-
-    def _usage(self, response):
-        if not _succeeded(response):
+        if decoded is None:
             return None
+        if is_stream:
+            return stream_tokens(self.provider, decoded)
         try:
-            payload = response.json()
+            payload = json.loads(decoded)
         except ValueError:
             return None
         return tokens(self.provider, payload)
@@ -328,16 +347,16 @@ class QuotawareHook:
             **observation,
             "usage": usage,
             "latency_ms": (now - started) * 1000 if started else 0.0,
-            "headers_age_ms": (now - headers_at) * 1000,
             "complete": complete,
         }
-        if self._closed:
-            self._count("dropped")
-            return
-        try:
-            self._queue.put_nowait(observation)
-        except queue.Full:
-            self._count("dropped")
+        with self._lock:
+            if self._closed:
+                self._counts["dropped"] += 1
+                return
+            try:
+                self._queue.put_nowait((observation, headers_at))
+            except queue.Full:
+                self._counts["dropped"] += 1
 
     def _deliver(self):
         headers = {"Authorization": f"Bearer {self.token}"} if self.token else {}
@@ -346,7 +365,12 @@ class QuotawareHook:
                 item = self._queue.get()
                 if item is None:
                     return
-                self._post(client, item)
+                observation, headers_at = item
+                observation["headers_age_ms"] = (time.monotonic() - headers_at) * 1000
+                self._post(client, observation)
+                with self._lock:
+                    if self._closed and self._queue.empty():
+                        return
 
     def _post(self, client, item):
         try:
@@ -372,13 +396,12 @@ class QuotawareHook:
             if self._closed:
                 return 0
             self._closed = True
-        deadline = time.monotonic() + self.timeout + 1
-        sentinel = 1
-        try:
-            self._queue.put(None, timeout=self.timeout)
-        except queue.Full:
-            sentinel = 0
-        self._thread.join(timeout=max(deadline - time.monotonic(), 0))
+            sentinel = 1
+            try:
+                self._queue.put_nowait(None)
+            except queue.Full:
+                sentinel = 0
+        self._thread.join(timeout=self.timeout + 1)
         undelivered = max(self._queue.qsize() - sentinel, 0)
         if undelivered:
             LOGGER.warning("quotaware collector closed with %d observations undelivered", undelivered)

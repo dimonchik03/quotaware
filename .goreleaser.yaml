@@ -25,6 +25,8 @@ archives:
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
     files:
       - LICENSE
+      - internal/scaler/externalscaler/LICENSE
+      - internal/scaler/externalscaler/NOTICE
       - README.md
       - deploy/examples/*
 

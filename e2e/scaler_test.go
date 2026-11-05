@@ -5,6 +5,7 @@ package e2e
 import (
 	"context"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -72,6 +73,31 @@ func TestScalerAgainstTheFakeProvider(t *testing.T) {
 		credential := `key="` + usage.CredentialHash(http.Header{"Authorization": {"Bearer sk-scaler-e2e"}}) + `"`
 		if ceiling := metricValue(t, exposition, "quotaware_ceiling", `namespace="e2e"`, `scaledobject="llm-workers"`, `model="gpt-4.1-scaler"`, credential); ceiling != 0 {
 			t.Fatalf("quotaware_ceiling = %v, want 0 on the bucket of the credential the proxy saw", ceiling)
+		}
+	})
+
+	t.Run("a collector reporting only exhausted project tokens stops new workers", func(t *testing.T) {
+		body := `{"provider":"openai","model":"project-only","credential":"0123456789ab","status":200,"complete":true,"usage":100,"latency_ms":1000,"headers":{"x-ratelimit-limit-project-tokens":"6000","x-ratelimit-remaining-project-tokens":"0","x-ratelimit-reset-project-tokens":"60s"}}`
+		post, err := http.NewRequestWithContext(ctx, http.MethodPost, adminURL+usage.ObservePath, strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		post.Header.Set("Authorization", "Bearer "+env("E2E_OBSERVE_TOKEN", "e2e-observe-token"))
+		response, err := http.DefaultClient.Do(post)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = response.Body.Close()
+		if response.StatusCode != http.StatusAccepted {
+			t.Fatal(response.Status)
+		}
+		project := &externalscaler.ScaledObjectRef{Name: "project-only", Namespace: "e2e", ScalerMetadata: map[string]string{"bucket": "openai/project-only", "concurrency": "1", "minReplicas": "0", "defaultCeiling": "7"}}
+		result, err := client.GetMetrics(ctx, &externalscaler.GetMetricsRequest{ScaledObjectRef: project})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := result.GetMetricValues()[0].GetMetricValue(); got != 0 {
+			t.Fatalf("exhausted project window returned %d, want 0", got)
 		}
 	})
 
