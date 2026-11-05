@@ -68,6 +68,10 @@ are charged when a wait is scheduled. Only completed jobs enter the latency
 histogram. An open-call drain floor cannot protect a job that is between attempts.
 
 
+The CI workflow runs on application, chart and benchmark source pushes. It excludes
+saved measurements and documentation-only commits. Workflow-only edits can be checked
+with its manual dispatch trigger.
+
 ### Scope of the conclusion
 
 This schedule contains a one-minute reduction followed by recovery. It tests an

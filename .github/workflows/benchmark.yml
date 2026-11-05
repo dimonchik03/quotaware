@@ -4,23 +4,16 @@ on:
   workflow_dispatch:
   push:
     paths:
-      - .github/workflows/benchmark.yml
-      - bench/bench.sh
-      - bench/fakeprovider/**
-      - bench/worker/**
-      - bench/manifests/**
-      - bench/kind/**
-      - internal/headroom/**
-      - internal/aimd/**
-      - internal/state/**
-      - internal/proxy/**
-      - internal/headers/**
+      - bench/**
+      - '!bench/results/**'
+      - internal/**
       - cmd/**
+      - deploy/helm/**
       - go.mod
       - go.sum
       - Dockerfile
-      - deploy/helm/**
-      - internal/scaler/**
+      - .dockerignore
+      - Makefile
 
 permissions:
   contents: read
