@@ -13,10 +13,43 @@ or report observations with the Go and Python collectors.
 ## When the provider changes its quota
 
 We compared queue-only scaling, a static maximum of ten workers and Quotaware on a
-local Kubernetes cluster. Each run received 1,800 jobs. The fake provider admitted
-600 requests in minute one, 180 in minute two and 600 per minute after that. Ten
+kind cluster on GitHub-hosted Ubuntu. Each run received 1,800 jobs. The fake provider
+allowed up to 600 requests in minute one, 180 in minute two and 600 per minute after that. Ten
 workers could consume the full nominal quota. The experiment asks what happens when
 that same cap outlasts the capacity it was chosen for.
+
+![Static and adaptive worker counts while the provider quota changes](bench/results/2026-11-05-changing/pass-1/static-vs-adaptive.svg)
+
+Each cell shows pass 1 / pass 2. The second pass reverses A/B/C to C/B/A.
+Quotaware uses `safety: "1"` and `maxStepUp: "4"`. The default safety setting is
+0.85. All arms use two concurrent provider calls per worker.
+
+| Metric | Queue only | Static cap of 10 | Quotaware |
+|---|---|---|---|
+| Jobs completed, out of 1,800 | 1,800 / 1,800 | 1,800 / 1,800 | 1,784 / 1,782 |
+| Jobs abandoned on shutdown | 0 / 0 | 0 / 0 | 16 / 18 |
+| HTTP 429 responses | 158 / 150 | 24 / 24 | 18 / 20 |
+| Worker pod-seconds | 4,875 / 5,280 | 2,385 / 2,310 | 2,032.5 / 2,295 |
+| Job latency p95 | 92.1 s / 92.1 s | 136.5 s / 136.5 s | 197.9 s / 206.9 s |
+| Time from end of load phase to empty queue | 75 s / 75 s | 105 s / 105 s | 150 s / 165 s |
+
+Quotaware follows the quota reduction and uses about 8% fewer worker pod-seconds
+than the static cap across these two trials. Its p95 is one histogram bucket higher,
+and it completes fewer jobs. The static cap finishes this schedule sooner and
+preserves every job.
+
+The benchmark worker uses a destructive Redis pop and abandons a job if shutdown
+interrupts retry backoff. Open-call tracking cannot protect work between HTTP
+attempts. Production workers need queue leases or requeue-on-shutdown behavior.
+The latency histogram includes completed jobs only.
+
+Run `make bench-changing` to reproduce the six trials. Each run starts fresh
+provider windows, workers and scaler state. The published measurements came from
+[commit 4b602e1](https://github.com/dimonchik03/quotaware/commit/4b602e16c46a0eefed44002e16dbc223820ca2a1)
+on one GitHub-hosted Ubuntu runner.
+[Raw data and both passes](bench/results/2026-11-05-changing/) ·
+[Method and earlier fixed-quota experiment](docs/benchmark.md) ·
+[CI execution](https://github.com/dimonchik03/quotaware/actions/runs/41928303907)
 
 ## How it works
 
