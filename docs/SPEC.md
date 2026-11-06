@@ -66,7 +66,11 @@ Per response it records, keyed by bucket `(provider, model, api-key hash)`:
 
 The request body is read within `-read-body-timeout` (30 s, then 408) and handed to
 the transport as replayable, so a pooled connection found dead before the request is
-written is retried.
+written is retried. A provider that sends no response headers within
+`-upstream-header-timeout` (10 min) fails the call with 504 and an upstream error. At
+most `-max-inflight` (256) proxied calls are open at once; a call beyond that is
+answered 503 before its body is read and counted in `quotaware_calls_rejected_total`
+(ADR 0014).
 
 Collectors that remove the extra hop: a Go `http.RoundTripper` wrapper and a Python
 `httpx` event hook that post the same observation to `POST /v1/observe` on the admin
@@ -242,8 +246,8 @@ and the counters `quotaware_responses_total`,
 `quotaware_429_total`, `quotaware_unexplained_429_total`, `quotaware_aborted_total`, `quotaware_upstream_errors_total`,
 `quotaware_headers_missing_total`, `quotaware_headers_malformed_total` and
 `quotaware_usage_missing_total`. Unlabelled: `quotaware_buckets`,
-`quotaware_scaled_objects`, `quotaware_buckets_rejected_total` and
-`quotaware_scaled_objects_rejected_total`. A Grafana dashboard JSON ships in
+`quotaware_scaled_objects`, `quotaware_buckets_rejected_total`,
+`quotaware_scaled_objects_rejected_total` and `quotaware_calls_rejected_total`. A Grafana dashboard JSON ships in
 `deploy/grafana/`.
 
 ## Provider header matrix

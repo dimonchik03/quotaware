@@ -139,6 +139,28 @@ func TestObserverFlags(t *testing.T) {
 		}
 	})
 
+	t.Run("bounds the open calls and the upstream wait by default", func(t *testing.T) {
+		options, err := parseObserverFlags("proxy", []string{"-observe-insecure"}, &bytes.Buffer{}, false)
+
+		if err != nil {
+			t.Fatal(err)
+		}
+		if options.proxy.MaxInFlight != 256 || options.proxy.UpstreamHeaderTimeout != 10*time.Minute {
+			t.Fatalf("bounds = %d calls, %v upstream wait, want 256 and 10m", options.proxy.MaxInFlight, options.proxy.UpstreamHeaderTimeout)
+		}
+	})
+
+	t.Run("reads the open call and upstream wait flags", func(t *testing.T) {
+		options, err := parseObserverFlags("proxy", []string{"-observe-insecure", "-max-inflight", "10", "-upstream-header-timeout", "2m"}, &bytes.Buffer{}, false)
+
+		if err != nil {
+			t.Fatal(err)
+		}
+		if options.proxy.MaxInFlight != 10 || options.proxy.UpstreamHeaderTimeout != 2*time.Minute {
+			t.Fatalf("bounds = %d calls, %v upstream wait, want 10 and 2m", options.proxy.MaxInFlight, options.proxy.UpstreamHeaderTimeout)
+		}
+	})
+
 	t.Run("adds the grpc address for the all command", func(t *testing.T) {
 		options, err := parseObserverFlags("all", []string{"-grpc", ":9999", "-observe-insecure"}, &bytes.Buffer{}, true)
 

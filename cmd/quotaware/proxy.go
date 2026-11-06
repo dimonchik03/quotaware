@@ -61,6 +61,8 @@ func parseObserverFlags(command string, args []string, stderr io.Writer, withSca
 	flags.Int64Var(&options.proxy.MaxRequestBytes, "max-request-bytes", options.proxy.MaxRequestBytes, "largest request body accepted")
 	flags.Int64Var(&options.proxy.MaxCaptureBytes, "max-capture-bytes", options.proxy.MaxCaptureBytes, "largest response body inspected for usage")
 	flags.DurationVar(&options.proxy.ReadBodyTimeout, "read-body-timeout", options.proxy.ReadBodyTimeout, "how long a client may take to send a request body")
+	flags.DurationVar(&options.proxy.UpstreamHeaderTimeout, "upstream-header-timeout", options.proxy.UpstreamHeaderTimeout, "how long the provider may take to answer with headers before the call fails with 504")
+	flags.IntVar(&options.proxy.MaxInFlight, "max-inflight", options.proxy.MaxInFlight, "most proxied calls open at once; calls beyond it are answered 503")
 	var redisAddresses string
 	if withScaler {
 		flags.StringVar(&options.grpc, "grpc", ":9090", "address the KEDA external scaler listens on")

@@ -129,7 +129,12 @@ port serves `/metrics`, `/healthz` and `/v1/observe`; the last one needs a token
 below). A client that stalls while sending a request body gets 408 after
 `-read-body-timeout` (30 s); the buffered body is handed to the transport as
 replayable, so a pooled connection found dead before the request is written is
-retried instead of answered with 502.
+retried instead of answered with 502. A provider that accepts the connection but
+sends no response headers within `-upstream-header-timeout` (10 min, the SDKs' own
+default) gets 504 and counts as an upstream error, so a hung provider cannot park
+calls and their buffers for good. At most `-max-inflight` (256) proxied calls are
+open at once; a call beyond that is answered 503 before its body is read and
+counted in `quotaware_calls_rejected_total`.
 
 To see it work without a provider account, `docker compose up --build` starts the
 proxy in front of `bench/fakeprovider`, a provider stand-in with real rate-limit
@@ -413,6 +418,8 @@ prints the build version.
 | `-max-request-bytes` | 8 MiB | largest request body accepted |
 | `-max-capture-bytes` | 4 MiB | largest response body read for usage |
 | `-read-body-timeout` | `30s` | time a client may take to send the request body |
+| `-upstream-header-timeout` | `10m` | time the provider may take to answer with headers before the call gets 504 |
+| `-max-inflight` | `256` | proxied calls open at once; more get 503 |
 | `-redis-address` (`all`) | none | Redis addresses single-trigger mode may read |
 | `-push-interval` (`all`) | `5s` | how often `StreamIsActive` re-checks a queue |
 
@@ -438,8 +445,10 @@ prints the build version.
   and Brotli when bounded decoders are installed. A larger body or unsupported
   encoding still delivers headers and status.
 - Each open proxied call may buffer up to `-max-request-bytes` of request and
-  `-max-capture-bytes` of response, 12 MiB with the defaults, so size the chart's
-  256Mi memory limit for the calls you expect in flight or lower the two flags.
+  `-max-capture-bytes` of response, 12 MiB with the defaults, and `-max-inflight`
+  (256) bounds how many are open, so the worst case is their product; the chart's
+  256Mi memory limit fits typical call sizes, not that worst case. Lower the three
+  flags together to bound it.
 - The proxy and the scaler run in one pod with in-memory state: a restart starts
   every bucket afresh, the proxy is in the path of every call it carries, and the
   chart replaces the pod on every upgrade (`strategy: Recreate`), so an upgrade

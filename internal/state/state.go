@@ -259,6 +259,7 @@ type Stats struct {
 	Consumers         int
 	RejectedBuckets   int64
 	RejectedConsumers int64
+	RejectedCalls     int64
 }
 
 type Store struct {
@@ -287,6 +288,12 @@ func (s *Store) Stats() Stats {
 	stats := s.stats
 	stats.Buckets, stats.Consumers = len(s.buckets), len(s.ceilings)
 	return stats
+}
+
+func (s *Store) RejectCall() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.stats.RejectedCalls++
 }
 
 func (s *Store) UpdateCeiling(consumer Consumer, update func(previous Ceiling, known bool) Ceiling) (Ceiling, error) {
