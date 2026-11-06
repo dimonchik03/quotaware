@@ -69,8 +69,10 @@ the transport as replayable, so a pooled connection found dead before the reques
 written is retried. A provider that sends no response headers within
 `-upstream-header-timeout` (10 min) fails the call with 504 and an upstream error. At
 most `-max-inflight` (256) proxied calls are open at once; a call beyond that is
-answered 503 before its body is read and counted in `quotaware_calls_rejected_total`
-(ADR 0014).
+answered 503 before its body is read and counted in `quotaware_calls_rejected_total`.
+On a shutdown signal the listeners close, open calls get `-drain-timeout` (10 s) to
+finish, and the ones still open are then closed and logged; the deadline is not an
+error (ADR 0014).
 
 Collectors that remove the extra hop: a Go `http.RoundTripper` wrapper and a Python
 `httpx` event hook that post the same observation to `POST /v1/observe` on the admin

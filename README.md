@@ -420,6 +420,7 @@ prints the build version.
 | `-read-body-timeout` | `30s` | time a client may take to send the request body |
 | `-upstream-header-timeout` | `10m` | time the provider may take to answer with headers before the call gets 504 |
 | `-max-inflight` | `256` | proxied calls open at once; more get 503 |
+| `-drain-timeout` | `10s` | time open calls get to finish after a shutdown signal before they are closed |
 | `-redis-address` (`all`) | none | Redis addresses single-trigger mode may read |
 | `-push-interval` (`all`) | `5s` | how often `StreamIsActive` re-checks a queue |
 
@@ -452,8 +453,11 @@ prints the build version.
 - The proxy and the scaler run in one pod with in-memory state: a restart starts
   every bucket afresh, the proxy is in the path of every call it carries, and the
   chart replaces the pod on every upgrade (`strategy: Recreate`), so an upgrade
-  interrupts proxied calls until the new pod is ready. Run collectors instead of the
-  proxy where that matters.
+  interrupts proxied calls until the new pod is ready. On a shutdown signal the proxy
+  stops accepting calls, gives the open ones `-drain-timeout` (10 s) to finish, then
+  closes them, logs that it did and exits cleanly; keep the pod's termination grace
+  period (30 s by default) above the drain. Run collectors instead of the proxy where
+  that matters.
 - Only OpenAI- and Anthropic-shaped APIs are understood: the proxy serves its two
   paths at the root of an origin, and the scaler and `/v1/observe` accept only the
   openai and anthropic providers. Gemini's OpenAI-compatible endpoint sits under a

@@ -40,6 +40,7 @@ type observerOptions struct {
 	limits          state.Limits
 	redisAddresses  []string
 	pushInterval    time.Duration
+	drainTimeout    time.Duration
 	observeToken    string
 	observeInsecure bool
 	proxy           proxy.Config
@@ -48,7 +49,7 @@ type observerOptions struct {
 func parseObserverFlags(command string, args []string, stderr io.Writer, withScaler bool) (observerOptions, error) {
 	flags := flag.NewFlagSet("quotaware "+command, flag.ContinueOnError)
 	flags.SetOutput(stderr)
-	options := observerOptions{proxy: proxy.DefaultConfig(), pushInterval: scaler.DefaultConfig().PushInterval, limits: state.DefaultLimits()}
+	options := observerOptions{proxy: proxy.DefaultConfig(), pushInterval: scaler.DefaultConfig().PushInterval, limits: state.DefaultLimits(), drainTimeout: 10 * time.Second}
 	openAI := flags.String("openai-upstream", "https://api.openai.com", "origin of the OpenAI API, without a path")
 	anthropic := flags.String("anthropic-upstream", "https://api.anthropic.com", "origin of the Anthropic API, without a path")
 	flags.StringVar(&options.listen, "listen", ":8080", "address the proxy listens on")
@@ -63,6 +64,7 @@ func parseObserverFlags(command string, args []string, stderr io.Writer, withSca
 	flags.DurationVar(&options.proxy.ReadBodyTimeout, "read-body-timeout", options.proxy.ReadBodyTimeout, "how long a client may take to send a request body")
 	flags.DurationVar(&options.proxy.UpstreamHeaderTimeout, "upstream-header-timeout", options.proxy.UpstreamHeaderTimeout, "how long the provider may take to answer with headers before the call fails with 504")
 	flags.IntVar(&options.proxy.MaxInFlight, "max-inflight", options.proxy.MaxInFlight, "most proxied calls open at once; calls beyond it are answered 503")
+	flags.DurationVar(&options.drainTimeout, "drain-timeout", options.drainTimeout, "how long open calls may finish after a shutdown signal before they are closed")
 	var redisAddresses string
 	if withScaler {
 		flags.StringVar(&options.grpc, "grpc", ":9090", "address the KEDA external scaler listens on")
@@ -94,6 +96,9 @@ func parseObserverFlags(command string, args []string, stderr io.Writer, withSca
 	}
 	if options.observeToken == "" && !options.observeInsecure {
 		return observerOptions{}, errors.New("observe token is required: set -observe-token or " + observeTokenVariable + ", or pass -observe-insecure to accept unauthenticated observations")
+	}
+	if options.drainTimeout <= 0 {
+		return observerOptions{}, errors.New("drain timeout must be positive")
 	}
 	return options, nil
 }
@@ -202,7 +207,7 @@ func runObserver(command string, args []string, stderr io.Writer, withScaler boo
 	go evictIdleBuckets(ctx, store)
 	logger.Info("quotaware listening", listeningAttributes(command, options)...)
 	endpoints := []endpoint{{address: options.listen, handler: handler}, {address: options.admin, handler: admin, readTimeout: options.proxy.ReadBodyTimeout}}
-	if err := serve(ctx, endpoints, rpc, options.grpc, stopStreams); err != nil {
+	if err := serve(ctx, endpoints, rpc, options.grpc, stopStreams, options.drainTimeout, logger); err != nil {
 		fmt.Fprintf(stderr, "quotaware %s: %v\n", command, err)
 		return 1
 	}
@@ -237,7 +242,7 @@ func evictIdleBuckets(ctx context.Context, store *state.Store) {
 	}
 }
 
-func serve(ctx context.Context, endpoints []endpoint, rpc *grpc.Server, rpcAddress string, stopStreams func()) error {
+func serve(ctx context.Context, endpoints []endpoint, rpc *grpc.Server, rpcAddress string, stopStreams func(), drain time.Duration, logger *slog.Logger) error {
 	servers := make([]*http.Server, 0, len(endpoints))
 	failures := make(chan error, len(endpoints)+1)
 	for _, e := range endpoints {
@@ -267,10 +272,16 @@ func serve(ctx context.Context, endpoints []endpoint, rpc *grpc.Server, rpcAddre
 	case <-ctx.Done():
 	case failure = <-failures:
 	}
-	shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	shutdown, cancel := context.WithTimeout(context.Background(), drain)
 	defer cancel()
 	for _, server := range servers {
-		failure = errors.Join(failure, server.Shutdown(shutdown))
+		switch err := server.Shutdown(shutdown); {
+		case errors.Is(err, context.DeadlineExceeded):
+			logger.Warn("drain deadline passed with connections still open, closing them", "address", server.Addr, "drain", drain)
+			failure = errors.Join(failure, server.Close())
+		case err != nil:
+			failure = errors.Join(failure, err)
+		}
 	}
 	if rpc != nil {
 		stopStreams()
