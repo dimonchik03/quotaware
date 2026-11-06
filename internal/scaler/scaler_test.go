@@ -1000,6 +1000,26 @@ func TestAIMD(t *testing.T) {
 		}
 	})
 
+	t.Run("the retry-after of an explained 429 does not lengthen the guard hold", func(t *testing.T) {
+		f := newFixture(t)
+		f.observe(bucketA, 900, 500000)
+		metric(t, f, capMetadata())
+		f.clock.Advance(20 * time.Second)
+		f.observe(bucketA, 900, 500000)
+		f.rateLimited(bucketA, 0, time.Hour)
+		for range 3 {
+			f.rateLimited(bucketA, 900, 0)
+		}
+		halved := metric(t, f, capMetadata())
+		f.clock.Advance(65 * time.Second)
+		f.observe(bucketA, 900, 500000)
+		released := metric(t, f, capMetadata())
+
+		if halved != 2 || released != 4 {
+			t.Fatalf("ceilings = %d then %d, want 4 halved to 2 and released after one window, not held for the explained hour", halved, released)
+		}
+	})
+
 	t.Run("rejects an invalid aimd knob", func(t *testing.T) {
 		f := newFixture(t)
 		metadata := capMetadata()

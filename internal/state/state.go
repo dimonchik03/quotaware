@@ -89,10 +89,11 @@ type Sample struct {
 }
 
 type Recent struct {
-	Responses   int64
-	RateLimited int64
-	Unexplained int64
-	RetryAfter  time.Duration
+	Responses             int64
+	RateLimited           int64
+	Unexplained           int64
+	RetryAfter            time.Duration
+	UnexplainedRetryAfter time.Duration
 }
 
 type Bucket struct {
@@ -125,11 +126,12 @@ const (
 )
 
 type bin struct {
-	slot        int64
-	responses   int64
-	rateLimited int64
-	unexplained int64
-	retryAfter  time.Duration
+	slot                  int64
+	responses             int64
+	rateLimited           int64
+	unexplained           int64
+	retryAfter            time.Duration
+	unexplainedRetryAfter time.Duration
 }
 
 type window struct {
@@ -152,6 +154,7 @@ func (w *window) record(at time.Time, rateLimited, unexplained bool, retryAfter 
 	}
 	if unexplained {
 		b.unexplained++
+		b.unexplainedRetryAfter = max(b.unexplainedRetryAfter, retryAfter)
 	}
 }
 
@@ -164,6 +167,7 @@ func (w *window) recent(at time.Time) Recent {
 			r.RateLimited += b.rateLimited
 			r.Unexplained += b.unexplained
 			r.RetryAfter = max(r.RetryAfter, b.retryAfter)
+			r.UnexplainedRetryAfter = max(r.UnexplainedRetryAfter, b.unexplainedRetryAfter)
 		}
 	}
 	return r
