@@ -227,6 +227,7 @@ type Ceiling struct {
 	Consumer       Consumer
 	Value          int
 	Bound          int
+	Held           int
 	Mode           Mode
 	BoundChangedAt time.Time
 	Seen           time.Time

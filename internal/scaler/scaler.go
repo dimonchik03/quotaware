@@ -582,6 +582,7 @@ func (s sharedBound) bound() int {
 type decision struct {
 	value       int
 	bound       int
+	held        int
 	mode        state.Mode
 	reason      string
 	holdUntil   time.Time
@@ -594,7 +595,7 @@ func (s *Service) evaluate(consumer state.Consumer, t trigger, obs headroom.Obse
 	var from int
 	ceiling, err := s.store.UpdateCeiling(consumer, func(previous state.Ceiling, known bool) state.Ceiling {
 		d := decide(t, obs, recent, previous, known, now)
-		next := state.Ceiling{Value: d.value, Bound: d.bound, Mode: d.mode, BoundChangedAt: previous.BoundChangedAt, Seen: now, HoldUntil: d.holdUntil}
+		next := state.Ceiling{Value: d.value, Bound: d.bound, Held: d.held, Mode: d.mode, BoundChangedAt: previous.BoundChangedAt, Seen: now, HoldUntil: d.holdUntil}
 		if !known || d.bound != previous.Bound {
 			next.BoundChangedAt = now
 		}
@@ -617,23 +618,40 @@ func (s *Service) evaluate(consumer state.Consumer, t trigger, obs headroom.Obse
 }
 
 func decide(t trigger, obs headroom.Observation, recent state.Recent, previous state.Ceiling, known bool, now time.Time) decision {
+	holding := known && now.Before(previous.HoldUntil)
+	kept := previous.Bound
+	if holding {
+		kept = previous.Held
+	}
 	signal := aimd.Signal{Responses: recent.Responses, RateLimited: recent.RateLimited, RetryAfter: recent.RetryAfter}
-	aimdState := aimd.State{Ceiling: previous.Bound, Known: known && (previous.Mode == state.ModeAIMD || now.Before(previous.HoldUntil)), ChangedAt: previous.BoundChangedAt, HoldUntil: previous.HoldUntil}
+	aimdState := aimd.State{Ceiling: kept, Known: known && (previous.Mode == state.ModeAIMD || holding), ChangedAt: previous.BoundChangedAt, HoldUntil: previous.HoldUntil}
 	drainFloor := headroom.DrainFloor(t.cfg, obs)
 	age := now.Sub(obs.ObservedAt)
 	frozen := known && previous.Mode == state.ModeHeadroom && age > t.cfg.StaleAfter && age <= t.cfg.StaleHard
 	if !frozen && !headroom.Usable(t.cfg, obs, now) {
 		step := aimd.Step(t.aimd, aimdState, signal, now)
-		return decision{value: max(step.Ceiling, drainFloor), bound: step.Ceiling, mode: state.ModeAIMD, reason: "aimd_" + string(step.Action), holdUntil: step.HoldUntil}
+		return decision{value: max(step.Ceiling, drainFloor), bound: step.Ceiling, held: heldThrough(step.HoldUntil, step.Ceiling, previous, holding), mode: state.ModeAIMD, reason: "aimd_" + string(step.Action), holdUntil: step.HoldUntil}
 	}
 	result := headroom.Compute(t.cfg, obs, headroom.Previous{Ceiling: previous.Bound, Known: known, At: previous.BoundChangedAt}, now)
 	d := decision{value: result.Ceiling, bound: result.Bound, mode: state.ModeHeadroom, reason: string(result.Reason), allowedRate: result.AllowedRate, podRate: result.PodRate}
-	guardState := aimd.State{Ceiling: previous.Bound, Known: known, HoldUntil: previous.HoldUntil}
+	guardState := aimd.State{Ceiling: kept, Known: known, HoldUntil: previous.HoldUntil}
 	unexplained := aimd.Signal{Responses: recent.Responses, RateLimited: recent.Unexplained, RetryAfter: recent.RetryAfter}
 	if guarded, held, until := aimd.Guard(t.aimd, result.Bound, guardState, unexplained, now); held {
 		d.value, d.bound = max(guarded, drainFloor), guarded
+		d.held = heldThrough(until, guarded, previous, holding)
 		d.reason = "aimd_guard"
 		d.holdUntil = until
 	}
 	return d
+}
+
+func heldThrough(holdUntil time.Time, halved int, previous state.Ceiling, holding bool) int {
+	switch {
+	case holdUntil.IsZero():
+		return 0
+	case holding && holdUntil.Equal(previous.HoldUntil):
+		return previous.Held
+	default:
+		return halved
+	}
 }

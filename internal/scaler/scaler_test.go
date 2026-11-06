@@ -120,6 +120,21 @@ func (f *fixture) observe(key state.Key, remainingRequests, remainingTokens floa
 	}, "")
 }
 
+func (f *fixture) rateLimited(key state.Key, remainingRequests float64, retryAfter time.Duration) {
+	at := f.clock.Now()
+	f.store.Begin(key, at, "")
+	f.store.End(key, state.Sample{
+		Status:     http.StatusTooManyRequests,
+		Complete:   true,
+		Headers:    state.HeadersPresent,
+		Quotas:     state.Quotas{Requests: headroom.Quota{Limit: 1000, Remaining: remainingRequests, ResetAt: at.Add(30 * time.Second)}},
+		RetryAfter: retryAfter,
+		Latency:    time.Second,
+		HeadersAt:  at,
+		At:         at,
+	}, "")
+}
+
 func (f *fixture) respond(key state.Key, status int, headersStatus state.HeadersStatus, retryAfter time.Duration) {
 	at := f.clock.Now()
 	f.store.Begin(key, at, "")
@@ -955,6 +970,33 @@ func TestAIMD(t *testing.T) {
 
 		if got := metric(t, f, metadata); got != 3 {
 			t.Fatalf("ceiling = %d, want one step up from the guarded value after the hold", got)
+		}
+	})
+
+	t.Run("a window spent during a hold does not lower what the hold keeps", func(t *testing.T) {
+		f := newFixture(t)
+		metadata := capMetadata()
+		metadata["concurrency"] = "1"
+		f.observe(bucketA, 900, 500000)
+		fromHeaders := metric(t, f, metadata)
+		f.clock.Advance(20 * time.Second)
+		f.observe(bucketA, 900, 500000)
+		for range 3 {
+			f.rateLimited(bucketA, 900, 0)
+		}
+		halved := metric(t, f, metadata)
+		f.clock.Advance(20 * time.Second)
+		f.observe(bucketA, 0, 500000)
+		spent := metric(t, f, metadata)
+		f.clock.Advance(20 * time.Second)
+		f.observe(bucketA, 900, 500000)
+		refilled := metric(t, f, metadata)
+		f.clock.Advance(25 * time.Second)
+		f.observe(bucketA, 900, 500000)
+		released := metric(t, f, metadata)
+
+		if fromHeaders != 17 || halved != 8 || spent != 1 || refilled != 8 || released != 17 {
+			t.Fatalf("ceilings = %d, %d, %d, %d, %d, want 17 halved to 8, a spent window at 1, the refilled window back at the held 8, then 17 once the hold ends", fromHeaders, halved, spent, refilled, released)
 		}
 	})
 
