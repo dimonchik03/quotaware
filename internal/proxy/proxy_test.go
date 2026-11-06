@@ -676,14 +676,17 @@ func TestProxy(t *testing.T) {
 
 	t.Run("answers 503 and counts the call when the in-flight limit is reached", func(t *testing.T) {
 		entered := make(chan struct{})
-		release := make(chan struct{})
+		released := make(chan struct{})
+		var releaseOnce sync.Once
+		release := func() { releaseOnce.Do(func() { close(released) }) }
 		busy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			close(entered)
-			<-release
+			<-released
 			rateLimitHeaders(w.Header())
 			w.WriteHeader(http.StatusOK)
 		}))
 		t.Cleanup(busy.Close)
+		t.Cleanup(release)
 		h := newHarnessWithOptions(t, &clock{now: start}, busy.URL, func(cfg *proxy.Config) {
 			cfg.MaxInFlight = 1
 		})
@@ -705,7 +708,7 @@ func TestProxy(t *testing.T) {
 		<-entered
 
 		rejected, body := h.post(t, "/v1/chat/completions", "sk-test", chat)
-		close(release)
+		release()
 
 		if rejected.StatusCode != http.StatusServiceUnavailable || !strings.Contains(body, "in flight") {
 			t.Fatalf("status = %d body = %s, want 503 naming the in-flight limit", rejected.StatusCode, body)
@@ -723,6 +726,29 @@ func TestProxy(t *testing.T) {
 
 		if _, err := proxy.New(proxy.DefaultConfig(), store, time.Now); err == nil {
 			t.Fatal("expected an error without upstreams")
+		}
+	})
+
+	t.Run("rejects bounds that would not bound", func(t *testing.T) {
+		cases := []struct {
+			name      string
+			configure func(*proxy.Config)
+		}{
+			{"a zero in-flight limit", func(cfg *proxy.Config) { cfg.MaxInFlight = 0 }},
+			{"a zero upstream header timeout", func(cfg *proxy.Config) { cfg.UpstreamHeaderTimeout = 0 }},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				store, _ := state.New(0.5, state.DefaultLimits())
+				cfg := proxy.DefaultConfig()
+				cfg.OpenAI, _ = url.Parse("http://provider")
+				cfg.Anthropic = cfg.OpenAI
+				tc.configure(&cfg)
+
+				if _, err := proxy.New(cfg, store, time.Now); err == nil {
+					t.Fatalf("expected an error for %s", tc.name)
+				}
+			})
 		}
 	})
 }

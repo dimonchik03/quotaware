@@ -179,6 +179,14 @@ func TestObserverFlags(t *testing.T) {
 		}
 	})
 
+	t.Run("rejects a drain timeout that is not positive", func(t *testing.T) {
+		_, err := parseObserverFlags("proxy", []string{"-observe-insecure", "-drain-timeout", "0s"}, &bytes.Buffer{}, false)
+
+		if err == nil || !strings.Contains(err.Error(), "drain timeout") {
+			t.Fatalf("err = %v, want a refusal naming the drain timeout", err)
+		}
+	})
+
 	t.Run("adds the grpc address for the all command", func(t *testing.T) {
 		options, err := parseObserverFlags("all", []string{"-grpc", ":9999", "-observe-insecure"}, &bytes.Buffer{}, true)
 
