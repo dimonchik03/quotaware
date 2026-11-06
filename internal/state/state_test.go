@@ -733,3 +733,29 @@ func TestUnexplainedRateLimits(t *testing.T) {
 		})
 	}
 }
+
+func TestRetryAfterOfTheUnexplainedShare(t *testing.T) {
+	explained := quotas()
+	explained.Requests.Remaining = 0
+	cases := []struct {
+		name            string
+		quotas          state.Quotas
+		wantUnexplained time.Duration
+	}{
+		{"the retry-after of an explained 429 stays out of the unexplained share", explained, 0},
+		{"the retry-after of an unexplained 429 counts for the unexplained share", quotas(), 30 * time.Second},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := store(t, 0.5)
+			s.End(key, success(1000, 2*time.Second), "")
+
+			s.End(key, rateLimited(tc.quotas), "")
+
+			b := bucketAt(t, s, now.Add(2*time.Second))
+			if b.Recent.RetryAfter != 30*time.Second || b.Recent.UnexplainedRetryAfter != tc.wantUnexplained {
+				t.Fatalf("recent = %+v, want retry-after 30s for the window and %v for the unexplained share", b.Recent, tc.wantUnexplained)
+			}
+		})
+	}
+}

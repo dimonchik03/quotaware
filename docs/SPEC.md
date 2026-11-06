@@ -66,12 +66,20 @@ Per response it records, keyed by bucket `(provider, model, api-key hash)`:
 
 The request body is read within `-read-body-timeout` (30 s, then 408) and handed to
 the transport as replayable, so a pooled connection found dead before the request is
-written is retried.
+written is retried. A provider that sends no response headers within
+`-upstream-header-timeout` (10 min), or whose dial or TLS handshake times out, fails
+the call with 504 and an upstream error. At
+most `-max-inflight` (256) proxied calls are open at once; a call beyond that is
+answered 503 before its body is read and counted in `quotaware_calls_rejected_total`.
+On a shutdown signal the listeners close, open calls get `-drain-timeout` (10 s) to
+finish, and the ones still open are then closed and logged; the deadline is not an
+error (ADR 0014).
 
 Collectors that remove the extra hop: a Go `http.RoundTripper` wrapper and a Python
 `httpx` event hook that post the same observation to `POST /v1/observe` on the admin
 port behind a bearer token that is required unless `-observe-insecure` is passed
-(ADR 0007, ADR 0008). An optional `headers_age_ms` measures the time from receipt of the provider headers
+(ADR 0007, ADR 0008); an observation for a bucket the `-max-buckets` limit refuses is
+answered 503 (ADR 0014). An optional `headers_age_ms` measures the time from receipt of the provider headers
 to sending the report, including local delivery backlog. The observer uses this age to
 date quota windows and duration resets.
 
@@ -178,7 +186,9 @@ key), `quotaScope` (`shared`, or `credential` when every key has a quota of its 
 `safety` (0.85), `share` (1), `lookAhead` (30s, from 0 to `window`), `maxStepUp` (2), `stepInterval` (15s),
 `defaultCeiling` (1), `minReplicas` (1), `maxReplicas` (100, mirror
 `maxReplicaCount` by hand), `staleAfter` (2m), `staleHard` (10m), `window` (1m),
-`aimdThreshold` (0.02), `aimdDecrease` (0.5), `aimdIncrease` (1).
+`aimdThreshold` (0.02), `aimdDecrease` (0.5), `aimdIncrease` (1). A key outside this
+list, apart from `scalerAddress` and the TLS settings KEDA reads for itself, is
+rejected with InvalidArgument (ADR 0014).
 Ceilings are computed per ScaledObject, trigger and bucket: the state a poll continues
 from is keyed by the namespace, the name and a hash of the trigger metadata, so a
 caller that sends other metadata for the same name evaluates its own entry and never
@@ -242,8 +252,8 @@ and the counters `quotaware_responses_total`,
 `quotaware_429_total`, `quotaware_unexplained_429_total`, `quotaware_aborted_total`, `quotaware_upstream_errors_total`,
 `quotaware_headers_missing_total`, `quotaware_headers_malformed_total` and
 `quotaware_usage_missing_total`. Unlabelled: `quotaware_buckets`,
-`quotaware_scaled_objects`, `quotaware_buckets_rejected_total` and
-`quotaware_scaled_objects_rejected_total`. A Grafana dashboard JSON ships in
+`quotaware_scaled_objects`, `quotaware_buckets_rejected_total`,
+`quotaware_scaled_objects_rejected_total` and `quotaware_calls_rejected_total`. A Grafana dashboard JSON ships in
 `deploy/grafana/`.
 
 ## Provider header matrix
@@ -359,7 +369,8 @@ covers reporting the replica count with `targetSize: 1`), 0006 the AIMD fallback
 guard, 0007 the observe protocol, 0008 and 0009 the network defaults, 0010 one quota
 across credentials, 0011 the errors discarded on purpose, 0012 shared holds and
 workload drain, 0013 the look-ahead past a reset and the guard against unexplained
-429s. Counting uncached input
+429s, 0014 the proxy's open-call and upstream-wait bounds and the refusal of unknown
+trigger keys and discarded observations. Counting uncached input
 and cache writes for Anthropic is described above and in the README rather than in
 a record of its own.
 

@@ -646,11 +646,109 @@ func TestProxy(t *testing.T) {
 		}
 	})
 
+	t.Run("answers 504, releases the slot and counts an upstream error when the upstream never sends headers", func(t *testing.T) {
+		release := make(chan struct{})
+		silent := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+			_, _ = io.Copy(io.Discard, r.Body)
+			select {
+			case <-r.Context().Done():
+			case <-release:
+			}
+		}))
+		t.Cleanup(silent.Close)
+		t.Cleanup(func() { close(release) })
+		h := newHarnessWithOptions(t, &clock{now: start}, silent.URL, func(cfg *proxy.Config) {
+			cfg.UpstreamHeaderTimeout = 100 * time.Millisecond
+		})
+
+		response, _ := h.post(t, "/v1/chat/completions", "sk-test", chat)
+
+		if response.StatusCode != http.StatusGatewayTimeout {
+			t.Fatalf("status = %d, want 504", response.StatusCode)
+		}
+		if b := h.bucket(t, "openai", "gpt-4.1-mini"); b.InFlight != 0 || b.UpstreamErrors != 1 {
+			t.Fatalf("bucket = %+v, want the slot released and one upstream error", b)
+		}
+		if !strings.Contains(h.logs.String(), "upstream request failed") {
+			t.Fatalf("logs = %q, want the failure logged", h.logs.String())
+		}
+	})
+
+	t.Run("answers 503 and counts the call when the in-flight limit is reached", func(t *testing.T) {
+		entered := make(chan struct{})
+		released := make(chan struct{})
+		var releaseOnce sync.Once
+		release := func() { releaseOnce.Do(func() { close(released) }) }
+		busy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			close(entered)
+			<-released
+			rateLimitHeaders(w.Header())
+			w.WriteHeader(http.StatusOK)
+		}))
+		t.Cleanup(busy.Close)
+		t.Cleanup(release)
+		h := newHarnessWithOptions(t, &clock{now: start}, busy.URL, func(cfg *proxy.Config) {
+			cfg.MaxInFlight = 1
+		})
+		first := make(chan int, 1)
+		go func() {
+			request, err := http.NewRequest(http.MethodPost, h.front.URL+"/v1/chat/completions", strings.NewReader(chat))
+			if err != nil {
+				first <- 0
+				return
+			}
+			response, err := http.DefaultClient.Do(request)
+			if err != nil {
+				first <- 0
+				return
+			}
+			_ = response.Body.Close()
+			first <- response.StatusCode
+		}()
+		<-entered
+
+		rejected, body := h.post(t, "/v1/chat/completions", "sk-test", chat)
+		release()
+
+		if rejected.StatusCode != http.StatusServiceUnavailable || !strings.Contains(body, "in flight") {
+			t.Fatalf("status = %d body = %s, want 503 naming the in-flight limit", rejected.StatusCode, body)
+		}
+		if got := <-first; got != http.StatusOK {
+			t.Fatalf("first call = %d, want it to finish once the upstream releases it", got)
+		}
+		if h.store.Stats().RejectedCalls != 1 {
+			t.Fatalf("stats = %+v, want one rejected call", h.store.Stats())
+		}
+	})
+
 	t.Run("requires both upstreams", func(t *testing.T) {
 		store, _ := state.New(0.5, state.DefaultLimits())
 
 		if _, err := proxy.New(proxy.DefaultConfig(), store, time.Now); err == nil {
 			t.Fatal("expected an error without upstreams")
+		}
+	})
+
+	t.Run("rejects bounds that would not bound", func(t *testing.T) {
+		cases := []struct {
+			name      string
+			configure func(*proxy.Config)
+		}{
+			{"a zero in-flight limit", func(cfg *proxy.Config) { cfg.MaxInFlight = 0 }},
+			{"a zero upstream header timeout", func(cfg *proxy.Config) { cfg.UpstreamHeaderTimeout = 0 }},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				store, _ := state.New(0.5, state.DefaultLimits())
+				cfg := proxy.DefaultConfig()
+				cfg.OpenAI, _ = url.Parse("http://provider")
+				cfg.Anthropic = cfg.OpenAI
+				tc.configure(&cfg)
+
+				if _, err := proxy.New(cfg, store, time.Now); err == nil {
+					t.Fatalf("expected an error for %s", tc.name)
+				}
+			})
 		}
 	})
 }

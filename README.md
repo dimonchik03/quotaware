@@ -129,7 +129,12 @@ port serves `/metrics`, `/healthz` and `/v1/observe`; the last one needs a token
 below). A client that stalls while sending a request body gets 408 after
 `-read-body-timeout` (30 s); the buffered body is handed to the transport as
 replayable, so a pooled connection found dead before the request is written is
-retried instead of answered with 502.
+retried instead of answered with 502. A provider that accepts the connection but
+sends no response headers within `-upstream-header-timeout` (10 min, the SDKs' own
+default), or whose dial or TLS handshake times out, gets 504 and counts as an
+upstream error, so a hung provider cannot park calls and their buffers for good. At most `-max-inflight` (256) proxied calls are
+open at once; a call beyond that is answered 503 before its body is read and
+counted in `quotaware_calls_rejected_total`.
 
 To see it work without a provider account, `docker compose up --build` starts the
 proxy in front of `bench/fakeprovider`, a provider stand-in with real rate-limit
@@ -285,14 +290,17 @@ count toward the drain floor. The scaler needs at least two ceiling slots, one
 combined slot per trigger plus one for each accepted credential it observes.
 The remaining knobs (`credential`, `quotaScope`, `safety`, `share`, `lookAhead`,
 `maxStepUp`, `stepInterval`, `defaultCeiling`, `minReplicas`, `staleAfter`,
-`staleHard`, `window`) and their defaults are listed in `docs/SPEC.md`. A [Grafana dashboard](deploy/grafana/quotaware.json) is included.
+`staleHard`, `window`) and their defaults are listed in `docs/SPEC.md`. A key outside
+that list, apart from `scalerAddress` and the TLS settings KEDA reads for itself, is
+answered with InvalidArgument, so a misspelt knob cannot run on its default unnoticed. A [Grafana dashboard](deploy/grafana/quotaware.json) is included.
 
 ## Without the proxy hop
 
 Workers that cannot or should not route through the proxy can report what they
 see themselves. Both collectors post the same observation to `POST /v1/observe` on
 the admin port and never block or fail the call they observe: a full queue drops, a
-failed delivery is counted, an error inside the hook is counted. quotaware refuses
+failed delivery is counted, an error inside the hook is counted. An observation for a
+bucket the `-max-buckets` limit refuses is answered 503 and counts as a failed delivery. quotaware refuses
 to start without `-observe-token` (or `QUOTAWARE_OBSERVE_TOKEN`) unless
 `-observe-insecure` is passed, because anyone who can post an observation can move
 the ceiling; give the collectors the same token.
@@ -353,7 +361,7 @@ minute's accepted responses, 2xx and 429, were 429, then hold for the longest
 halved once; a `retry-after` beyond a day counts as malformed. The same rule guards a header-derived
 ceiling against 429s the headers did not predict, such as acceleration limits: a
 429 whose own headers show a spent window is already in the headroom formula and
-does not count. `quotaware_rate_limited_ratio` shows the share of every 429, and
+does not count, for the share or for the length of the hold. `quotaware_rate_limited_ratio` shows the share of every 429, and
 `quotaware_unexplained_rate_limited_ratio` the share the guard reacts to (ADR 0006,
 ADR 0013).
 
@@ -413,6 +421,9 @@ prints the build version.
 | `-max-request-bytes` | 8 MiB | largest request body accepted |
 | `-max-capture-bytes` | 4 MiB | largest response body read for usage |
 | `-read-body-timeout` | `30s` | time a client may take to send the request body |
+| `-upstream-header-timeout` | `10m` | time the provider may take to answer with headers before the call gets 504 |
+| `-max-inflight` | `256` | proxied calls open at once; more get 503 |
+| `-drain-timeout` | `10s` | time open calls get to finish after a shutdown signal before they are closed |
 | `-redis-address` (`all`) | none | Redis addresses single-trigger mode may read |
 | `-push-interval` (`all`) | `5s` | how often `StreamIsActive` re-checks a queue |
 
@@ -438,13 +449,18 @@ prints the build version.
   and Brotli when bounded decoders are installed. A larger body or unsupported
   encoding still delivers headers and status.
 - Each open proxied call may buffer up to `-max-request-bytes` of request and
-  `-max-capture-bytes` of response, 12 MiB with the defaults, so size the chart's
-  256Mi memory limit for the calls you expect in flight or lower the two flags.
+  `-max-capture-bytes` of response, 12 MiB with the defaults, and `-max-inflight`
+  (256) bounds how many are open, so the worst case is their product; the chart's
+  256Mi memory limit fits typical call sizes, not that worst case. Lower the three
+  flags together to bound it.
 - The proxy and the scaler run in one pod with in-memory state: a restart starts
   every bucket afresh, the proxy is in the path of every call it carries, and the
   chart replaces the pod on every upgrade (`strategy: Recreate`), so an upgrade
-  interrupts proxied calls until the new pod is ready. Run collectors instead of the
-  proxy where that matters.
+  interrupts proxied calls until the new pod is ready. On a shutdown signal the proxy
+  stops accepting calls, gives the open ones `-drain-timeout` (10 s) to finish, then
+  closes them, logs that it did and exits cleanly; keep the pod's termination grace
+  period (30 s by default) above the drain. Run collectors instead of the proxy where
+  that matters.
 - Only OpenAI- and Anthropic-shaped APIs are understood: the proxy serves its two
   paths at the root of an origin, and the scaler and `/v1/observe` accept only the
   openai and anthropic providers. Gemini's OpenAI-compatible endpoint sits under a
@@ -464,7 +480,12 @@ implemented, and the two-trigger mode benchmarked against a fixed-window fake
 provider. This checkout adds shared retry holds, workload-scoped drain, bounded
 collector capture, the changing-quota experiment, a look-ahead past an imminent
 reset and a guard that ignores 429s the headers explain (ADR 0013); set
-`lookAhead: "0s"` for the earlier instantaneous rate. Over v0.2.0 it dates quotas by when their headers arrived, limits raises of
+`lookAhead: "0s"` for the earlier instantaneous rate. It also keeps the halved value
+through a guard hold instead of the lowest value the hold saw, holds only for the
+`retry-after` of unexplained 429s, rejects trigger metadata keys it does not know
+(remove a misspelt knob before upgrading), answers 503 for an observation the bucket
+limit discards, bounds the proxy's open calls and its wait for a provider's headers,
+and makes the shutdown drain a flag (ADR 0014). Over v0.2.0 it dates quotas by when their headers arrived, limits raises of
 the value KEDA receives as well as each credential's, bounds the trigger metadata and
 the settings, caps `retry-after`, hands buckets without a computable rate to AIMD,
 bounds what the Python collector reads, hardens the chart's arguments, and builds

@@ -120,6 +120,21 @@ func (f *fixture) observe(key state.Key, remainingRequests, remainingTokens floa
 	}, "")
 }
 
+func (f *fixture) rateLimited(key state.Key, remainingRequests float64, retryAfter time.Duration) {
+	at := f.clock.Now()
+	f.store.Begin(key, at, "")
+	f.store.End(key, state.Sample{
+		Status:     http.StatusTooManyRequests,
+		Complete:   true,
+		Headers:    state.HeadersPresent,
+		Quotas:     state.Quotas{Requests: headroom.Quota{Limit: 1000, Remaining: remainingRequests, ResetAt: at.Add(30 * time.Second)}},
+		RetryAfter: retryAfter,
+		Latency:    time.Second,
+		HeadersAt:  at,
+		At:         at,
+	}, "")
+}
+
 func (f *fixture) respond(key state.Key, status int, headersStatus state.HeadersStatus, retryAfter time.Duration) {
 	at := f.clock.Now()
 	f.store.Begin(key, at, "")
@@ -665,16 +680,19 @@ func TestGetMetrics(t *testing.T) {
 		}
 	})
 
-	t.Run("keeps a trigger apart from a caller that moves its fields across keys", func(t *testing.T) {
+	t.Run("refuses a caller that moves the trigger's fields across keys", func(t *testing.T) {
 		f := newFixture(t)
 		f.observe(bucketA, 900, 500000)
 		metric(t, f, capMetadata())
 		resplit := map[string]string{"bucket": "openai/gpt-4.1-mini", "concurrency": "4", "defaultCeiling\x001\x00maxStepUp": "100"}
 
-		metric(t, f, resplit)
+		_, err := f.service.GetMetrics(context.Background(), &externalscaler.GetMetricsRequest{ScaledObjectRef: ref(resplit), MetricName: scaler.MetricName})
 
-		if ceilings := bucketCeilings(f); len(ceilings) != 2 {
-			t.Fatalf("recorded = %+v, want the re-split metadata kept in its own entry", ceilings)
+		if code(err) != codes.InvalidArgument {
+			t.Fatalf("code = %v, want InvalidArgument for a key quotaware does not know", code(err))
+		}
+		if ceilings := bucketCeilings(f); len(ceilings) != 1 {
+			t.Fatalf("recorded = %+v, want only the trigger's own entry", ceilings)
 		}
 	})
 
@@ -955,6 +973,53 @@ func TestAIMD(t *testing.T) {
 
 		if got := metric(t, f, metadata); got != 3 {
 			t.Fatalf("ceiling = %d, want one step up from the guarded value after the hold", got)
+		}
+	})
+
+	t.Run("a window spent during a hold does not lower what the hold keeps", func(t *testing.T) {
+		f := newFixture(t)
+		metadata := capMetadata()
+		metadata["concurrency"] = "1"
+		f.observe(bucketA, 900, 500000)
+		fromHeaders := metric(t, f, metadata)
+		f.clock.Advance(20 * time.Second)
+		f.observe(bucketA, 900, 500000)
+		for range 3 {
+			f.rateLimited(bucketA, 900, 0)
+		}
+		halved := metric(t, f, metadata)
+		f.clock.Advance(20 * time.Second)
+		f.observe(bucketA, 0, 500000)
+		spent := metric(t, f, metadata)
+		f.clock.Advance(20 * time.Second)
+		f.observe(bucketA, 900, 500000)
+		refilled := metric(t, f, metadata)
+		f.clock.Advance(25 * time.Second)
+		f.observe(bucketA, 900, 500000)
+		released := metric(t, f, metadata)
+
+		if fromHeaders != 17 || halved != 8 || spent != 1 || refilled != 8 || released != 17 {
+			t.Fatalf("ceilings = %d, %d, %d, %d, %d, want 17 halved to 8, a spent window at 1, the refilled window back at the held 8, then 17 once the hold ends", fromHeaders, halved, spent, refilled, released)
+		}
+	})
+
+	t.Run("the retry-after of an explained 429 does not lengthen the guard hold", func(t *testing.T) {
+		f := newFixture(t)
+		f.observe(bucketA, 900, 500000)
+		metric(t, f, capMetadata())
+		f.clock.Advance(20 * time.Second)
+		f.observe(bucketA, 900, 500000)
+		f.rateLimited(bucketA, 0, time.Hour)
+		for range 3 {
+			f.rateLimited(bucketA, 900, 0)
+		}
+		halved := metric(t, f, capMetadata())
+		f.clock.Advance(65 * time.Second)
+		f.observe(bucketA, 900, 500000)
+		released := metric(t, f, capMetadata())
+
+		if halved != 2 || released != 4 {
+			t.Fatalf("ceilings = %d then %d, want 4 halved to 2 and released after one window, not held for the explained hour", halved, released)
 		}
 	})
 
@@ -1262,6 +1327,33 @@ func TestRetryHoldSurvivesNewHeadersOnAnotherSharedKey(t *testing.T) {
 	}
 }
 
+func TestASpentWindowOnAHeldSharedKeyDoesNotCapAFresherSiblingBelowTheHold(t *testing.T) {
+	f := newFixture(t)
+	metadata := capMetadata()
+	metadata["concurrency"] = "1"
+	sibling := bucketA
+	sibling.Key = "bbbbbbbbbbbb"
+	f.observe(bucketA, 900, 500000)
+	f.observe(sibling, 900, 500000)
+	metric(t, f, metadata)
+	f.clock.Advance(20 * time.Second)
+	f.observe(bucketA, 900, 500000)
+	for range 3 {
+		f.rateLimited(bucketA, 900, 0)
+	}
+	halved := metric(t, f, metadata)
+	f.clock.Advance(20 * time.Second)
+	f.observe(bucketA, 0, 500000)
+	f.clock.Advance(time.Second)
+	f.observe(sibling, 900, 500000)
+
+	fresher := metric(t, f, metadata)
+
+	if halved != 8 || fresher != 8 {
+		t.Fatalf("ceilings = %d then %d, want 17 halved to 8 and the sibling's fresher refill capped at the held 8, not at the spent window's 1", halved, fresher)
+	}
+}
+
 func TestSingleTriggerDrainsOnlyItsOwnWorkers(t *testing.T) {
 	f := newFixture(t)
 	for range 5 {
@@ -1359,4 +1451,30 @@ func TestTheCeilingClimbsBackBeforeTheResetOfASpentWindow(t *testing.T) {
 	if spent != 6 || after != 10 {
 		t.Fatalf("spent, after the reset = %d, %d; want 6 from the refill ten seconds ahead and 10 one step later", spent, after)
 	}
+}
+
+func TestMetadataKeysOutsideTheSettings(t *testing.T) {
+	t.Run("rejects a key quotaware does not know", func(t *testing.T) {
+		f := newFixture(t)
+		metadata := capMetadata()
+		metadata["saftey"] = "0.5"
+
+		_, err := f.service.GetMetricSpec(context.Background(), ref(metadata))
+
+		if code(err) != codes.InvalidArgument || !strings.Contains(err.Error(), "saftey") {
+			t.Fatalf("err = %v, want InvalidArgument naming the unknown key", err)
+		}
+	})
+
+	t.Run("accepts the keys KEDA reads for itself", func(t *testing.T) {
+		f := newFixture(t)
+		metadata := capMetadata()
+		for _, name := range []string{"scalerAddress", "enableTLS", "unsafeSsl", "caCert", "tlsClientCert", "tlsClientKey", "tlsCertFile"} {
+			metadata[name] = "set-by-keda"
+		}
+
+		if _, err := f.service.GetMetricSpec(context.Background(), ref(metadata)); err != nil {
+			t.Fatalf("err = %v, want KEDA's own keys accepted", err)
+		}
+	})
 }

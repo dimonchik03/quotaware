@@ -45,6 +45,7 @@ type Collector struct {
 	consumers         *prometheus.Desc
 	bucketsRejected   *prometheus.Desc
 	consumersRejected *prometheus.Desc
+	callsRejected     *prometheus.Desc
 }
 
 func NewCollector(store *state.Store, now func() time.Time) *Collector {
@@ -78,6 +79,7 @@ func NewCollector(store *state.Store, now func() time.Time) *Collector {
 		consumers:         prometheus.NewDesc("quotaware_scaled_objects", "Ceilings currently tracked, one per scaled object, trigger and credential.", nil, nil),
 		bucketsRejected:   prometheus.NewDesc("quotaware_buckets_rejected_total", "New bucket admissions refused because the bucket limit was reached.", nil, nil),
 		consumersRejected: prometheus.NewDesc("quotaware_scaled_objects_rejected_total", "Ceiling evaluations refused because the ceiling limit was reached.", nil, nil),
+		callsRejected:     prometheus.NewDesc("quotaware_calls_rejected_total", "Proxied calls answered 503 because the in-flight limit was reached.", nil, nil),
 	}
 }
 
@@ -151,6 +153,7 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 	ch <- prometheus.MustNewConstMetric(c.consumers, prometheus.GaugeValue, float64(stats.Consumers))
 	ch <- prometheus.MustNewConstMetric(c.bucketsRejected, prometheus.CounterValue, float64(stats.RejectedBuckets))
 	ch <- prometheus.MustNewConstMetric(c.consumersRejected, prometheus.CounterValue, float64(stats.RejectedConsumers))
+	ch <- prometheus.MustNewConstMetric(c.callsRejected, prometheus.CounterValue, float64(stats.RejectedCalls))
 }
 
 func (c *Collector) descs() []*prometheus.Desc {
@@ -158,7 +161,7 @@ func (c *Collector) descs() []*prometheus.Desc {
 		c.limitRequests, c.remainingRequests, c.limitTokens, c.remainingTokens, c.resetSeconds,
 		c.tokensPerCall, c.latencySeconds, c.inflight, c.retryAfterSeconds, c.rateLimitedRatio, c.unexplainedRatio,
 		c.responses, c.rateLimited, c.unexplained, c.aborted, c.upstreamErrors, c.headersMissing, c.headersMalformed, c.usageMissing,
-		c.ceiling, c.buckets, c.consumers, c.bucketsRejected, c.consumersRejected,
+		c.ceiling, c.buckets, c.consumers, c.bucketsRejected, c.consumersRejected, c.callsRejected,
 	}
 }
 
