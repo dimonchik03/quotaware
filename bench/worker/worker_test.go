@@ -3,6 +3,7 @@ package worker_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -19,8 +20,25 @@ import (
 )
 
 type fakeQueue struct {
-	mu    sync.Mutex
-	items []string
+	mu         sync.Mutex
+	items      []string
+	requeueErr error
+}
+
+func (q *fakeQueue) Requeue(_ context.Context, _ string, payload string) error {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if q.requeueErr != nil {
+		return q.requeueErr
+	}
+	q.items = append([]string{payload}, q.items...)
+	return nil
+}
+
+func (q *fakeQueue) waiting() []string {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return append([]string(nil), q.items...)
 }
 
 func (q *fakeQueue) Pop(ctx context.Context, _ string, timeout time.Duration) (string, error) {
@@ -189,15 +207,32 @@ func TestWorker(t *testing.T) {
 		}
 	})
 
-	t.Run("counts a job abandoned on shutdown while it waits to retry", func(t *testing.T) {
+	t.Run("hands a job back to the queue on shutdown while it waits to retry", func(t *testing.T) {
 		f := newFixture(t, http.StatusTooManyRequests)
 		f.retryAfter = "60"
 		f.queue.push(t, worker.Job{ID: 8, EnqueuedAt: time.Now(), PromptTokens: 20})
+		payload := f.queue.waiting()[0]
 
 		f.run(t, fastConfig(), func() bool { return counter(f.metrics.Retries) == 1 })
 
-		if counter(f.metrics.Abandoned) != 1 || counter(f.metrics.Completed) != 0 || counter(f.metrics.Failed) != 0 {
-			t.Fatalf("abandoned = %v completed = %v failed = %v, want the job counted as abandoned only", counter(f.metrics.Abandoned), counter(f.metrics.Completed), counter(f.metrics.Failed))
+		if counter(f.metrics.Requeued) != 1 || counter(f.metrics.Abandoned) != 0 || counter(f.metrics.Completed) != 0 || counter(f.metrics.Failed) != 0 {
+			t.Fatalf("requeued = %v abandoned = %v completed = %v failed = %v, want the job handed back only", counter(f.metrics.Requeued), counter(f.metrics.Abandoned), counter(f.metrics.Completed), counter(f.metrics.Failed))
+		}
+		if waiting := f.queue.waiting(); len(waiting) != 1 || waiting[0] != payload {
+			t.Fatalf("queue = %q, want the unchanged payload back at the head", waiting)
+		}
+	})
+
+	t.Run("counts a job abandoned on shutdown when the queue refuses it back", func(t *testing.T) {
+		f := newFixture(t, http.StatusTooManyRequests)
+		f.retryAfter = "60"
+		f.queue.requeueErr = errors.New("redis unavailable")
+		f.queue.push(t, worker.Job{ID: 9, EnqueuedAt: time.Now(), PromptTokens: 20})
+
+		f.run(t, fastConfig(), func() bool { return counter(f.metrics.Retries) == 1 })
+
+		if counter(f.metrics.Abandoned) != 1 || counter(f.metrics.Requeued) != 0 {
+			t.Fatalf("abandoned = %v requeued = %v, want the job counted as abandoned", counter(f.metrics.Abandoned), counter(f.metrics.Requeued))
 		}
 	})
 

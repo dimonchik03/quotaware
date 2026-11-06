@@ -70,7 +70,7 @@ func writeRunAt(t *testing.T, root, name string, runStart time.Time, replicas, r
 	write("queue_length.json", matrixJSON(t, queue))
 	write("multiplier.json", matrixJSON(t, multiplier))
 	write("ceiling.json", matrixJSON(t, ceiling))
-	for _, metric := range []string{"jobs_total", "completed_total", "failed_total", "abandoned_total", "retries_total", "rate_limited_total", "latency_p50", "latency_p95", "backoff_seconds_total"} {
+	for _, metric := range []string{"jobs_total", "completed_total", "failed_total", "abandoned_total", "requeued_total", "retries_total", "rate_limited_total", "latency_p50", "latency_p95", "backoff_seconds_total"} {
 		write(metric+".json", vectorJSON(t, totals[metric]))
 	}
 }
@@ -142,7 +142,7 @@ func TestReport(t *testing.T) {
 			shift([][2]float64{{at(0), 0}, {at(60), 10}, {at(120), 450}, {at(180), 100}, {at(240), 0}}, 3600),
 			shift(multiplier, 3600),
 			shift([][2]float64{{at(0), 1}, {at(60), 10}, {at(120), 10}, {at(180), 10}, {at(240), 10}}, 3600),
-			map[string]float64{"jobs_total": 900, "completed_total": 880, "failed_total": 0, "abandoned_total": 5, "rate_limited_total": 40, "retries_total": 40, "latency_p50": 13, "latency_p95": 45, "backoff_seconds_total": 10})
+			map[string]float64{"jobs_total": 900, "completed_total": 880, "failed_total": 0, "abandoned_total": 5, "requeued_total": 12, "rate_limited_total": 40, "retries_total": 40, "latency_p50": 13, "latency_p95": 45, "backoff_seconds_total": 10})
 		if err := os.WriteFile(filepath.Join(root, "C", "run.json"), []byte(`{"start":`+strconvFloat(float64(start.Add(60*time.Minute).Unix()))+`,"end":`+strconvFloat(float64(start.Add(64*time.Minute).Unix()))+`,"label":"safety 1","commit":"abc1234"}`), 0o644); err != nil {
 			t.Fatal(err)
 		}
@@ -157,7 +157,7 @@ func TestReport(t *testing.T) {
 			t.Fatalf("run = %+v, want the commit and the label loaded", third)
 		}
 		table := wide.Markdown()
-		for _, want := range []string{"| Metric | A | B | C (safety 1) |", "| 429 responses | 500 | 0 | 40 |", "| Jobs abandoned on shutdown | 0 | 0 | 5 |", "| Jobs unaccounted for | 0 | 0 | 15 |"} {
+		for _, want := range []string{"| Metric | A | B | C (safety 1) |", "| 429 responses | 500 | 0 | 40 |", "| Jobs abandoned on shutdown | 0 | 0 | 5 |", "| Jobs handed back on shutdown | 0 | 0 | 12 |", "| Jobs unaccounted for | 0 | 0 | 15 |"} {
 			if !strings.Contains(table, want) {
 				t.Fatalf("table lacks %q:\n%s", want, table)
 			}

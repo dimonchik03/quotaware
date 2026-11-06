@@ -123,6 +123,7 @@ export_series() {
   instant completed_total 'sum(max_over_time(worker_jobs_completed_total['"$window"'s]))'
   instant failed_total 'sum(max_over_time(worker_jobs_failed_total['"$window"'s]))'
   instant abandoned_total 'sum(max_over_time(worker_jobs_abandoned_total['"$window"'s]))'
+  instant requeued_total 'sum(max_over_time(worker_jobs_requeued_total['"$window"'s]))'
   instant rate_limited_total 'sum(max_over_time(worker_calls_total{status="429"}['"$window"'s]))'
   instant retries_total 'sum(max_over_time(worker_retries_total['"$window"'s]))'
   instant backoff_seconds_total 'sum(max_over_time(worker_backoff_seconds_total['"$window"'s]))'

@@ -37,6 +37,7 @@ func Build(baseline Run, capped []Run, concurrency int) Report {
 	measure("Jobs completed", func(r Run) string { return count(r.Totals["completed_total"]) })
 	measure("Jobs failed", func(r Run) string { return count(r.Totals["failed_total"]) })
 	measure("Jobs abandoned on shutdown", func(r Run) string { return count(r.Totals["abandoned_total"]) })
+	measure("Jobs handed back on shutdown", func(r Run) string { return count(r.Totals["requeued_total"]) })
 	measure("Jobs unaccounted for", func(r Run) string {
 		return count(r.Totals["jobs_total"] - r.Totals["completed_total"] - r.Totals["failed_total"] - r.Totals["abandoned_total"])
 	})
