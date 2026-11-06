@@ -66,4 +66,9 @@ still serves, so calls in those seconds may meet 429s until the reset; `lookAhea
 over-estimated for at most `lookAhead`, until the first poll that sees its headers.
 A provider that sends 429s without headers, or with quota still remaining, triggers
 the guard as before. Each 429 is judged by its own headers, so one that carries none
-is unexplained.
+is unexplained. The guard's hold lasts for the longest `retry-after` among the
+unexplained 429s of the window; the `retry-after` of an explained one belongs to the
+headroom formula. The rule reads `remaining` against the smoothed usage per call, so
+a 429 that OpenAI charged on `prompt + max_tokens`, or that the rounding of
+Anthropic's `remaining` to the thousand hides, can still count as unexplained and
+halve the ceiling once; both are listed under the known limitations.

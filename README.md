@@ -290,14 +290,17 @@ count toward the drain floor. The scaler needs at least two ceiling slots, one
 combined slot per trigger plus one for each accepted credential it observes.
 The remaining knobs (`credential`, `quotaScope`, `safety`, `share`, `lookAhead`,
 `maxStepUp`, `stepInterval`, `defaultCeiling`, `minReplicas`, `staleAfter`,
-`staleHard`, `window`) and their defaults are listed in `docs/SPEC.md`. A [Grafana dashboard](deploy/grafana/quotaware.json) is included.
+`staleHard`, `window`) and their defaults are listed in `docs/SPEC.md`. A key outside
+that list, apart from `scalerAddress` and the TLS settings KEDA reads for itself, is
+answered with InvalidArgument, so a misspelt knob cannot run on its default unnoticed. A [Grafana dashboard](deploy/grafana/quotaware.json) is included.
 
 ## Without the proxy hop
 
 Workers that cannot or should not route through the proxy can report what they
 see themselves. Both collectors post the same observation to `POST /v1/observe` on
 the admin port and never block or fail the call they observe: a full queue drops, a
-failed delivery is counted, an error inside the hook is counted. quotaware refuses
+failed delivery is counted, an error inside the hook is counted. An observation for a
+bucket the `-max-buckets` limit refuses is answered 503 and counts as a failed delivery. quotaware refuses
 to start without `-observe-token` (or `QUOTAWARE_OBSERVE_TOKEN`) unless
 `-observe-insecure` is passed, because anyone who can post an observation can move
 the ceiling; give the collectors the same token.
@@ -477,7 +480,12 @@ implemented, and the two-trigger mode benchmarked against a fixed-window fake
 provider. This checkout adds shared retry holds, workload-scoped drain, bounded
 collector capture, the changing-quota experiment, a look-ahead past an imminent
 reset and a guard that ignores 429s the headers explain (ADR 0013); set
-`lookAhead: "0s"` for the earlier instantaneous rate. Over v0.2.0 it dates quotas by when their headers arrived, limits raises of
+`lookAhead: "0s"` for the earlier instantaneous rate. It also keeps the halved value
+through a guard hold instead of the lowest value the hold saw, holds only for the
+`retry-after` of unexplained 429s, rejects trigger metadata keys it does not know
+(remove a misspelt knob before upgrading), answers 503 for an observation the bucket
+limit discards, bounds the proxy's open calls and its wait for a provider's headers,
+and makes the shutdown drain a flag (ADR 0014). Over v0.2.0 it dates quotas by when their headers arrived, limits raises of
 the value KEDA receives as well as each credential's, bounds the trigger metadata and
 the settings, caps `retry-after`, hands buckets without a computable rate to AIMD,
 bounds what the Python collector reads, hardens the chart's arguments, and builds

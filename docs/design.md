@@ -113,7 +113,9 @@ buckets and the ceilings it tracks and counts what it refused, and the scaler bo
 the names, models, credentials and request sizes it accepts, so an unauthenticated
 caller cannot grow memory or label cardinality without limit. It can still fill both
 tables and lock new buckets or ScaledObjects out until eviction; the NetworkPolicy is
-the fence against that (ADR 0009).
+the fence against that (ADR 0009). The proxy keeps at most `-max-inflight` calls open
+and waits at most `-upstream-header-timeout` for a provider's headers, so neither a
+worker fleet nor a hung provider can grow it past its memory limit (ADR 0014).
 
 ## What is deliberately not here
 

@@ -77,7 +77,8 @@ error (ADR 0014).
 Collectors that remove the extra hop: a Go `http.RoundTripper` wrapper and a Python
 `httpx` event hook that post the same observation to `POST /v1/observe` on the admin
 port behind a bearer token that is required unless `-observe-insecure` is passed
-(ADR 0007, ADR 0008). An optional `headers_age_ms` measures the time from receipt of the provider headers
+(ADR 0007, ADR 0008); an observation for a bucket the `-max-buckets` limit refuses is
+answered 503 (ADR 0014). An optional `headers_age_ms` measures the time from receipt of the provider headers
 to sending the report, including local delivery backlog. The observer uses this age to
 date quota windows and duration resets.
 
@@ -184,7 +185,9 @@ key), `quotaScope` (`shared`, or `credential` when every key has a quota of its 
 `safety` (0.85), `share` (1), `lookAhead` (30s, from 0 to `window`), `maxStepUp` (2), `stepInterval` (15s),
 `defaultCeiling` (1), `minReplicas` (1), `maxReplicas` (100, mirror
 `maxReplicaCount` by hand), `staleAfter` (2m), `staleHard` (10m), `window` (1m),
-`aimdThreshold` (0.02), `aimdDecrease` (0.5), `aimdIncrease` (1).
+`aimdThreshold` (0.02), `aimdDecrease` (0.5), `aimdIncrease` (1). A key outside this
+list, apart from the TLS settings KEDA reads for itself, is rejected with
+InvalidArgument (ADR 0014).
 Ceilings are computed per ScaledObject, trigger and bucket: the state a poll continues
 from is keyed by the namespace, the name and a hash of the trigger metadata, so a
 caller that sends other metadata for the same name evaluates its own entry and never
@@ -365,7 +368,8 @@ covers reporting the replica count with `targetSize: 1`), 0006 the AIMD fallback
 guard, 0007 the observe protocol, 0008 and 0009 the network defaults, 0010 one quota
 across credentials, 0011 the errors discarded on purpose, 0012 shared holds and
 workload drain, 0013 the look-ahead past a reset and the guard against unexplained
-429s. Counting uncached input
+429s, 0014 the proxy's open-call and upstream-wait bounds and the refusal of unknown
+trigger keys and discarded observations. Counting uncached input
 and cache writes for Anthropic is described above and in the README rather than in
 a record of its own.
 
