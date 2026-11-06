@@ -541,7 +541,7 @@ func (s *Service) ceiling(ref *externalscaler.ScaledObjectRef, t trigger, bucket
 		sum += ceiling.Value
 		shared = shared.add(b.ObservedAt, ceiling.Bound)
 		if now.Before(ceiling.HoldUntil) {
-			sharedHold = min(sharedHold, ceiling.Bound)
+			sharedHold = min(sharedHold, ceiling.Held)
 		}
 	}
 	floor := drainFloor(t, buckets)

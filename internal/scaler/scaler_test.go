@@ -1327,6 +1327,33 @@ func TestRetryHoldSurvivesNewHeadersOnAnotherSharedKey(t *testing.T) {
 	}
 }
 
+func TestASpentWindowOnAHeldSharedKeyDoesNotCapAFresherSiblingBelowTheHold(t *testing.T) {
+	f := newFixture(t)
+	metadata := capMetadata()
+	metadata["concurrency"] = "1"
+	sibling := bucketA
+	sibling.Key = "bbbbbbbbbbbb"
+	f.observe(bucketA, 900, 500000)
+	f.observe(sibling, 900, 500000)
+	metric(t, f, metadata)
+	f.clock.Advance(20 * time.Second)
+	f.observe(bucketA, 900, 500000)
+	for range 3 {
+		f.rateLimited(bucketA, 900, 0)
+	}
+	halved := metric(t, f, metadata)
+	f.clock.Advance(20 * time.Second)
+	f.observe(bucketA, 0, 500000)
+	f.clock.Advance(time.Second)
+	f.observe(sibling, 900, 500000)
+
+	fresher := metric(t, f, metadata)
+
+	if halved != 8 || fresher != 8 {
+		t.Fatalf("ceilings = %d then %d, want 17 halved to 8 and the sibling's fresher refill capped at the held 8, not at the spent window's 1", halved, fresher)
+	}
+}
+
 func TestSingleTriggerDrainsOnlyItsOwnWorkers(t *testing.T) {
 	f := newFixture(t)
 	for range 5 {
