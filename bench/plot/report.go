@@ -51,6 +51,7 @@ func Build(baseline Run, capped []Run, concurrency int) Report {
 	}
 	measure(retryLabel, func(r Run) string { return count(r.Totals["retries_total"]) })
 	measure(peakLabel, func(r Run) string { return fmt.Sprintf("%.0f", r.Series["retries_per_minute"].Max()) })
+	measure("Job latency mean", func(r Run) string { return seconds(r.Totals["latency_mean"]) })
 	measure("Job latency p50", func(r Run) string { return seconds(r.Totals["latency_p50"]) })
 	measure("Job latency p95", func(r Run) string { return seconds(r.Totals["latency_p95"]) })
 	measure("Peak replicas", func(r Run) string { return fmt.Sprintf("%.0f", r.Series["replicas"].Max()) })

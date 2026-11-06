@@ -97,7 +97,7 @@ func NewMetrics(registry prometheus.Registerer) *Metrics {
 		Retries:     prometheus.NewCounter(prometheus.CounterOpts{Name: "worker_retries_total", Help: "Retry waits scheduled after a 429, a 5xx or a transport failure."}),
 		Backoff:     prometheus.NewCounter(prometheus.CounterOpts{Name: "worker_backoff_seconds_total", Help: "Seconds of retry backoff scheduled, including waits interrupted by shutdown."}),
 		InFlight:    prometheus.NewGauge(prometheus.GaugeOpts{Name: "worker_calls_inflight", Help: "Provider calls currently open."}),
-		JobLatency:  prometheus.NewHistogram(prometheus.HistogramOpts{Name: "worker_job_latency_seconds", Help: "Seconds from enqueue to completion.", Buckets: prometheus.ExponentialBuckets(0.5, 1.5, 24)}),
+		JobLatency:  prometheus.NewHistogram(prometheus.HistogramOpts{Name: "worker_job_latency_seconds", Help: "Seconds from enqueue to completion, in five-second buckets up to twenty minutes.", Buckets: prometheus.LinearBuckets(5, 5, 240)}),
 		CallLatency: prometheus.NewHistogram(prometheus.HistogramOpts{Name: "worker_call_latency_seconds", Help: "Seconds per provider call attempt.", Buckets: prometheus.ExponentialBuckets(0.1, 1.5, 20)}),
 	}
 	registry.MustRegister(m.Completed, m.Failed, m.Abandoned, m.Requeued, m.Calls, m.Retries, m.Backoff, m.InFlight, m.JobLatency, m.CallLatency)

@@ -136,6 +136,7 @@ export_series() {
   instant rate_limited_total 'sum(max_over_time(worker_calls_total{status="429"}['"$window"'s]))'
   instant retries_total 'sum(max_over_time(worker_retries_total['"$window"'s]))'
   instant backoff_seconds_total 'sum(max_over_time(worker_backoff_seconds_total['"$window"'s]))'
+  instant latency_mean 'sum(max_over_time(worker_job_latency_seconds_sum['"$window"'s])) / sum(max_over_time(worker_job_latency_seconds_count['"$window"'s]))'
   instant latency_p50 'histogram_quantile(0.5, sum(max_over_time(worker_job_latency_seconds_bucket['"$window"'s])) by (le))'
   instant latency_p95 'histogram_quantile(0.95, sum(max_over_time(worker_job_latency_seconds_bucket['"$window"'s])) by (le))'
   if [[ "$profile" == changing ]]; then

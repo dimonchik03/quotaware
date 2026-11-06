@@ -162,6 +162,26 @@ func counter(c prometheus.Collector) float64 {
 	return testutil.ToFloat64(c)
 }
 
+func jobLatencyBuckets(t *testing.T, registry *prometheus.Registry) map[float64]uint64 {
+	t.Helper()
+	families, err := registry.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, family := range families {
+		if family.GetName() != "worker_job_latency_seconds" {
+			continue
+		}
+		cumulative := map[float64]uint64{}
+		for _, bucket := range family.GetMetric()[0].GetHistogram().GetBucket() {
+			cumulative[bucket.GetUpperBound()] = bucket.GetCumulativeCount()
+		}
+		return cumulative
+	}
+	t.Fatal("worker_job_latency_seconds is not registered")
+	return nil
+}
+
 func TestWorker(t *testing.T) {
 	t.Run("completes a job on a successful call and records its latency from enqueue", func(t *testing.T) {
 		f := newFixture(t)
@@ -174,6 +194,21 @@ func TestWorker(t *testing.T) {
 		}
 		if count := testutil.CollectAndCount(f.metrics.JobLatency); count != 1 {
 			t.Fatalf("latency histogram samples = %d, want 1", count)
+		}
+	})
+
+	t.Run("resolves job latency to five seconds across twenty minutes", func(t *testing.T) {
+		f := newFixture(t)
+		now := time.Now()
+		f.queue.push(t, worker.Job{ID: 11, EnqueuedAt: now.Add(-151 * time.Second), PromptTokens: 20})
+		f.queue.push(t, worker.Job{ID: 12, EnqueuedAt: now.Add(-157 * time.Second), PromptTokens: 20})
+		f.queue.push(t, worker.Job{ID: 13, EnqueuedAt: now.Add(-1100 * time.Second), PromptTokens: 20})
+
+		f.run(t, fastConfig(), func() bool { return counter(f.metrics.Completed) == 3 })
+
+		cumulative := jobLatencyBuckets(t, f.registry)
+		if cumulative[155] != 1 || cumulative[160] != 2 || cumulative[1200] != 3 {
+			t.Fatalf("jobs at or below 155 s, 160 s and 1200 s = %d, %d, %d, want 1, 2, 3", cumulative[155], cumulative[160], cumulative[1200])
 		}
 	})
 

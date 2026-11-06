@@ -58,6 +58,11 @@ four and 600 after that, while the producer enqueues 11 jobs per second for six
 minutes. Three passes run the arms in the orders A/B/C, C/B/A and B/C/A.
 `BENCH_RPM_WINDOWS`, `BENCH_PHASES` and `BENCH_PASSES` override the schedule.
 
+The job latency histogram now has five-second buckets up to twenty minutes, so p50
+and p95 are interpolated within five seconds, and the report adds the mean job
+latency from the histogram's sum and count. The trials above used buckets that grow
+by a factor of 1.5, about 70 s wide around 150 s.
+
 ### Method
 
 At commit 4b602e1, `make bench-changing` compares three KEDA policies on the same Redis queue. A reads

@@ -120,7 +120,7 @@ func LoadRun(dir string) (Run, error) {
 }
 
 func (r Run) validate() error {
-	for _, name := range []string{"jobs_total", "completed_total", "failed_total", "abandoned_total", "requeued_total", "retries_total", "backoff_seconds_total", "latency_p50", "latency_p95", "rate_limited_total"} {
+	for _, name := range []string{"jobs_total", "completed_total", "failed_total", "abandoned_total", "requeued_total", "retries_total", "backoff_seconds_total", "latency_mean", "latency_p50", "latency_p95", "rate_limited_total"} {
 		value, ok := r.Totals[name]
 		if !ok {
 			return fmt.Errorf("missing %s.json", name)
