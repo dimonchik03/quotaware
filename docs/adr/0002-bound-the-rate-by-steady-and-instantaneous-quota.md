@@ -4,7 +4,8 @@ Date: 2026-11-01
 
 ## Status
 
-Accepted
+Accepted. ADR 0013 adds a look-ahead past an imminent reset to the
+instantaneous rate.
 
 ## Context
 

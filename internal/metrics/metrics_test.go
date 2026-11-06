@@ -134,6 +134,12 @@ quotaware_responses_total{key="ab12",model="gpt-4.1-mini",provider="openai"} 2
 # HELP quotaware_retry_after_seconds Retry-After of the last 429.
 # TYPE quotaware_retry_after_seconds gauge
 quotaware_retry_after_seconds{key="ab12",model="gpt-4.1-mini",provider="openai"} 20
+# HELP quotaware_unexplained_429_total Responses with status 429 whose own rate-limit headers still showed quota for another call.
+# TYPE quotaware_unexplained_429_total counter
+quotaware_unexplained_429_total{key="ab12",model="gpt-4.1-mini",provider="openai"} 0
+# HELP quotaware_unexplained_rate_limited_ratio Share of unexplained 429 among the 2xx and 429 responses of the last minute; the guard on a header ceiling reacts to it.
+# TYPE quotaware_unexplained_rate_limited_ratio gauge
+quotaware_unexplained_rate_limited_ratio{key="ab12",model="gpt-4.1-mini",provider="openai"} 0
 # HELP quotaware_tokens_per_call Smoothed tokens consumed per successful call.
 # TYPE quotaware_tokens_per_call gauge
 quotaware_tokens_per_call{key="ab12",model="gpt-4.1-mini",provider="openai"} 1200
@@ -148,7 +154,28 @@ quotaware_usage_missing_total{key="ab12",model="gpt-4.1-mini",provider="openai"}
 			"quotaware_429_total", "quotaware_ceiling", "quotaware_inflight", "quotaware_limit_requests", "quotaware_limit_tokens", "quotaware_rate_limited_ratio",
 			"quotaware_remaining_requests", "quotaware_remaining_tokens", "quotaware_reset_seconds",
 			"quotaware_responses_total", "quotaware_retry_after_seconds", "quotaware_tokens_per_call",
+			"quotaware_unexplained_429_total", "quotaware_unexplained_rate_limited_ratio",
 			"quotaware_upstream_errors_total", "quotaware_usage_missing_total"); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("counts a 429 its own headers do not explain apart from the others", func(t *testing.T) {
+		s := populated(t)
+		key := state.Key{Provider: "openai", Model: "gpt-4.1-mini", Key: "ab12"}
+		s.Begin(key, now, "")
+		s.End(key, state.Sample{Status: http.StatusTooManyRequests, Complete: true, Headers: state.HeadersMissing, RetryAfter: 5 * time.Second, At: now}, "")
+		collector := metrics.NewCollector(s, func() time.Time { return now })
+		expected := `
+# HELP quotaware_unexplained_429_total Responses with status 429 whose own rate-limit headers still showed quota for another call.
+# TYPE quotaware_unexplained_429_total counter
+quotaware_unexplained_429_total{key="ab12",model="gpt-4.1-mini",provider="openai"} 1
+# HELP quotaware_unexplained_rate_limited_ratio Share of unexplained 429 among the 2xx and 429 responses of the last minute; the guard on a header ceiling reacts to it.
+# TYPE quotaware_unexplained_rate_limited_ratio gauge
+quotaware_unexplained_rate_limited_ratio{key="ab12",model="gpt-4.1-mini",provider="openai"} 0.3333333333333333
+`
+		if err := testutil.CollectAndCompare(collector, strings.NewReader(expected),
+			"quotaware_unexplained_429_total", "quotaware_unexplained_rate_limited_ratio"); err != nil {
 			t.Fatal(err)
 		}
 	})

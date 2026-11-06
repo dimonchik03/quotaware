@@ -217,6 +217,7 @@ func TestMetadata(t *testing.T) {
 		{"rejects a non-numeric concurrency", map[string]string{"bucket": "openai/gpt-4.1-mini", "concurrency": "four"}, codes.InvalidArgument},
 		{"rejects a safety factor above one", map[string]string{"bucket": "openai/gpt-4.1-mini", "concurrency": "4", "safety": "2"}, codes.InvalidArgument},
 		{"rejects an unparseable duration", map[string]string{"bucket": "openai/gpt-4.1-mini", "concurrency": "4", "staleAfter": "soon"}, codes.InvalidArgument},
+		{"rejects a look ahead beyond the window", map[string]string{"bucket": "openai/gpt-4.1-mini", "concurrency": "4", "lookAhead": "2m"}, codes.InvalidArgument},
 		{"rejects queue mode without a list name", map[string]string{"bucket": "openai/gpt-4.1-mini", "concurrency": "4", "redisAddress": "redis:6379"}, codes.InvalidArgument},
 		{"rejects a provider quotaware does not parse", map[string]string{"bucket": "gemini/gemini-2.5-pro", "concurrency": "4"}, codes.InvalidArgument},
 		{"rejects a model longer than the label limit", map[string]string{"bucket": "openai/" + strings.Repeat("m", 257), "concurrency": "4"}, codes.InvalidArgument},
@@ -618,17 +619,19 @@ func TestGetMetrics(t *testing.T) {
 
 	t.Run("measures the step interval from the last change of the bound, not from a drain floor that moved", func(t *testing.T) {
 		f := newFixture(t)
+		metadata := capMetadata()
+		metadata["lookAhead"] = "0s"
 		f.observe(bucketA, 0, 0)
-		metric(t, f, capMetadata())
+		metric(t, f, metadata)
 		f.clock.Advance(20 * time.Second)
 		for range 8 {
 			f.store.Begin(bucketA, f.clock.Now(), "")
 		}
-		draining := metric(t, f, capMetadata())
+		draining := metric(t, f, metadata)
 		f.clock.Advance(5 * time.Second)
 		f.observe(bucketA, 900, 500000)
 
-		recovered := metric(t, f, capMetadata())
+		recovered := metric(t, f, metadata)
 
 		if draining != 2 || recovered != 4 {
 			t.Fatalf("ceilings = %d then %d, want the drain floor of 2 and then the raise to 4, since the bound last changed 25 s ago", draining, recovered)
@@ -1288,5 +1291,72 @@ func TestMinimumCapacityCanServeAColdThenAWarmTrigger(t *testing.T) {
 	f.observe(bucketA, 900, 500000)
 	if got := metric(t, f, m); got != 4 {
 		t.Fatalf("warm ceiling = %d", got)
+	}
+}
+
+func (f *fixture) answer(status int, remaining float64, resetAt time.Time) {
+	at := f.clock.Now()
+	sample := state.Sample{
+		Status:    status,
+		Complete:  true,
+		Headers:   state.HeadersPresent,
+		Quotas:    state.Quotas{Requests: headroom.Quota{Limit: 600, Remaining: remaining, ResetAt: resetAt}},
+		Latency:   2 * time.Second,
+		HeadersAt: at,
+		At:        at,
+	}
+	if status == http.StatusOK {
+		sample.HasUsage, sample.Usage = true, 365
+	} else {
+		sample.RetryAfter = resetAt.Sub(at)
+	}
+	f.store.Begin(bucketA, at, "")
+	f.store.End(bucketA, sample, "")
+}
+
+func spentWindowMetadata(lookAhead string) map[string]string {
+	return map[string]string{"bucket": "openai/gpt-4.1-mini", "concurrency": "2", "maxReplicas": "30", "maxStepUp": "4", "safety": "1", "lookAhead": lookAhead}
+}
+
+func spendTheWindow(t *testing.T, f *fixture, m map[string]string, reset time.Time) int64 {
+	t.Helper()
+	f.answer(http.StatusOK, 300, reset)
+	if got := metric(t, f, m); got != 10 {
+		t.Fatalf("before the window is spent = %d, want 10 from 600 requests per minute", got)
+	}
+	f.clock.Advance(20 * time.Second)
+	for range 20 {
+		f.answer(http.StatusTooManyRequests, 0, reset)
+	}
+	return metric(t, f, m)
+}
+
+func TestASpentWindowLeavesTheCeilingToTheHeaders(t *testing.T) {
+	f := newFixture(t)
+	m := spentWindowMetadata("0s")
+	reset := f.clock.Now().Add(30 * time.Second)
+
+	spent := spendTheWindow(t, f, m, reset)
+	f.clock.Advance(16 * time.Second)
+	f.answer(http.StatusOK, 590, f.clock.Now().Add(54*time.Second))
+	after := metric(t, f, m)
+
+	if spent != 1 || after != 5 {
+		t.Fatalf("spent, after the reset = %d, %d; want 1 and one step of 4 with no guard hold from 429s the headers explained", spent, after)
+	}
+}
+
+func TestTheCeilingClimbsBackBeforeTheResetOfASpentWindow(t *testing.T) {
+	f := newFixture(t)
+	m := spentWindowMetadata("30s")
+	reset := f.clock.Now().Add(30 * time.Second)
+
+	spent := spendTheWindow(t, f, m, reset)
+	f.clock.Advance(16 * time.Second)
+	f.answer(http.StatusOK, 590, f.clock.Now().Add(54*time.Second))
+	after := metric(t, f, m)
+
+	if spent != 6 || after != 10 {
+		t.Fatalf("spent, after the reset = %d, %d; want 6 from the refill ten seconds ahead and 10 one step later", spent, after)
 	}
 }

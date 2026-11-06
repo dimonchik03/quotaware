@@ -270,6 +270,7 @@ func (s *Service) parseConfig(metadata map[string]string) (headroom.Config, erro
 	}
 	durations := []durationField{
 		{"window", &cfg.Window},
+		{"lookAhead", &cfg.LookAhead},
 		{"stepInterval", &cfg.StepInterval},
 		{"staleAfter", &cfg.StaleAfter},
 		{"staleHard", &cfg.StaleHard},
@@ -628,7 +629,8 @@ func decide(t trigger, obs headroom.Observation, recent state.Recent, previous s
 	result := headroom.Compute(t.cfg, obs, headroom.Previous{Ceiling: previous.Bound, Known: known, At: previous.BoundChangedAt}, now)
 	d := decision{value: result.Ceiling, bound: result.Bound, mode: state.ModeHeadroom, reason: string(result.Reason), allowedRate: result.AllowedRate, podRate: result.PodRate}
 	guardState := aimd.State{Ceiling: previous.Bound, Known: known, HoldUntil: previous.HoldUntil}
-	if guarded, held, until := aimd.Guard(t.aimd, result.Bound, guardState, signal, now); held {
+	unexplained := aimd.Signal{Responses: recent.Responses, RateLimited: recent.Unexplained, RetryAfter: recent.RetryAfter}
+	if guarded, held, until := aimd.Guard(t.aimd, result.Bound, guardState, unexplained, now); held {
 		d.value, d.bound = max(guarded, drainFloor), guarded
 		d.reason = "aimd_guard"
 		d.holdUntil = until

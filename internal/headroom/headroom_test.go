@@ -94,6 +94,42 @@ func TestCompute(t *testing.T) {
 			wantReason:  headroom.ReasonHeadroom,
 		},
 		{
+			name:        "a spent window counts the refill its reset brings within look_ahead",
+			config:      withLookAhead(config(), 30*time.Second),
+			observation: observation(0, 0, now.Add(10*time.Second)),
+			previous:    known(4),
+			now:         now,
+			wantCeiling: 2,
+			wantReason:  headroom.ReasonHeadroom,
+		},
+		{
+			name:        "a spent window whose reset lies beyond look_ahead still clamps to min_replicas",
+			config:      withLookAhead(config(), 30*time.Second),
+			observation: observation(0, 0, now.Add(40*time.Second)),
+			previous:    known(4),
+			now:         now,
+			wantCeiling: 1,
+			wantReason:  headroom.ReasonClamped,
+		},
+		{
+			name:        "what remains inside look_ahead adds to the refill of the reset",
+			config:      withLookAhead(config(), 30*time.Second),
+			observation: observation(100, 50000, now.Add(10*time.Second)),
+			previous:    known(4),
+			now:         now,
+			wantCeiling: 3,
+			wantReason:  headroom.ReasonHeadroom,
+		},
+		{
+			name:        "as the reset arrives the look-ahead rate meets the steady-state rate",
+			config:      withLookAhead(config(), 30*time.Second),
+			observation: observation(0, 0, now.Add(time.Second)),
+			previous:    known(4),
+			now:         now,
+			wantCeiling: 4,
+			wantReason:  headroom.ReasonHeadroom,
+		},
+		{
 			name:        "an observation older than stale_after freezes the previous ceiling",
 			config:      config(),
 			observation: observation(900, 500000, midWindow),
@@ -335,6 +371,8 @@ func TestConfigValidate(t *testing.T) {
 		{"rejects max replicas above the replica limit", func(c *headroom.Config) { c.MaxReplicas = headroom.MaxReplicaLimit + 1 }},
 		{"rejects a concurrency above the call limit", func(c *headroom.Config) { c.Concurrency = headroom.MaxConcurrency + 1 }},
 		{"rejects a zero step interval", func(c *headroom.Config) { c.StepInterval = 0 }},
+		{"rejects a negative look ahead", func(c *headroom.Config) { c.LookAhead = -time.Second }},
+		{"rejects a look ahead beyond the window", func(c *headroom.Config) { c.LookAhead = c.Window + time.Second }},
 		{"rejects a zero stale_after", func(c *headroom.Config) { c.StaleAfter = 0 }},
 		{"rejects stale_hard below stale_after", func(c *headroom.Config) { c.StaleHard = time.Minute }},
 		{"rejects a default ceiling below min replicas", func(c *headroom.Config) { c.MinReplicas, c.DefaultCeiling = 2, 1 }},
@@ -386,6 +424,11 @@ func withProjectTokens(o headroom.Observation, limit, remaining float64, resetAt
 
 func withShare(c headroom.Config, share float64) headroom.Config {
 	c.Share = share
+	return c
+}
+
+func withLookAhead(c headroom.Config, lookAhead time.Duration) headroom.Config {
+	c.LookAhead = lookAhead
 	return c
 }
 

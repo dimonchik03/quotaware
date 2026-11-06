@@ -57,6 +57,7 @@ func runSimulate(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	flags.Float64Var(&cfg.Safety, "safety", cfg.Safety, "fraction of the allowed rate to use")
 	flags.Float64Var(&cfg.Share, "share", cfg.Share, "fraction of the organization quota this workload may use")
 	flags.DurationVar(&cfg.Window, "window", cfg.Window, "rate-limit window of the provider")
+	flags.DurationVar(&cfg.LookAhead, "look-ahead", cfg.LookAhead, "how far past a reset the instantaneous rate counts the next window")
 	flags.IntVar(&cfg.MinReplicas, "min", cfg.MinReplicas, "minimum replica count")
 	flags.IntVar(&cfg.MaxReplicas, "max", cfg.MaxReplicas, "maximum replica count")
 	flags.IntVar(&cfg.MaxStepUp, "max-step-up", cfg.MaxStepUp, "largest raise of the ceiling per step interval")

@@ -36,6 +36,7 @@ type Config struct {
 	Safety         float64
 	Share          float64
 	Window         time.Duration
+	LookAhead      time.Duration
 	MinReplicas    int
 	MaxReplicas    int
 	MaxStepUp      int
@@ -51,6 +52,7 @@ func DefaultConfig() Config {
 		Safety:         0.85,
 		Share:          1,
 		Window:         time.Minute,
+		LookAhead:      30 * time.Second,
 		MinReplicas:    1,
 		MaxReplicas:    100,
 		MaxStepUp:      2,
@@ -76,6 +78,8 @@ func (c Config) Validate() error {
 		return errors.New("share must be within (0, 1]")
 	case c.Window <= 0:
 		return errors.New("window must be positive")
+	case c.LookAhead < 0 || c.LookAhead > c.Window:
+		return errors.New("look ahead must be within [0, window]")
 	case c.MinReplicas < 0:
 		return errors.New("min replicas must not be negative")
 	case c.MaxReplicas <= 0 || c.MaxReplicas < c.MinReplicas || c.MaxReplicas > MaxReplicaLimit:
@@ -242,7 +246,12 @@ func quotaRate(cfg Config, q Quota, perCall float64, now time.Time) (float64, bo
 	if untilReset <= 0 {
 		return 0, false
 	}
-	return max(q.Remaining, 0) / perCall / untilReset, true
+	horizon := cfg.LookAhead.Seconds()
+	if untilReset >= horizon {
+		return max(q.Remaining, 0) / perCall / untilReset, true
+	}
+	refill := q.Limit * (horizon - untilReset) / cfg.Window.Seconds()
+	return (max(q.Remaining, 0) + refill) / perCall / horizon, true
 }
 
 func ceilDiv(numerator, denominator int) int {
