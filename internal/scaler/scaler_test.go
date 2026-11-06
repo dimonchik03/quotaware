@@ -680,16 +680,19 @@ func TestGetMetrics(t *testing.T) {
 		}
 	})
 
-	t.Run("keeps a trigger apart from a caller that moves its fields across keys", func(t *testing.T) {
+	t.Run("refuses a caller that moves the trigger's fields across keys", func(t *testing.T) {
 		f := newFixture(t)
 		f.observe(bucketA, 900, 500000)
 		metric(t, f, capMetadata())
 		resplit := map[string]string{"bucket": "openai/gpt-4.1-mini", "concurrency": "4", "defaultCeiling\x001\x00maxStepUp": "100"}
 
-		metric(t, f, resplit)
+		_, err := f.service.GetMetrics(context.Background(), &externalscaler.GetMetricsRequest{ScaledObjectRef: ref(resplit), MetricName: scaler.MetricName})
 
-		if ceilings := bucketCeilings(f); len(ceilings) != 2 {
-			t.Fatalf("recorded = %+v, want the re-split metadata kept in its own entry", ceilings)
+		if code(err) != codes.InvalidArgument {
+			t.Fatalf("code = %v, want InvalidArgument for a key quotaware does not know", code(err))
+		}
+		if ceilings := bucketCeilings(f); len(ceilings) != 1 {
+			t.Fatalf("recorded = %+v, want only the trigger's own entry", ceilings)
 		}
 	})
 
@@ -1421,4 +1424,30 @@ func TestTheCeilingClimbsBackBeforeTheResetOfASpentWindow(t *testing.T) {
 	if spent != 6 || after != 10 {
 		t.Fatalf("spent, after the reset = %d, %d; want 6 from the refill ten seconds ahead and 10 one step later", spent, after)
 	}
+}
+
+func TestMetadataKeysOutsideTheSettings(t *testing.T) {
+	t.Run("rejects a key quotaware does not know", func(t *testing.T) {
+		f := newFixture(t)
+		metadata := capMetadata()
+		metadata["saftey"] = "0.5"
+
+		_, err := f.service.GetMetricSpec(context.Background(), ref(metadata))
+
+		if code(err) != codes.InvalidArgument || !strings.Contains(err.Error(), "saftey") {
+			t.Fatalf("err = %v, want InvalidArgument naming the unknown key", err)
+		}
+	})
+
+	t.Run("accepts the keys KEDA reads for itself", func(t *testing.T) {
+		f := newFixture(t)
+		metadata := capMetadata()
+		for _, name := range []string{"scalerAddress", "enableTLS", "unsafeSsl", "caCert", "tlsClientCert", "tlsClientKey", "tlsCertFile"} {
+			metadata[name] = "set-by-keda"
+		}
+
+		if _, err := f.service.GetMetricSpec(context.Background(), ref(metadata)); err != nil {
+			t.Fatalf("err = %v, want KEDA's own keys accepted", err)
+		}
+	})
 }

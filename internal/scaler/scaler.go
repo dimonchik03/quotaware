@@ -180,7 +180,35 @@ func (s *Service) parse(ref *externalscaler.ScaledObjectRef) (trigger, error) {
 	if err != nil {
 		return trigger{}, err
 	}
+	if unknown, found := unknownSetting(metadata); found {
+		return trigger{}, status.Errorf(codes.InvalidArgument, "metadata %q is not a quotaware setting", unknown)
+	}
 	return trigger{fingerprint: fingerprint(metadata), provider: provider, model: model, credential: metadata["credential"], workload: metadata["workload"], scope: scope, cfg: cfg, aimd: fallback, queue: queue}, nil
+}
+
+var settings = map[string]struct{}{
+	"bucket": {}, "concurrency": {}, "credential": {}, "workload": {}, "quotaScope": {},
+	"safety": {}, "share": {}, "window": {}, "lookAhead": {}, "maxStepUp": {}, "stepInterval": {},
+	"defaultCeiling": {}, "minReplicas": {}, "maxReplicas": {}, "staleAfter": {}, "staleHard": {},
+	"aimdThreshold": {}, "aimdDecrease": {}, "aimdIncrease": {},
+	"redisAddress": {}, "listName": {}, "listLength": {},
+}
+
+var kedaSettings = map[string]struct{}{
+	"scalerAddress": {}, "enableTLS": {}, "unsafeSsl": {}, "caCert": {}, "tlsClientCert": {}, "tlsClientKey": {}, "tlsCertFile": {},
+}
+
+func unknownSetting(metadata map[string]string) (string, bool) {
+	for _, name := range slices.Sorted(maps.Keys(metadata)) {
+		if _, ok := settings[name]; ok {
+			continue
+		}
+		if _, ok := kedaSettings[name]; ok {
+			continue
+		}
+		return name, true
+	}
+	return "", false
 }
 
 func parseScope(metadata map[string]string) (quotaScope, error) {
