@@ -100,6 +100,9 @@ and `s` = safety factor (default 0.85):
     pod_rate      = k / latency_ewma
     steady_rate   = min(limit_tokens / tokens_per_call, limit_requests) / window_seconds
     instant_rate  = min(remaining_tokens / tokens_per_call, remaining_requests) / seconds_until_reset
+                    while the reset is at least look_ahead away; closer to it, each
+                    window counts limit * (look_ahead - seconds_until_reset) / window_seconds
+                    on top of what remains and divides by look_ahead (ADR 0013)
     allowed_rate  = min(steady_rate, instant_rate) * s
     ceiling       = floor(allowed_rate / pod_rate)
     ceiling       = clamp(ceiling, min_replicas, max_replicas)
@@ -112,7 +115,10 @@ are durations.
 Why both rates: using only "remaining until reset" produces a sawtooth (the ceiling
 collapses at the end of every window and jumps back after reset); using only
 "limit per window" ignores other consumers of the same organization quota. The minimum
-of the two is stable and honest.
+of the two follows depletion within a window. A spent window still pins the instant
+term at zero until its reset, so the look-ahead counts the refill of a reset that is
+closer than `look_ahead` (default 30 s, roughly the time a new worker needs to start
+serving) and the ceiling climbs while the reset approaches instead of after it.
 
 Guards:
 
@@ -138,7 +144,9 @@ multiply the ceiling by
 elapses, at least one minute and at most `staleHard` (a `retry-after` beyond a day is
 malformed); otherwise add `aimdIncrease` (default 1) per
 `stepInterval` up to `maxReplicas`. Header mode and AIMD run together; AIMD acts as a
-guard even when headers exist (ADR 0006).
+guard even when headers exist (ADR 0006), counting only the 429s whose own headers
+still showed quota for another call, since a 429 on a spent window is already in the
+headroom formula (ADR 0013).
 
 ### 4. Actuation: the scaler in `quotaware all`
 
@@ -167,7 +175,7 @@ A gRPC server implementing KEDA's `ExternalScaler` service
 Trigger metadata: `scalerAddress`, `bucket` (`openai/gpt-4.1-mini`), `concurrency` (k),
 and optionally `credential` (the hashed key label, to narrow a shared model to one
 key), `quotaScope` (`shared`, or `credential` when every key has a quota of its own),
-`safety` (0.85), `share` (1), `maxStepUp` (2), `stepInterval` (15s),
+`safety` (0.85), `share` (1), `lookAhead` (30s, from 0 to `window`), `maxStepUp` (2), `stepInterval` (15s),
 `defaultCeiling` (1), `minReplicas` (1), `maxReplicas` (100, mirror
 `maxReplicaCount` by hand), `staleAfter` (2m), `staleHard` (10m), `window` (1m),
 `aimdThreshold` (0.02), `aimdDecrease` (0.5), `aimdIncrease` (1).
@@ -228,9 +236,10 @@ credential): `quotaware_limit_requests`, `quotaware_remaining_requests`,
 the organization, project, input and output token windows), `quotaware_reset_seconds`
 per window, `quotaware_tokens_per_call`, `quotaware_latency_seconds`,
 `quotaware_inflight`, `quotaware_retry_after_seconds`, `quotaware_rate_limited_ratio`,
+`quotaware_unexplained_rate_limited_ratio`,
 `quotaware_ceiling` (labelled by `namespace`, `scaledobject` and `trigger` as well),
 and the counters `quotaware_responses_total`,
-`quotaware_429_total`, `quotaware_aborted_total`, `quotaware_upstream_errors_total`,
+`quotaware_429_total`, `quotaware_unexplained_429_total`, `quotaware_aborted_total`, `quotaware_upstream_errors_total`,
 `quotaware_headers_missing_total`, `quotaware_headers_malformed_total` and
 `quotaware_usage_missing_total`. Unlabelled: `quotaware_buckets`,
 `quotaware_scaled_objects`, `quotaware_buckets_rejected_total` and
@@ -348,7 +357,9 @@ Recorded in `docs/adr`: 0002 the minimum of steady and instantaneous rate, 0003 
 drain guard, 0004 the proxy first, 0005 the cap through `scalingModifiers` (which also
 covers reporting the replica count with `targetSize: 1`), 0006 the AIMD fallback and
 guard, 0007 the observe protocol, 0008 and 0009 the network defaults, 0010 one quota
-across credentials, 0011 the errors discarded on purpose. Counting uncached input
+across credentials, 0011 the errors discarded on purpose, 0012 shared holds and
+workload drain, 0013 the look-ahead past a reset and the guard against unexplained
+429s. Counting uncached input
 and cache writes for Anthropic is described above and in the README rather than in
 a record of its own.
 
@@ -370,7 +381,8 @@ a record of its own.
 - Anthropic's input and output token windows are tracked but the formula bounds by the
   combined `tokens-*` window over input plus output per call; a split bound needs
   separate per-call averages for input and output.
-- The instant term models a fixed window while both providers refill continuously; a
+- The instant term models a fixed window while both providers refill continuously, and
+  its look-ahead assumes the next window has the limit of the current one; a
   token-bucket model would read the refill rate and other consumers from successive
   `remaining` values.
 - Usage capture buffers up to `-max-capture-bytes` per open call and decodes only

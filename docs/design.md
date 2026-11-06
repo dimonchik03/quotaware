@@ -64,12 +64,14 @@ other; `cmd/quotaware` wires them.
     pod_rate     = concurrency / latency
     steady_rate  = min(limit_requests, limit_tokens / tokens_per_call) / window
     instant_rate = min(remaining_requests / until_reset, remaining_tokens / tokens_per_call / until_reset)
+                   with each remaining raised by limit * (look_ahead - until_reset) / window
+                   and divided by look_ahead instead once the reset is closer than look_ahead
     ceiling      = floor(min(steady_rate, instant_rate) * safety * share / pod_rate)
 
 bounded by `minReplicas` and `maxReplicas`, raised by at most `maxStepUp` per
 `stepInterval`, never below `ceil(in_flight / concurrency)`, frozen after
 `staleAfter` and handed to AIMD, starting from `defaultCeiling`, after `staleHard`
-(ADR 0002, 0003, 0006).
+(ADR 0002, 0003, 0006, 0013).
 
 ## Without headers
 
@@ -80,8 +82,9 @@ last minute exceeds `aimdThreshold`, then hold for the longest `retry-after` see
 at least one window, and never halve twice on one burst. The window counts only the
 responses that carry the provider's verdict on the quota, 2xx and 429, so a 401 or
 an outage neither dilutes the share nor passes for clean traffic (ADR 0009). The same rule guards a
-header-derived ceiling: a burst of 429s halves it even when the headers still look
-healthy. Both act on the ceiling before the drain guard, and the store keeps that
+header-derived ceiling: a burst of 429s that the headers did not predict halves it
+even when the headers still look healthy. A 429 whose own headers show a spent
+window is counted apart and left to the headroom formula (ADR 0013). Both act on the ceiling before the drain guard, and the store keeps that
 bound next to the reported value (ADR 0006).
 
 The shared trigger also honors an active retry hold on any matching credential.

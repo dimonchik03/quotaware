@@ -37,9 +37,30 @@ and KEDA can choose any worker to terminate.
 The experiment demonstrates adaptation and its cost under a brief quota reduction.
 The static cap performs well for this schedule. Performance for other quota schedules and real providers remains unmeasured.
 
+### What the trials exposed
+
+The quotaware arm's ceiling series reads 9, 9, 9, 9, 1, 1, 1, 1, 5, 9, 10 in pass 1,
+while 180 requests per minute feed three pods. Once the 180 requests were spent,
+every later call in that minute got a 429 that reported nothing remaining. The AIMD
+guard counted those 429s as congestion and held the ceiling for one window, about
+30 seconds past the reset, so the climb back to ten pods began half a window late.
+A replay of the dip through the scaler reproduces the series.
+[ADR 0013](adr/0013-look-past-a-reset-and-guard-unexplained-429s.md) changes two
+rules: the guard on a header ceiling ignores 429s whose own headers show a spent
+window, and the instantaneous rate counts the refill of a reset that is less than
+`lookAhead` away. The bench worker also hands a job back to the queue when shutdown
+interrupts its retry wait, so a scale-down no longer loses work. The trials above
+predate both changes.
+
+From the commit that adds ADR 0013, `make bench-changing` runs a different schedule:
+the provider admits 600 requests in each of the first two minutes, 180 in the next
+four and 600 after that, while the producer enqueues 11 jobs per second for six
+minutes. Three passes run the arms in the orders A/B/C, C/B/A and B/C/A.
+`BENCH_RPM_WINDOWS`, `BENCH_PHASES` and `BENCH_PASSES` override the schedule.
+
 ### Method
 
-`make bench-changing` compares three KEDA policies on the same Redis queue. A reads
+At commit 4b602e1, `make bench-changing` compares three KEDA policies on the same Redis queue. A reads
 queue depth with a maximum of 30 workers. B reads the same queue with a static
 maximum of 10. C allows up to 30 workers and applies Quotaware with `safety: "1"`
 and `maxStepUp: "4"`. Ten workers match the nominal 600 RPM at two concurrent
