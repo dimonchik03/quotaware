@@ -131,8 +131,8 @@ below). A client that stalls while sending a request body gets 408 after
 replayable, so a pooled connection found dead before the request is written is
 retried instead of answered with 502. A provider that accepts the connection but
 sends no response headers within `-upstream-header-timeout` (10 min, the SDKs' own
-default) gets 504 and counts as an upstream error, so a hung provider cannot park
-calls and their buffers for good. At most `-max-inflight` (256) proxied calls are
+default), or whose dial or TLS handshake times out, gets 504 and counts as an
+upstream error, so a hung provider cannot park calls and their buffers for good. At most `-max-inflight` (256) proxied calls are
 open at once; a call beyond that is answered 503 before its body is read and
 counted in `quotaware_calls_rejected_total`.
 
@@ -361,7 +361,7 @@ minute's accepted responses, 2xx and 429, were 429, then hold for the longest
 halved once; a `retry-after` beyond a day counts as malformed. The same rule guards a header-derived
 ceiling against 429s the headers did not predict, such as acceleration limits: a
 429 whose own headers show a spent window is already in the headroom formula and
-does not count. `quotaware_rate_limited_ratio` shows the share of every 429, and
+does not count, for the share or for the length of the hold. `quotaware_rate_limited_ratio` shows the share of every 429, and
 `quotaware_unexplained_rate_limited_ratio` the share the guard reacts to (ADR 0006,
 ADR 0013).
 

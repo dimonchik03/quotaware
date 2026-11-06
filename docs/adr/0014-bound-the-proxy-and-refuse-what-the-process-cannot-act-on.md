@@ -49,5 +49,5 @@ discards an observation.
 A non-streaming call whose provider needs more than ten minutes to answer fails with
 504; raise the flag for such workloads. The proxy's worst-case memory is
 `-max-inflight` times the two body limits and the README says so. A trigger with a
-key quotaware does not know stops scaling until the key is removed, which the upgrade
-notes call out. Collectors behind a full store see failed deliveries, as they should.
+key quotaware does not know stops scaling until the key is removed, which the
+README's status section calls out. Collectors behind a full store see failed deliveries, as they should.

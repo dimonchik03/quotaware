@@ -67,7 +67,8 @@ Per response it records, keyed by bucket `(provider, model, api-key hash)`:
 The request body is read within `-read-body-timeout` (30 s, then 408) and handed to
 the transport as replayable, so a pooled connection found dead before the request is
 written is retried. A provider that sends no response headers within
-`-upstream-header-timeout` (10 min) fails the call with 504 and an upstream error. At
+`-upstream-header-timeout` (10 min), or whose dial or TLS handshake times out, fails
+the call with 504 and an upstream error. At
 most `-max-inflight` (256) proxied calls are open at once; a call beyond that is
 answered 503 before its body is read and counted in `quotaware_calls_rejected_total`.
 On a shutdown signal the listeners close, open calls get `-drain-timeout` (10 s) to
@@ -186,8 +187,8 @@ key), `quotaScope` (`shared`, or `credential` when every key has a quota of its 
 `defaultCeiling` (1), `minReplicas` (1), `maxReplicas` (100, mirror
 `maxReplicaCount` by hand), `staleAfter` (2m), `staleHard` (10m), `window` (1m),
 `aimdThreshold` (0.02), `aimdDecrease` (0.5), `aimdIncrease` (1). A key outside this
-list, apart from the TLS settings KEDA reads for itself, is rejected with
-InvalidArgument (ADR 0014).
+list, apart from `scalerAddress` and the TLS settings KEDA reads for itself, is
+rejected with InvalidArgument (ADR 0014).
 Ceilings are computed per ScaledObject, trigger and bucket: the state a poll continues
 from is keyed by the namespace, the name and a hash of the trigger metadata, so a
 caller that sends other metadata for the same name evaluates its own entry and never
