@@ -382,14 +382,15 @@ func (s *Store) End(key Key, sample Sample, workload string) {
 	s.record(key, b, sample)
 }
 
-func (s *Store) Observe(key Key, sample Sample) {
+func (s *Store) Observe(key Key, sample Sample) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	b, ok := s.bucket(key)
 	if !ok {
-		return
+		return false
 	}
 	s.record(key, b, sample)
+	return true
 }
 
 func (s *Store) record(key Key, b *Bucket, sample Sample) {
