@@ -1296,9 +1296,14 @@ func TestMinimumCapacityCanServeAColdThenAWarmTrigger(t *testing.T) {
 	}
 }
 
-func (f *fixture) answer(status int, remaining float64, resetAt time.Time) {
+func (f *fixture) record(sample state.Sample) {
+	f.store.Begin(bucketA, sample.At, "")
+	f.store.End(bucketA, sample, "")
+}
+
+func (f *fixture) requestWindowSample(status int, remaining float64, resetAt time.Time) state.Sample {
 	at := f.clock.Now()
-	sample := state.Sample{
+	return state.Sample{
 		Status:    status,
 		Complete:  true,
 		Headers:   state.HeadersPresent,
@@ -1307,30 +1312,33 @@ func (f *fixture) answer(status int, remaining float64, resetAt time.Time) {
 		HeadersAt: at,
 		At:        at,
 	}
-	if status == http.StatusOK {
-		sample.HasUsage, sample.Usage = true, 365
-	} else {
-		sample.RetryAfter = resetAt.Sub(at)
-	}
-	f.store.Begin(bucketA, at, "")
-	f.store.End(bucketA, sample, "")
+}
+
+func (f *fixture) answerOK(remaining float64, resetAt time.Time) {
+	sample := f.requestWindowSample(http.StatusOK, remaining, resetAt)
+	sample.HasUsage, sample.Usage = true, 365
+	f.record(sample)
+}
+
+func (f *fixture) answerRateLimited(resetAt time.Time) {
+	sample := f.requestWindowSample(http.StatusTooManyRequests, 0, resetAt)
+	sample.RetryAfter = resetAt.Sub(sample.At)
+	f.record(sample)
 }
 
 func spentWindowMetadata(lookAhead string) map[string]string {
 	return map[string]string{"bucket": "openai/gpt-4.1-mini", "concurrency": "2", "maxReplicas": "30", "maxStepUp": "4", "safety": "1", "lookAhead": lookAhead}
 }
 
-func spendTheWindow(t *testing.T, f *fixture, m map[string]string, reset time.Time) int64 {
+func spendTheWindow(t *testing.T, f *fixture, m map[string]string, reset time.Time) (warm, spent int64) {
 	t.Helper()
-	f.answer(http.StatusOK, 300, reset)
-	if got := metric(t, f, m); got != 10 {
-		t.Fatalf("before the window is spent = %d, want 10 from 600 requests per minute", got)
-	}
+	f.answerOK(300, reset)
+	warm = metric(t, f, m)
 	f.clock.Advance(20 * time.Second)
 	for range 20 {
-		f.answer(http.StatusTooManyRequests, 0, reset)
+		f.answerRateLimited(reset)
 	}
-	return metric(t, f, m)
+	return warm, metric(t, f, m)
 }
 
 func TestASpentWindowLeavesTheCeilingToTheHeaders(t *testing.T) {
@@ -1338,13 +1346,13 @@ func TestASpentWindowLeavesTheCeilingToTheHeaders(t *testing.T) {
 	m := spentWindowMetadata("0s")
 	reset := f.clock.Now().Add(30 * time.Second)
 
-	spent := spendTheWindow(t, f, m, reset)
+	warm, spent := spendTheWindow(t, f, m, reset)
 	f.clock.Advance(16 * time.Second)
-	f.answer(http.StatusOK, 590, f.clock.Now().Add(54*time.Second))
+	f.answerOK(590, f.clock.Now().Add(54*time.Second))
 	after := metric(t, f, m)
 
-	if spent != 1 || after != 5 {
-		t.Fatalf("spent, after the reset = %d, %d; want 1 and one step of 4 with no guard hold from 429s the headers explained", spent, after)
+	if warm != 10 || spent != 1 || after != 5 {
+		t.Fatalf("warm, spent, after the reset = %d, %d, %d; want 10 from 600 requests per minute, 1, and one step of 4 with no guard hold from 429s the headers explained", warm, spent, after)
 	}
 }
 
@@ -1353,12 +1361,12 @@ func TestTheCeilingClimbsBackBeforeTheResetOfASpentWindow(t *testing.T) {
 	m := spentWindowMetadata("30s")
 	reset := f.clock.Now().Add(30 * time.Second)
 
-	spent := spendTheWindow(t, f, m, reset)
+	warm, spent := spendTheWindow(t, f, m, reset)
 	f.clock.Advance(16 * time.Second)
-	f.answer(http.StatusOK, 590, f.clock.Now().Add(54*time.Second))
+	f.answerOK(590, f.clock.Now().Add(54*time.Second))
 	after := metric(t, f, m)
 
-	if spent != 6 || after != 10 {
-		t.Fatalf("spent, after the reset = %d, %d; want 6 from the refill ten seconds ahead and 10 one step later", spent, after)
+	if warm != 10 || spent != 6 || after != 10 {
+		t.Fatalf("warm, spent, after the reset = %d, %d, %d; want 10 from 600 requests per minute, 6 from the refill ten seconds ahead and 10 one step later", warm, spent, after)
 	}
 }
