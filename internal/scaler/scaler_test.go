@@ -218,6 +218,8 @@ func TestMetadata(t *testing.T) {
 		{"rejects a safety factor above one", map[string]string{"bucket": "openai/gpt-4.1-mini", "concurrency": "4", "safety": "2"}, codes.InvalidArgument},
 		{"rejects an unparseable duration", map[string]string{"bucket": "openai/gpt-4.1-mini", "concurrency": "4", "staleAfter": "soon"}, codes.InvalidArgument},
 		{"rejects a look ahead beyond the window", map[string]string{"bucket": "openai/gpt-4.1-mini", "concurrency": "4", "lookAhead": "2m"}, codes.InvalidArgument},
+		{"rejects a look ahead set beyond a short window", map[string]string{"bucket": "openai/gpt-4.1-mini", "concurrency": "4", "window": "20s", "lookAhead": "30s"}, codes.InvalidArgument},
+		{"accepts a window shorter than the default look ahead", map[string]string{"bucket": "openai/gpt-4.1-mini", "concurrency": "4", "window": "20s"}, codes.OK},
 		{"rejects queue mode without a list name", map[string]string{"bucket": "openai/gpt-4.1-mini", "concurrency": "4", "redisAddress": "redis:6379"}, codes.InvalidArgument},
 		{"rejects a provider quotaware does not parse", map[string]string{"bucket": "gemini/gemini-2.5-pro", "concurrency": "4"}, codes.InvalidArgument},
 		{"rejects a model longer than the label limit", map[string]string{"bucket": "openai/" + strings.Repeat("m", 257), "concurrency": "4"}, codes.InvalidArgument},
