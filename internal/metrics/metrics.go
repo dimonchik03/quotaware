@@ -68,7 +68,7 @@ func NewCollector(store *state.Store, now func() time.Time) *Collector {
 		unexplainedRatio:  describe("unexplained_rate_limited_ratio", "Share of unexplained 429 among the 2xx and 429 responses of the last minute; the guard on a header ceiling reacts to it."),
 		responses:         describe("responses_total", "Responses observed from the provider."),
 		rateLimited:       describe("429_total", "Responses with status 429."),
-		unexplained:       describe("unexplained_429_total", "Responses with status 429 whose own rate-limit headers still showed quota for another call."),
+		unexplained:       describe("unexplained_429_total", "Responses with status 429 that their own rate-limit headers do not explain: no headers, or no spent window the ceiling reads."),
 		aborted:           describe("aborted_total", "Calls the client gave up on, before the provider answered or while reading the answer."),
 		upstreamErrors:    describe("upstream_errors_total", "Calls the upstream failed: no response at all, or a body that broke mid-stream."),
 		headersMissing:    describe("headers_missing_total", "Responses that should carry rate-limit headers but did not."),

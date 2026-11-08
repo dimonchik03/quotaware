@@ -48,6 +48,26 @@ func TestSimulate(t *testing.T) {
 		}
 	})
 
+	t.Run("fits the default look-ahead into a window shorter than it", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+
+		code := run([]string{"simulate", "-concurrency", "4", "-window", "20s", "-input", "testdata/observations.jsonl"}, strings.NewReader(""), &stdout, &stderr)
+
+		if code != 0 || stderr.Len() != 0 {
+			t.Fatalf("exit = %d, stderr = %q, want the simulation to run with a 20s look-ahead", code, stderr.String())
+		}
+	})
+
+	t.Run("refuses a look-ahead set beyond the window", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+
+		code := run([]string{"simulate", "-window", "20s", "-look-ahead", "30s", "-input", "testdata/observations.jsonl"}, strings.NewReader(""), &stdout, &stderr)
+
+		if code != 2 || !strings.Contains(stderr.String(), "look ahead") {
+			t.Fatalf("exit = %d, stderr = %q, want a refusal naming the look-ahead", code, stderr.String())
+		}
+	})
+
 	t.Run("steps up from the bound before the drain guard, as the scaler does", func(t *testing.T) {
 		var stdout, stderr bytes.Buffer
 		input := `{"at":"2026-11-01T18:00:00Z","requests":{"limit":600,"remaining":600,"reset_at":"2026-11-01T18:01:00Z"},"latency_ms":2000,"in_flight":40}` + "\n" +

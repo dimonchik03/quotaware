@@ -57,18 +57,20 @@ func TestLoadRun(t *testing.T) {
 		}
 	})
 
-	t.Run("refuses a run without the mean job latency", func(t *testing.T) {
-		dir := runDir(t, map[string]string{})
-		if err := os.Remove(filepath.Join(dir, "latency_mean.json")); err != nil {
-			t.Fatal(err)
-		}
+	for _, total := range []string{"requeued_total", "latency_mean"} {
+		t.Run("refuses a run without "+total, func(t *testing.T) {
+			dir := runDir(t, map[string]string{})
+			if err := os.Remove(filepath.Join(dir, total+".json")); err != nil {
+				t.Fatal(err)
+			}
 
-		_, err := plot.LoadRun(dir)
+			_, err := plot.LoadRun(dir)
 
-		if err == nil || !strings.Contains(err.Error(), "latency_mean") {
-			t.Fatalf("err = %v, want a refusal naming the file", err)
-		}
-	})
+			if err == nil || !strings.Contains(err.Error(), total) {
+				t.Fatalf("err = %v, want a refusal naming the file", err)
+			}
+		})
+	}
 
 	t.Run("refuses a total made of several series", func(t *testing.T) {
 		dir := runDir(t, map[string]string{

@@ -1,0 +1,1 @@
+{"status":"success","data":{"resultType":"vector","result":[{"metric":{"instance":"10.244.0.194:9102","job":"producer"},"value":[1793980479,"3960"]}]}}

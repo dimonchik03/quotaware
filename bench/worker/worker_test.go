@@ -23,6 +23,7 @@ type fakeQueue struct {
 	mu         sync.Mutex
 	items      []string
 	requeueErr error
+	popped     func()
 }
 
 func (q *fakeQueue) Requeue(_ context.Context, _ string, payload string) error {
@@ -54,6 +55,9 @@ func (q *fakeQueue) Pop(ctx context.Context, _ string, timeout time.Duration) (s
 	}
 	item := q.items[0]
 	q.items = q.items[1:]
+	if q.popped != nil {
+		q.popped()
+	}
 	return item, nil
 }
 
@@ -353,6 +357,34 @@ func TestWorker(t *testing.T) {
 
 		if _, err := worker.New(cfg, &fakeQueue{}, http.DefaultClient, worker.NewMetrics(prometheus.NewRegistry()), time.Now, slog.Default()); err == nil {
 			t.Fatal("expected a validation error")
+		}
+	})
+
+	t.Run("rejects a requeue timeout that is not positive", func(t *testing.T) {
+		cfg := worker.DefaultConfig()
+		cfg.RequeueTimeout = 0
+
+		if _, err := worker.New(cfg, &fakeQueue{}, http.DefaultClient, worker.NewMetrics(prometheus.NewRegistry()), time.Now, slog.Default()); err == nil {
+			t.Fatal("expected a validation error")
+		}
+	})
+
+	t.Run("hands a job back to the queue when shutdown arrives as it is popped", func(t *testing.T) {
+		f := newFixture(t)
+		f.queue.push(t, worker.Job{ID: 14, EnqueuedAt: time.Now(), PromptTokens: 20})
+		ctx, cancel := context.WithCancel(context.Background())
+		f.queue.popped = cancel
+		cfg := fastConfig()
+		cfg.ProxyURL, cfg.APIKey = f.server.URL, "sk-bench"
+		w, err := worker.New(cfg, f.queue, f.server.Client(), f.metrics, time.Now, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		w.Run(ctx)
+
+		if counter(f.metrics.Requeued) != 1 || counter(f.metrics.Abandoned) != 0 || len(f.queue.waiting()) != 1 || f.calls.Load() != 0 {
+			t.Fatalf("requeued = %v, abandoned = %v, waiting = %d, calls = %d, want the job back in the queue without a call", counter(f.metrics.Requeued), counter(f.metrics.Abandoned), len(f.queue.waiting()), f.calls.Load())
 		}
 	})
 }

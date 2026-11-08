@@ -152,9 +152,10 @@ multiply the ceiling by
 elapses, at least one minute and at most `staleHard` (a `retry-after` beyond a day is
 malformed); otherwise add `aimdIncrease` (default 1) per
 `stepInterval` up to `maxReplicas`. Header mode and AIMD run together; AIMD acts as a
-guard even when headers exist (ADR 0006), counting only the 429s whose own headers
-still showed quota for another call, since a 429 on a spent window is already in the
-headroom formula (ADR 0013).
+guard even when headers exist (ADR 0006), counting only the 429s their own headers
+do not explain: a 429 whose headers show a spent request window, or once tokens per
+call are known a spent token or project window, is already in the headroom formula,
+while one without headers counts (ADR 0013).
 
 ### 4. Actuation: the scaler in `quotaware all`
 
@@ -183,7 +184,7 @@ A gRPC server implementing KEDA's `ExternalScaler` service
 Trigger metadata: `scalerAddress`, `bucket` (`openai/gpt-4.1-mini`), `concurrency` (k),
 and optionally `credential` (the hashed key label, to narrow a shared model to one
 key), `quotaScope` (`shared`, or `credential` when every key has a quota of its own),
-`safety` (0.85), `share` (1), `lookAhead` (30s, from 0 to `window`), `maxStepUp` (2), `stepInterval` (15s),
+`safety` (0.85), `share` (1), `lookAhead` (30s or a shorter `window`, from 0 to `window`), `maxStepUp` (2), `stepInterval` (15s),
 `defaultCeiling` (1), `minReplicas` (1), `maxReplicas` (100, mirror
 `maxReplicaCount` by hand), `staleAfter` (2m), `staleHard` (10m), `window` (1m),
 `aimdThreshold` (0.02), `aimdDecrease` (0.5), `aimdIncrease` (1). A key outside this

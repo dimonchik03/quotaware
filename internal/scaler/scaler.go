@@ -308,6 +308,9 @@ func (s *Service) parseConfig(metadata map[string]string) (headroom.Config, erro
 			return headroom.Config{}, err
 		}
 	}
+	if _, present := metadata["lookAhead"]; !present {
+		cfg.LookAhead = min(cfg.LookAhead, cfg.Window)
+	}
 	if err := cfg.Validate(); err != nil {
 		return headroom.Config{}, status.Error(codes.InvalidArgument, err.Error())
 	}

@@ -138,7 +138,7 @@ quotaware_responses_total{key="ab12",model="gpt-4.1-mini",provider="openai"} 2
 # HELP quotaware_retry_after_seconds Retry-After of the last 429.
 # TYPE quotaware_retry_after_seconds gauge
 quotaware_retry_after_seconds{key="ab12",model="gpt-4.1-mini",provider="openai"} 20
-# HELP quotaware_unexplained_429_total Responses with status 429 whose own rate-limit headers still showed quota for another call.
+# HELP quotaware_unexplained_429_total Responses with status 429 that their own rate-limit headers do not explain: no headers, or no spent window the ceiling reads.
 # TYPE quotaware_unexplained_429_total counter
 quotaware_unexplained_429_total{key="ab12",model="gpt-4.1-mini",provider="openai"} 0
 # HELP quotaware_unexplained_rate_limited_ratio Share of unexplained 429 among the 2xx and 429 responses of the last minute; the guard on a header ceiling reacts to it.
@@ -171,7 +171,7 @@ quotaware_usage_missing_total{key="ab12",model="gpt-4.1-mini",provider="openai"}
 		s.End(key, state.Sample{Status: http.StatusTooManyRequests, Complete: true, Headers: state.HeadersMissing, RetryAfter: 5 * time.Second, At: now}, "")
 		collector := metrics.NewCollector(s, func() time.Time { return now })
 		expected := `
-# HELP quotaware_unexplained_429_total Responses with status 429 whose own rate-limit headers still showed quota for another call.
+# HELP quotaware_unexplained_429_total Responses with status 429 that their own rate-limit headers do not explain: no headers, or no spent window the ceiling reads.
 # TYPE quotaware_unexplained_429_total counter
 quotaware_unexplained_429_total{key="ab12",model="gpt-4.1-mini",provider="openai"} 1
 # HELP quotaware_unexplained_rate_limited_ratio Share of unexplained 429 among the 2xx and 429 responses of the last minute; the guard on a header ceiling reacts to it.

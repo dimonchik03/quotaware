@@ -58,9 +58,10 @@ func (q Quotas) reportedAt(at time.Time) Quotas {
 }
 
 func (q Quotas) exhausted(tokensPerCall float64) bool {
-	perCall := max(tokensPerCall, 1)
-	return spent(q.Requests, 1) || spent(q.Tokens, perCall) || spent(q.ProjectTokens, perCall) ||
-		spent(q.InputTokens, 1) || spent(q.OutputTokens, 1)
+	if spent(q.Requests, 1) {
+		return true
+	}
+	return tokensPerCall > 0 && (spent(q.Tokens, tokensPerCall) || spent(q.ProjectTokens, tokensPerCall))
 }
 
 func spent(window headroom.Quota, perCall float64) bool {
