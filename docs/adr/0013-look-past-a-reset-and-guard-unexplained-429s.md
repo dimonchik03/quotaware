@@ -30,19 +30,23 @@ climb that starts half a window late.
 ## Decision
 
 The instantaneous rate looks `lookAhead` ahead, a trigger setting from zero to one
-window with a default of 30 seconds. A reset further away than that keeps the rate
+window with a default of 30 seconds, or the window when a trigger sets a shorter one
+and leaves `lookAhead` unset. A reset further away than that keeps the rate
 at `remaining / until_reset`. A reset inside the horizon makes the rate the average
 over the horizon: what remains plus the part of a full window the reset brings
 before the horizon ends, `(remaining + limit * (lookAhead - until_reset) / window) /
-lookAhead`. The rate is continuous where the reset enters the horizon and meets the
-steady-state rate as the reset arrives, so the ceiling climbs while the reset
+lookAhead`. The rate is continuous where the reset enters the horizon. For a spent
+window it rises to the steady-state rate as the reset arrives; with quota left it
+exceeds that rate, which caps it. Either way the ceiling climbs while the reset
 approaches. It assumes the next window carries the limit of the current one.
 
-A 429 is explained when its own headers report a window that cannot admit another
-call: no request remaining, or fewer tokens remaining than a call uses. The store
-counts explained and unexplained 429s apart. The guard on a header ceiling reacts to
-the share of unexplained 429s only; the AIMD fallback without a usable quota keeps
-reacting to every 429. `quotaware_unexplained_429_total` and
+A 429 is explained when its own headers report a window the headroom formula reads
+that cannot admit another call: no request remaining, or, once tokens per call are
+known, fewer tokens remaining in the token or project window than a call uses.
+Windows the formula does not read, such as Anthropic's separate input and output
+token windows, explain nothing. The store counts explained and unexplained 429s
+apart. The guard on a header ceiling reacts to the share of unexplained 429s only;
+the AIMD fallback without a usable quota keeps reacting to every 429. `quotaware_unexplained_429_total` and
 `quotaware_unexplained_rate_limited_ratio` expose what the guard reads.
 
 ## Alternatives considered
@@ -65,5 +69,8 @@ still serves, so calls in those seconds may meet 429s until the reset; `lookAhea
 "0s"` restores the rate of ADR 0002. A next window smaller than the current one is
 over-estimated for at most `lookAhead`, until the first poll that sees its headers.
 A provider that sends 429s without headers, or with quota still remaining, triggers
-the guard as before. Each 429 is judged by its own headers, so one that carries none
-is unexplained.
+the guard as before, and so does a 429 on a spent token window before tokens per call
+are known. Each 429 is judged by its own headers, so one that carries none is
+unexplained. Once unexplained 429s trip the guard, its hold still lasts for the
+longest `retry-after` of any 429 in the last minute, explained ones included; an
+explained `retry-after` runs to a reset the headroom formula already waits for.

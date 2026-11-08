@@ -352,8 +352,8 @@ minute's accepted responses, 2xx and 429, were 429, then hold for the longest
 `retry-after` seen, at least one minute and at most `staleHard`, so one burst is
 halved once; a `retry-after` beyond a day counts as malformed. The same rule guards a header-derived
 ceiling against 429s the headers did not predict, such as acceleration limits: a
-429 whose own headers show a spent window is already in the headroom formula and
-does not count. `quotaware_rate_limited_ratio` shows the share of every 429, and
+429 whose own headers show a spent request window, or once tokens per call are known
+a spent token window, is already in the headroom formula and does not count. `quotaware_rate_limited_ratio` shows the share of every 429, and
 `quotaware_unexplained_rate_limited_ratio` the share the guard reacts to (ADR 0006,
 ADR 0013).
 
@@ -369,9 +369,11 @@ pod, backing off on `retry-after`) scaled by the two-trigger ScaledObject in
 requests per minute in one window per model that every key shares; 200 queued jobs
 keep demand at 20. After 90 seconds a job with another credential bursts the shared
 quota for a minute. The transcript below was recorded on 2026-11-01, before v0.1.0,
-and keeps only the lines where something changed; since then the step interval counts
-from the last change of the bound and limits the combined value, so a run today steps
-up a little later after the drop:
+and keeps only the lines where something changed. Since then the step interval counts
+from the last change of the bound and limits the combined value, and ADR 0013 lets the
+ceiling count the refill of a reset less than `lookAhead` away and stops the guard
+from halving it on 429s that show the spent window, so a run today climbs back
+earlier; it has not been re-recorded:
 
     time      replicas  desired  ceiling (quotaware log)
     21:40:33  -         -        0 -> 8 (headroom)
@@ -388,8 +390,8 @@ up a little later after the drop:
 Eight replicas is what 600 requests per minute feeds at about one call per second per
 pod with the safety factor applied. Once the burst has spent the shared window, every
 call gets a 429 until the reset, the workers' included: the ceiling follows the
-remaining quota down, so fewer worker pods sit in backoff, and after the window resets
-it steps back up by `maxStepUp` per interval. The log shows the last ceiling change of
+remaining quota down, so fewer worker pods sit in backoff, and as the reset approaches
+it steps back up by at most `maxStepUp` per interval. The log shows the last ceiling change of
 each 15 s line only. The demo also prints the workers' 429s per line; this recording
 predates a fix to that count, so the column is left out.
 

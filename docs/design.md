@@ -48,7 +48,7 @@ other; `cmd/quotaware` wires them.
 4. KEDA asks the scaler for the ceiling of a ScaledObject. For every bucket that
    matches the trigger metadata, the scaler evaluates the domain under the store's
    lock: the headroom formula when a usable quota is known, AIMD otherwise, with
-   the AIMD guard on top while 429s exceed the threshold. Raises are limited to
+   the AIMD guard on top while 429s the headers do not explain exceed the threshold. Raises are limited to
    `maxStepUp` per `stepInterval` from the last change of the bound, the ceiling before
    the drain guard, so open calls moving the drain floor never delay a raise; drops are
    immediate; the drain guard never reports fewer pods than the open calls need.
