@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="360" viewBox="0 0 900 360" font-family="Helvetica, Arial, sans-serif" font-size="12">
+<rect width="900" height="360" fill="white"/>
+<text x="64" y="22" font-size="16" font-weight="bold">Retries scheduled per minute</text>
+<rect x="83.3" y="40" width="154.7" height="272.0" fill="#f2f2f2"/>
+<text x="87.3" y="54" fill="#777" font-size="11">600 RPM</text>
+<rect x="238.0" y="40" width="309.3" height="272.0" fill="#f2f2f2"/>
+<text x="242.0" y="54" fill="#777" font-size="11">180 RPM</text>
+<rect x="547.3" y="40" width="270.7" height="272.0" fill="#f2f2f2"/>
+<text x="551.3" y="54" fill="#777" font-size="11">600 RPM</text>
+<line x1="64" y1="312.0" x2="876" y2="312.0" stroke="#ddd"/>
+<text x="56" y="316.0" text-anchor="end" fill="#555">0</text>
+<line x1="64" y1="257.6" x2="876" y2="257.6" stroke="#ddd"/>
+<text x="56" y="261.6" text-anchor="end" fill="#555">20</text>
+<line x1="64" y1="203.2" x2="876" y2="203.2" stroke="#ddd"/>
+<text x="56" y="207.2" text-anchor="end" fill="#555">40</text>
+<line x1="64" y1="148.8" x2="876" y2="148.8" stroke="#ddd"/>
+<text x="56" y="152.8" text-anchor="end" fill="#555">60</text>
+<line x1="64" y1="94.4" x2="876" y2="94.4" stroke="#ddd"/>
+<text x="56" y="98.4" text-anchor="end" fill="#555">80</text>
+<line x1="64" y1="40.0" x2="876" y2="40.0" stroke="#ddd"/>
+<text x="56" y="44.0" text-anchor="end" fill="#555">100</text>
+<line x1="64.0" y1="40" x2="64.0" y2="312.0" stroke="#eee"/>
+<text x="64.0" y="330" text-anchor="middle" fill="#555">0</text>
+<line x1="218.7" y1="40" x2="218.7" y2="312.0" stroke="#eee"/>
+<text x="218.7" y="330" text-anchor="middle" fill="#555">2</text>
+<line x1="373.3" y1="40" x2="373.3" y2="312.0" stroke="#eee"/>
+<text x="373.3" y="330" text-anchor="middle" fill="#555">4</text>
+<line x1="528.0" y1="40" x2="528.0" y2="312.0" stroke="#eee"/>
+<text x="528.0" y="330" text-anchor="middle" fill="#555">6</text>
+<line x1="682.7" y1="40" x2="682.7" y2="312.0" stroke="#eee"/>
+<text x="682.7" y="330" text-anchor="middle" fill="#555">8</text>
+<line x1="837.3" y1="40" x2="837.3" y2="312.0" stroke="#eee"/>
+<text x="837.3" y="330" text-anchor="middle" fill="#555">10</text>
+<line x1="64" y1="40" x2="64" y2="312.0" stroke="#333"/>
+<line x1="64" y1="312.0" x2="876" y2="312.0" stroke="#333"/>
+<text x="470" y="348" text-anchor="middle" fill="#333">minutes</text>
+<text transform="translate(16 176) rotate(-90)" text-anchor="middle" fill="#333">retries / min</text>
+<path d="M64.0 312.0 L83.3 312.0 L102.7 312.0 L122.0 312.0 L141.3 312.0 L160.7 312.0 L180.0 312.0 L199.3 312.0 L218.7 252.5 L238.0 249.6 L257.3 179.4 L276.7 180.8 L296.0 240.7 L315.3 120.0 L334.7 132.5 L354.0 134.0 L373.3 134.0 L392.7 134.0 L412.0 134.0 L431.3 134.0 L450.7 134.0 L470.0 134.0 L489.3 134.0 L508.7 134.0 L528.0 134.0 L547.3 312.0 L566.7 134.0 L586.0 134.0 L605.3 134.0 L624.7 134.0 L644.0 134.0 L663.3 134.0 L682.7 134.0 L702.0 134.0 L721.3 134.0 L740.7 133.6 L760.0 132.8 L779.3 129.8 L798.7 312.0 L818.0 312.0" fill="none" stroke="#c0392b" stroke-width="2"/>
+<path d="M64.0 312.0 L83.3 312.0 L102.7 312.0 L122.0 312.0 L141.3 312.0 L160.7 312.0 L180.0 312.0 L199.3 312.0 L218.7 312.0 L238.0 312.0 L257.3 255.5 L276.7 255.5 L296.0 255.5 L315.3 255.5 L334.7 252.7 L354.0 252.7 L373.3 252.7 L392.7 255.6 L412.0 252.7 L431.3 252.7 L450.7 252.7 L470.0 258.6 L489.3 252.7 L508.7 252.7 L528.0 252.7 L547.3 255.6 L566.7 312.0 L586.0 312.0 L605.3 312.0 L624.7 297.2 L644.0 297.2 L663.3 297.2 L682.7 312.0 L702.0 312.0 L721.3 312.0 L740.7 312.0 L760.0 312.0 L779.3 303.1 L798.7 303.1 L818.0 303.1 L837.3 312.0" fill="none" stroke="#2471a3" stroke-width="2"/>
+<path d="M64.0 312.0 L83.3 312.0 L102.7 312.0 L122.0 312.0 L141.3 312.0 L160.7 312.0 L180.0 312.0 L199.3 312.0 L218.7 312.0 L238.0 312.0 L257.3 255.0 L276.7 255.0 L296.0 254.5 L315.3 252.7 L334.7 312.0 L354.0 312.0 L373.3 312.0 L392.7 312.0 L412.0 312.0 L431.3 312.0 L450.7 312.0 L470.0 312.0 L489.3 312.0 L508.7 312.0 L528.0 312.0 L547.3 309.2 L566.7 309.2 L586.0 309.2 L605.3 312.0 L624.7 312.0 L644.0 312.0 L663.3 312.0 L682.7 312.0 L702.0 312.0 L721.3 312.0 L740.7 312.0 L760.0 312.0 L779.3 303.3 L798.7 303.3 L818.0 303.3 L837.3 309.1 L856.7 312.0 L876.0 312.0" fill="none" stroke="#1e8449" stroke-width="2"/>
+<line x1="696" y1="52" x2="720" y2="52" stroke="#c0392b" stroke-width="2"/>
+<text x="726" y="56" fill="#333">queue only</text>
+<line x1="696" y1="68" x2="720" y2="68" stroke="#2471a3" stroke-width="2"/>
+<text x="726" y="72" fill="#333">static maximum of 10</text>
+<line x1="696" y1="84" x2="720" y2="84" stroke="#1e8449" stroke-width="2"/>
+<text x="726" y="88" fill="#333">quotaware, safety 1</text>
+</svg>

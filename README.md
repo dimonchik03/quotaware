@@ -12,55 +12,64 @@ or report observations with the Go and Python collectors.
 
 ## When the provider changes its quota
 
-We compared queue-only scaling, a static maximum of ten workers and Quotaware on a
-kind cluster on GitHub-hosted Ubuntu. Each run received 1,800 jobs. The fake provider
-allowed up to 600 requests in minute one, 180 in minute two and 600 per minute after that. Ten
-workers could consume the full nominal quota. The experiment asks what happens when
-that same cap outlasts the capacity it was chosen for.
+We compared three ways to scale the same LLM workers on a kind cluster on a
+GitHub-hosted Ubuntu runner: KEDA's queue-depth trigger alone, the same trigger
+with a static maximum of ten workers, and the same trigger capped by Quotaware.
+Each trial received 3,960 jobs over six minutes, 10% more than the nominal quota.
+The fake provider allowed 600 requests per minute, cut that to 180 for four minutes
+after a two-minute warm-up, then restored 600. Ten workers consume the full 600, so
+the static cap is the setting a team would pick if it knew the quota in advance.
 
-![Static and adaptive worker counts while the provider quota changes](bench/results/2026-11-05-changing/pass-1/static-vs-adaptive.svg)
+![Static and adaptive worker counts while the provider quota changes](bench/results/2026-11-06-changing/pass-1/static-vs-adaptive.svg)
 
-Each cell shows pass 1 / pass 2. The second pass reverses A/B/C to C/B/A.
-Quotaware uses `safety: "1"` and `maxStepUp: "4"`. The default safety setting is
-0.85. All arms use two concurrent provider calls per worker.
+Three passes ran the arms in the orders A/B/C, C/B/A and B/C/A; each cell shows the
+lowest and the highest value. Quotaware uses `safety: "1"` and `maxStepUp: "4"`.
+The default safety setting is 0.85. All arms use two concurrent provider calls per
+worker.
 
 | Metric | Queue only | Static cap of 10 | Quotaware |
 |---|---|---|---|
-| Jobs completed, out of 1,800 | 1,800 / 1,800 | 1,800 / 1,800 | 1,784 / 1,782 |
-| Jobs abandoned on shutdown | 0 / 0 | 0 / 0 | 16 / 18 |
-| HTTP 429 responses | 158 / 150 | 24 / 24 | 18 / 20 |
-| Worker pod-seconds | 4,875 / 5,280 | 2,385 / 2,310 | 2,032.5 / 2,295 |
-| Job latency p95 | 92.1 s / 92.1 s | 136.5 s / 136.5 s | 197.9 s / 206.9 s |
-| Time from end of load phase to empty queue | 75 s / 75 s | 105 s / 105 s | 150 s / 165 s |
+| Jobs completed, out of 3,960 | 3,960 | 3,960 | 3,960 |
+| HTTP 429 responses | 442 | 88–92 | 24–26 |
+| Worker pod-seconds | 13,598–13,680 | 5,738–5,805 | 4,215–4,402 |
+| Pod-seconds of scheduled retry backoff | 9,602–9,641 | 1,676–1,678 | 416–424 |
+| Mean job latency | 113.2–114.5 s | 130.3–130.7 s | 156.0–161.6 s |
+| Job latency p95 | 199.8–200.7 s | 213.2–213.4 s | 238.2–243.4 s |
+| Time from end of load phase to empty queue | 195 s | 210 s | 240 s |
 
-Quotaware follows the quota reduction and uses about 8% fewer worker pod-seconds
-than the static cap across these two trials. Its p95 is one histogram bucket higher,
-and it completes fewer jobs. The static cap finishes this schedule sooner and
-preserves every job.
+In every pass Quotaware completed every job with 23–27% fewer worker pod-seconds
+and about 72% fewer 429s than the static cap, and with 68–69% fewer pod-seconds and
+about 94% fewer 429s than the queue trigger alone. It paid in latency: the mean is
+19–24% and the p95 12–14% above the static cap, and the queue empties 30 seconds
+later.
 
-The benchmark worker uses a destructive Redis pop and abandons a job if shutdown
-interrupts retry backoff. Open-call tracking cannot protect work between HTTP
-attempts. Production workers need queue leases or requeue-on-shutdown behavior.
-The latency histogram includes completed jobs only.
+Quotaware's backlog falls further behind the static cap's at three moments, each
+adding 60 to 130 queued jobs. At the start the ceiling climbs 1, 5, 9, 10 in 15-second steps while
+the static arm scales straight to ten. When the first reduced minute is spent, its
+reset is still more than 30 seconds away, beyond the default `lookAhead`, so
+Quotaware drops to one worker and is back at three within the next minute. When the quota returns to 600,
+Quotaware learns it from the first response of the new window and needs about half a
+minute to reach ten workers, which the static cap already runs. The static cap wins
+on latency because it was chosen for this provider's quota; Quotaware stays within
+15% at p95 without being told the quota.
 
-Most of the gap came from the scaler. Once the 180 requests were spent, the 429s
-that followed tripped the AIMD guard, which held the ceiling at one pod for a full
-minute, about 30 seconds past the reset, and the climb back to ten pods started
-only then. [ADR 0013](docs/adr/0013-look-past-a-reset-and-guard-unexplained-429s.md)
-keeps the guard for 429s the headers did not predict and lets the ceiling count the
-refill of a reset that is less than `lookAhead` away. The bench worker now hands a
-job back to the queue on shutdown, and `make bench-changing` runs a two-minute
-warm-up and a four-minute dip, three times. The table above predates all three
-changes.
+An earlier trial on 2026-11-05 lost jobs and saved only 8% of pod-seconds: the AIMD
+guard held the ceiling at one worker past the reset of a spent window, and the bench
+worker dropped jobs on scale-down.
+[ADR 0013](docs/adr/0013-look-past-a-reset-and-guard-unexplained-429s.md) ignores
+429s that the headers explain and counts the refill of a reset less than `lookAhead`
+away; the worker now hands a job back to the queue when shutdown interrupts its retry
+wait, 18 per Quotaware trial. A crashed worker still loses its job, so
+production workers need queue leases.
 
 Each run starts fresh provider windows, workers and scaler state. The published
 measurements came from
-[commit 4b602e1](https://github.com/dimonchik03/quotaware/commit/4b602e16c46a0eefed44002e16dbc223820ca2a1)
+[commit 6e3723b](https://github.com/dimonchik03/quotaware/commit/6e3723bf8bfbcf9d10568354d85e1e3e04aeb8b4)
 on one GitHub-hosted Ubuntu runner; check it out and run `make bench-changing` to
 reproduce them.
-[Raw data and both passes](bench/results/2026-11-05-changing/) ·
-[Method and earlier fixed-quota experiment](docs/benchmark.md) ·
-[CI execution](https://github.com/dimonchik03/quotaware/actions/runs/41928303907)
+[Raw data and all three passes](bench/results/2026-11-06-changing/) ·
+[Method, the 2026-11-05 trial and the fixed-quota experiment](docs/benchmark.md) ·
+[CI execution](https://github.com/dimonchik03/quotaware/actions/runs/42232333742)
 
 ## How it works
 
@@ -472,7 +481,7 @@ the settings, caps `retry-after`, hands buckets without a computable rate to AIM
 bounds what the Python collector reads, hardens the chart's arguments, and builds
 with Go 1.26.10. v0.2.0 added the network defaults of ADR 0008 and 0009, the store
 limits, async hooks for the Python collector, one shared quota across credentials
-(ADR 0010) and the three-run benchmark above.
+(ADR 0010) and the three-run fixed-quota benchmark in `docs/benchmark.md`.
 
 Upgrading from v0.2.0: the scaler now refuses trigger metadata it used to accept, so
 check each ScaledObject: `bucket` must name openai or anthropic and a model of at

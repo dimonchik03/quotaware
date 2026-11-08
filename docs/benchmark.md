@@ -1,8 +1,106 @@
 # Benchmark
 
-## Changing quota against a static cap, 2026-11-05
+## Changing quota against a static cap, 2026-11-06
 
-The current six-trial experiment is saved with its raw Prometheus exports and charts
+Nine trials are saved with their raw Prometheus exports and charts under
+[2026-11-06-changing](../bench/results/2026-11-06-changing/). They ran on one
+GitHub-hosted Ubuntu 24.04 amd64 runner from clean commit
+[6e3723b](https://github.com/dimonchik03/quotaware/commit/6e3723bf8bfbcf9d10568354d85e1e3e04aeb8b4).
+[CI execution](https://github.com/dimonchik03/quotaware/actions/runs/42232333742).
+
+Three passes ran the arms in the orders A/B/C, C/B/A and B/C/A; each cell shows the
+lowest and the highest value. Quotaware uses `safety: "1"`, `maxStepUp: "4"` and the
+default `lookAhead` of 30 seconds. The default safety setting is 0.85. All arms use
+two concurrent provider calls per worker.
+
+| Metric | Queue only | Static cap of 10 | Quotaware |
+|---|---|---|---|
+| Jobs completed, out of 3,960 | 3,960 | 3,960 | 3,960 |
+| Jobs handed back on shutdown | 12–14 | 0 | 18 |
+| HTTP 429 responses | 442 | 88–92 | 24–26 |
+| Worker pod-seconds | 13,598–13,680 | 5,738–5,805 | 4,215–4,402 |
+| Pod-seconds of scheduled retry backoff | 9,602–9,641 | 1,676–1,678 | 416–424 |
+| Mean job latency | 113.2–114.5 s | 130.3–130.7 s | 156.0–161.6 s |
+| Job latency p50 | 161.2–162.8 s | 196.2–196.4 s | 221.5–226.6 s |
+| Job latency p95 | 199.8–200.7 s | 213.2–213.4 s | 238.2–243.4 s |
+| Time from end of load phase to empty queue | 195 s | 210 s | 240 s |
+
+Compared pass by pass with the static cap, Quotaware completes every job with
+23–27% fewer worker pod-seconds, about 72% fewer 429s and about 75% less scheduled
+backoff. Its mean job latency is 19–24% higher, p50 13–15%, p95 12–14%, and its
+queue empties 30 seconds later. Compared with the queue trigger alone, it uses 68–69%
+fewer pod-seconds and receives about 94% fewer 429s, with a p95 19–21% higher. The static
+cap holds the advantage it was designed with: its maximum equals what this
+provider's quota feeds, which an operator has to know in advance and keep current.
+
+### Where Quotaware loses time
+
+The queued-job gap to the static cap grows at three moments, each adding 60 to 130
+jobs in every pass:
+
+- Start. The ceiling rises 1, 5, 9, 10 in 15-second steps of at most four workers,
+  while the static arm scales to ten within 30 seconds.
+- The first reduced minute. Ten workers spend its 180 requests in under 20 seconds,
+  and its reset is then still more than 30 seconds away, beyond the look-ahead, so
+  the instantaneous rate is zero and the ceiling falls to one worker. The look-ahead raises it as the
+  reset approaches, and three workers serve the following minutes. The static arm
+  keeps ten workers waiting in backoff and fires all of them at each reset.
+- Recovery to 600. The look-ahead assumes the next window has the limit of the
+  current one, so the ceiling stays at three until the first response of the new
+  window reports 600; ten workers are serving about 30 seconds later.
+
+The first two depend on settings this experiment did not vary: a larger `maxStepUp`
+climbs faster at the start and a longer `lookAhead` raises the ceiling earlier before
+a reset, both at some cost in 429s and pod-seconds. The third is inherent to reading
+the quota from response headers: no header announces a raise before it happens.
+
+### Method
+
+`make bench-changing` compares three KEDA policies on the same Redis queue. A reads
+queue depth with a maximum of 30 workers. B reads the same queue with a static
+maximum of 10. C allows up to 30 workers and caps the queue trigger with Quotaware
+through `scalingModifiers`. Ten workers match the nominal 600 RPM at two concurrent
+calls per worker and about two seconds per call.
+
+The producer enqueues 11 jobs per second, 10% above the nominal quota, for six
+minutes, then nothing for one minute. The fake provider starts its window clock on
+the first request for the model. It admits 600 requests in each of the first two
+minutes, 180 in each of the next four and 600 in every minute after that. Its token
+limit stays at two million per minute. The provider and scaler restart between
+arms, and each arm uses fresh workers, the same seed and the same HPA settings.
+`BENCH_RPM_WINDOWS`, `BENCH_PHASES` and `BENCH_PASSES` override the schedule. On a
+Mac, `caffeinate -i make bench-changing` keeps the host awake for the experiment.
+The experiment changes the provider's advertised RPM directly. The kind demo in the
+README exercises a separate workload spending a shared quota.
+
+Prometheus scrapes every five seconds. The replica, queue, ceiling and observed
+provider RPM series are exported on a 15-second grid. Pod-seconds integrate live
+worker metrics endpoints, including their 15-second shutdown linger. Job latency
+runs from enqueue to completion and includes queue wait. The mean comes from the
+histogram's sum and count; p50 and p95 are interpolated in five-second buckets up to
+twenty minutes.
+
+The worker pops a job from Redis before processing it. It finishes a provider call
+already in progress, but SIGTERM interrupts a retry wait; the worker then pushes the
+job back to the end of the list that workers read from, with its original enqueue
+time, and counts it as handed back. A job it cannot hand back counts as abandoned.
+The retry and backoff counters are charged when a wait is scheduled.
+
+The CI workflow runs on pushes to main that change application, chart or benchmark
+sources, excluding saved measurements, and can be dispatched manually on any branch.
+
+### Scope of the conclusion
+
+The schedule contains one four-minute reduction followed by recovery. It tests an
+advertised request quota, while token quota, model and latency distribution stay
+fixed. The fixed-window fake provider charges admitted calls only, and every arm
+shares one quota with no other consumer. Three passes on one runner agree closely,
+but other schedules, continuously refilled limits, shared quotas and real providers
+remain unmeasured.
+
+## Earlier changing-quota trial, 2026-11-05
+
+This six-trial experiment is saved with its raw Prometheus exports and charts
 under [2026-11-05-changing](../bench/results/2026-11-05-changing/).
 It ran on one GitHub-hosted Ubuntu 24.04 amd64 runner from clean commit
 [4b602e1](https://github.com/dimonchik03/quotaware/commit/4b602e16c46a0eefed44002e16dbc223820ca2a1).
@@ -37,7 +135,7 @@ and KEDA can choose any worker to terminate.
 The experiment demonstrates adaptation and its cost under a brief quota reduction.
 The static cap performs well for this schedule. Performance for other quota schedules and real providers remains unmeasured.
 
-### What the trials exposed
+### What the 2026-11-05 trials exposed
 
 The quotaware arm's ceiling series reads 9, 9, 9, 9, 1, 1, 1, 1, 5, 9, 10 in pass 1,
 while 180 requests per minute feed three pods. Once the 180 requests were spent,
@@ -50,20 +148,9 @@ rules: the guard on a header ceiling ignores 429s whose own headers show a spent
 window, and the instantaneous rate counts the refill of a reset that is less than
 `lookAhead` away. The bench worker also hands a job back to the queue when shutdown
 interrupts its retry wait, so a scale-down no longer loses work. The trials above
-predate both changes.
+predate these changes.
 
-From the commit that adds ADR 0013, `make bench-changing` runs a different schedule:
-the provider admits 600 requests in each of the first two minutes, 180 in the next
-four and 600 after that, while the producer enqueues 11 jobs per second for six
-minutes. Three passes run the arms in the orders A/B/C, C/B/A and B/C/A.
-`BENCH_RPM_WINDOWS`, `BENCH_PHASES` and `BENCH_PASSES` override the schedule.
-
-The job latency histogram now has five-second buckets up to twenty minutes, so p50
-and p95 are interpolated within five seconds, and the report adds the mean job
-latency from the histogram's sum and count. The trials above used buckets that grow
-by a factor of 1.5, about 70 s wide around 150 s.
-
-### Method
+### Method, 2026-11-05
 
 At commit 4b602e1, `make bench-changing` compares three KEDA policies on the same Redis queue. A reads
 queue depth with a maximum of 30 workers. B reads the same queue with a static
@@ -94,11 +181,7 @@ are charged when a wait is scheduled. Only completed jobs enter the latency
 histogram. An open-call drain floor cannot protect a job that is between attempts.
 
 
-The CI workflow runs on application, chart and benchmark source pushes. It excludes
-saved measurements and documentation-only commits. Workflow-only edits can be checked
-with its manual dispatch trigger.
-
-### Scope of the conclusion
+### Scope, 2026-11-05
 
 This schedule contains a one-minute reduction followed by recovery. It tests an
 advertised request quota, while token quota, model and latency distribution stay
