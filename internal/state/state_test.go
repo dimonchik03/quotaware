@@ -698,6 +698,19 @@ func rateLimited(quotas state.Quotas) state.Sample {
 	return sample
 }
 
+func TestASpentTokenWindowExplainsNoRateLimitBeforeTokensPerCallAreKnown(t *testing.T) {
+	spentTokens := quotas()
+	spentTokens.Tokens.Remaining = 0
+	s := store(t, 0.5)
+
+	s.End(key, rateLimited(spentTokens), "")
+
+	b := bucketAt(t, s, now.Add(2*time.Second))
+	if b.TokensPerCall != 0 || b.Unexplained != 1 {
+		t.Fatalf("tokens per call = %v, unexplained = %d, want the 429 unexplained while the ceiling cannot read the token window", b.TokensPerCall, b.Unexplained)
+	}
+}
+
 func TestUnexplainedRateLimits(t *testing.T) {
 	spentRequests := quotas()
 	spentRequests.Requests.Remaining = 0
@@ -705,6 +718,8 @@ func TestUnexplainedRateLimits(t *testing.T) {
 	spentTokens.Tokens.Remaining = 400
 	spentProjectTokens := quotas()
 	spentProjectTokens.ProjectTokens = headroom.Quota{Limit: 300000, Remaining: 0, ResetAt: now.Add(time.Minute)}
+	spentInputTokens := quotas()
+	spentInputTokens.InputTokens = headroom.Quota{Limit: 400000, Remaining: 0, ResetAt: now.Add(time.Minute)}
 	cases := []struct {
 		name            string
 		quotas          state.Quotas
@@ -715,6 +730,7 @@ func TestUnexplainedRateLimits(t *testing.T) {
 		{"a 429 whose project window is spent is explained", spentProjectTokens, 0},
 		{"a 429 whose headers still show quota for another call is unexplained", quotas(), 1},
 		{"a 429 without headers is unexplained", state.Quotas{}, 1},
+		{"a 429 whose only spent window is one the ceiling does not read is unexplained", spentInputTokens, 1},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
