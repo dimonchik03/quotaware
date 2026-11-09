@@ -364,8 +364,10 @@ start failing and when they recover, restarts its delivery thread in a forked ch
 (Celery prefork, gunicorn `--preload`) unless it was closed, and works where the
 platform has no fork hook. Both measure header age at delivery, including time spent
 in the collector queue. Call latency still ends when the response body finishes. `close()` returns how many
-observations were still queued when it gave up, and the Go collector's `Close` returns
-`ErrUndelivered` then; deliveries quotaware refused count in `failed` (`Failed()`),
+observations were still queued when it gave up; the Go collector's `Close` waits for
+the delivery under way, drains the queue until `CloseTimeout` (10 s) has passed since
+it was called, and returns nil, or `ErrUndelivered` naming what stayed queued; nothing
+is posted after it returns; deliveries quotaware refused count in `failed` (`Failed()`),
 observations dropped on a full queue in `dropped` (`Dropped()`), and calls whose
 request the hook could not read (a body over 8 MiB, not JSON, without a string
 `model`, or failing while the Go collector reads it) in `unobserved` (`Unobserved()`).

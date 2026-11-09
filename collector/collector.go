@@ -62,6 +62,7 @@ type Collector struct {
 	failing    atomic.Bool
 	gate       sync.Mutex
 	closing    bool
+	drainUntil time.Time
 	stop       chan struct{}
 	wg         sync.WaitGroup
 	closed     sync.Once
@@ -114,17 +115,12 @@ func (c *Collector) Close() error {
 	c.closed.Do(func() {
 		c.gate.Lock()
 		c.closing = true
+		c.drainUntil = time.Now().Add(c.cfg.CloseTimeout)
 		close(c.stop)
 		c.gate.Unlock()
-		done := make(chan struct{})
-		go func() {
-			c.wg.Wait()
-			close(done)
-		}()
-		select {
-		case <-done:
-		case <-time.After(c.cfg.CloseTimeout):
-			err = fmt.Errorf("%w: %d still queued after %v", ErrUndelivered, len(c.queue), c.cfg.CloseTimeout)
+		c.wg.Wait()
+		if queued := len(c.queue); queued > 0 {
+			err = fmt.Errorf("%w: %d still queued after %v", ErrUndelivered, queued, c.cfg.CloseTimeout)
 		}
 	})
 	return err
@@ -146,39 +142,44 @@ func (c *Collector) enqueue(observation pendingObservation) {
 
 func (c *Collector) deliver() {
 	defer c.wg.Done()
-	deadline := time.Time{}
 	for {
 		select {
-		case observation := <-c.queue:
-			c.post(observation)
 		case <-c.stop:
-			deadline = time.Now().Add(c.cfg.CloseTimeout)
+			c.drain()
+			return
+		default:
 		}
-		if deadline.IsZero() {
-			continue
-		}
-		for {
-			if time.Now().After(deadline) {
-				return
-			}
-			select {
-			case observation := <-c.queue:
-				c.post(observation)
-			default:
-				return
-			}
+		select {
+		case observation := <-c.queue:
+			c.post(context.Background(), observation)
+		case <-c.stop:
+			c.drain()
+			return
 		}
 	}
 }
 
-func (c *Collector) post(pending pendingObservation) {
+func (c *Collector) drain() {
+	ctx, cancel := context.WithDeadline(context.Background(), c.drainUntil)
+	defer cancel()
+	for time.Now().Before(c.drainUntil) {
+		select {
+		case observation := <-c.queue:
+			c.post(ctx, observation)
+		default:
+			return
+		}
+	}
+}
+
+func (c *Collector) post(parent context.Context, pending pendingObservation) {
 	pending.observation.HeadersAgeMS = float64(time.Since(pending.headersAt)) / float64(time.Millisecond)
 	body, err := json.Marshal(pending.observation)
 	if err != nil {
 		c.failure(err)
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), c.cfg.PostTimeout)
+	ctx, cancel := context.WithTimeout(parent, c.cfg.PostTimeout)
 	defer cancel()
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, c.cfg.Endpoint, bytes.NewReader(body))
 	if err != nil {
