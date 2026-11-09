@@ -167,7 +167,10 @@ A gRPC server implementing KEDA's `ExternalScaler` service
   other `quotaware_ceiling` series are the per-credential ceilings it combines).
 - `GetMetrics` returns the ceiling as `metricValue`. With KEDA's default
   `AverageValue` semantics the HPA computes `ceil(metricValue / targetSize)`, so the
-  returned number is the replica count itself.
+  returned number is the replica count itself. A trigger whose bucket no answered
+  call has reached yet is answered Unavailable while the process is younger than
+  the trigger's `stepInterval`, so KEDA keeps the current count across a restart,
+  and `defaultCeiling` after that.
 - `IsActive` is always false for a cap trigger, so activation stays with the demand
   trigger; in single-trigger mode it is true while the queue has items or calls are
   open.

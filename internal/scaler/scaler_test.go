@@ -101,6 +101,10 @@ func newFixtureWithLimits(t *testing.T, limits state.Limits) *fixture {
 	return &fixture{service: service, store: store, queue: queue, logs: logs, clock: c}
 }
 
+func (f *fixture) outliveWarmUp() {
+	f.clock.Advance(headroom.DefaultConfig().StepInterval)
+}
+
 func (f *fixture) observe(key state.Key, remainingRequests, remainingTokens float64) {
 	at := f.clock.Now()
 	f.store.Begin(key, at, "")
@@ -284,8 +288,9 @@ func TestGetMetricSpec(t *testing.T) {
 }
 
 func TestGetMetrics(t *testing.T) {
-	t.Run("reports the default ceiling before any observation and records it", func(t *testing.T) {
+	t.Run("reports the default ceiling once the warm-up has passed without an observation and records it", func(t *testing.T) {
 		f := newFixture(t)
+		f.outliveWarmUp()
 
 		if got := metric(t, f, capMetadata()); got != 1 {
 			t.Fatalf("ceiling = %d, want the default of 1", got)
@@ -297,6 +302,7 @@ func TestGetMetrics(t *testing.T) {
 
 	t.Run("answers under the metric name KEDA asked for, in both value fields", func(t *testing.T) {
 		f := newFixture(t)
+		f.outliveWarmUp()
 
 		response, err := f.service.GetMetrics(context.Background(), &externalscaler.GetMetricsRequest{ScaledObjectRef: ref(capMetadata()), MetricName: "s1-quotaware-ceiling"})
 
@@ -477,6 +483,7 @@ func TestGetMetrics(t *testing.T) {
 
 	t.Run("keeps the drain floor of calls open on a credential the provider has not answered yet", func(t *testing.T) {
 		f := newFixture(t)
+		f.outliveWarmUp()
 		for range 40 {
 			f.store.Begin(bucketA, f.clock.Now(), "")
 		}
@@ -1089,6 +1096,7 @@ func TestIsActive(t *testing.T) {
 
 func TestClose(t *testing.T) {
 	f := newFixture(t)
+	f.outliveWarmUp()
 	f.queue.set(1, nil)
 	metric(t, f, queueMetadata())
 
@@ -1358,8 +1366,9 @@ func TestASpentWindowOnAHeldSharedKeyDoesNotCapAFresherSiblingBelowTheHold(t *te
 
 func TestSingleTriggerDrainsOnlyItsOwnWorkers(t *testing.T) {
 	f := newFixture(t)
+	f.outliveWarmUp()
 	for range 5 {
-		f.store.Begin(bucketA, now, "indexer")
+		f.store.Begin(bucketA, f.clock.Now(), "indexer")
 	}
 	for _, tc := range []struct {
 		workload string
@@ -1380,6 +1389,7 @@ func TestSingleTriggerDrainsOnlyItsOwnWorkers(t *testing.T) {
 func TestMinimumCapacityCanServeAColdThenAWarmTrigger(t *testing.T) {
 	f := newFixtureWithLimits(t, state.Limits{Buckets: 2, Consumers: 2})
 	m := capMetadata()
+	f.outliveWarmUp()
 	metric(t, f, m)
 	f.clock.Advance(16 * time.Second)
 	f.observe(bucketA, 900, 500000)
@@ -1485,6 +1495,81 @@ func TestMetadataKeysOutsideTheSettings(t *testing.T) {
 
 		if _, err := f.service.GetMetricSpec(context.Background(), ref(metadata)); err != nil {
 			t.Fatalf("err = %v, want KEDA's own keys accepted", err)
+		}
+	})
+}
+
+func TestAnUnseenBucketIsUnavailableUntilTheProcessIsAStepIntervalOld(t *testing.T) {
+	poll := func(f *fixture, metadata map[string]string) (int64, error) {
+		response, err := f.service.GetMetrics(context.Background(), &externalscaler.GetMetricsRequest{ScaledObjectRef: ref(metadata)})
+		if err != nil {
+			return 0, err
+		}
+		return response.GetMetricValues()[0].GetMetricValue(), nil
+	}
+
+	t.Run("answers Unavailable for the first step interval and the default ceiling afterwards", func(t *testing.T) {
+		f := newFixture(t)
+		metadata := capMetadata()
+		metadata["defaultCeiling"] = "3"
+
+		_, young := poll(f, metadata)
+		f.clock.Advance(14 * time.Second)
+		_, stillYoung := poll(f, metadata)
+		recorded := len(combinedCeilings(f))
+		f.clock.Advance(time.Second)
+		aged, err := poll(f, metadata)
+
+		if code(young) != codes.Unavailable || code(stillYoung) != codes.Unavailable || recorded != 0 {
+			t.Fatalf("codes = %v then %v with %d ceilings recorded, want Unavailable through the step interval and nothing recorded", code(young), code(stillYoung), recorded)
+		}
+		if err != nil || aged != 3 {
+			t.Fatalf("after the step interval = %d (%v), want the default ceiling of 3", aged, err)
+		}
+	})
+
+	t.Run("keeps queued demand waiting through the step interval of the trigger", func(t *testing.T) {
+		f := newFixture(t)
+		f.queue.set(25, nil)
+		metadata := queueMetadata()
+		metadata["stepInterval"] = "5s"
+
+		_, young := poll(f, metadata)
+		f.clock.Advance(5 * time.Second)
+		aged, err := poll(f, metadata)
+
+		if code(young) != codes.Unavailable {
+			t.Fatalf("code = %v (%v), want Unavailable while the process is younger than the trigger's step interval", code(young), young)
+		}
+		if err != nil || aged != 1 {
+			t.Fatalf("after the step interval = %d (%v), want the default ceiling of 1 under a demand of 3", aged, err)
+		}
+	})
+
+	t.Run("holds calls in flight on an unanswered bucket through the warm-up, then reports their floor", func(t *testing.T) {
+		f := newFixture(t)
+		for range 40 {
+			f.store.Begin(bucketA, f.clock.Now(), "")
+		}
+
+		_, young := poll(f, capMetadata())
+		f.outliveWarmUp()
+		aged, err := poll(f, capMetadata())
+
+		if code(young) != codes.Unavailable {
+			t.Fatalf("code = %v (%v), want Unavailable rather than the floor of calls nobody has answered", code(young), young)
+		}
+		if err != nil || aged != 10 {
+			t.Fatalf("after the warm-up = %d (%v), want ceil(40/4) = 10 pods for the open calls", aged, err)
+		}
+	})
+
+	t.Run("answers a bucket the proxy has seen at once", func(t *testing.T) {
+		f := newFixture(t)
+		f.observe(bucketA, 900, 500000)
+
+		if got := metric(t, f, capMetadata()); got != 4 {
+			t.Fatalf("ceiling = %d, want 4 from the headers on the first poll", got)
 		}
 	})
 }

@@ -473,12 +473,15 @@ prints the build version.
   256Mi memory limit fits typical call sizes, not that worst case. Lower the three
   flags together to bound it.
 - The proxy and the scaler run in one pod with in-memory state: a restart starts
-  every bucket afresh, so the polls after it report `defaultCeiling` until the first
-  proxied call lands and the ceiling then climbs back by `maxStepUp` per
-  `stepInterval`, while the HPA's scale-down stabilization (300 s by default) keeps
-  the pods; the proxy is in the path of every call it carries, and the
-  chart replaces the pod on every upgrade (`strategy: Recreate`), so an upgrade
-  interrupts proxied calls until the new pod is ready. On a shutdown signal the proxy
+  every bucket afresh, so for its first `stepInterval` the new process answers polls
+  for buckets no answered call has reached with Unavailable and KEDA keeps the count
+  it had (a configured KEDA `fallback` counts those polls as failures, ADR 0015);
+  after that they report `defaultCeiling` until the first proxied call lands and the
+  ceiling climbs back by `maxStepUp` per `stepInterval`, while the HPA's scale-down
+  stabilization (300 s by default) keeps the pods; the proxy is in the path of every
+  call it carries, and the chart replaces the pod on every upgrade
+  (`strategy: Recreate`), so an upgrade interrupts proxied calls until the new pod
+  is ready. On a shutdown signal the proxy
   stops accepting calls, gives the open ones `-drain-timeout` (10 s) to finish, then
   closes them, logs that it did and exits cleanly; keep the pod's termination grace
   period (30 s by default) above the drain. Run collectors instead of the proxy where

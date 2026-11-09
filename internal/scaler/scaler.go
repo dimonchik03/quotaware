@@ -63,11 +63,12 @@ func DefaultConfig() Config {
 
 type Service struct {
 	externalscaler.UnimplementedExternalScalerServer
-	cfg    Config
-	store  *state.Store
-	queues QueueFactory
-	now    func() time.Time
-	logger *slog.Logger
+	cfg     Config
+	store   *state.Store
+	queues  QueueFactory
+	now     func() time.Time
+	started time.Time
+	logger  *slog.Logger
 
 	mu          sync.Mutex
 	queueByAddr map[string]QueueDepth
@@ -92,7 +93,7 @@ func New(cfg Config, store *state.Store, queues QueueFactory, now func() time.Ti
 	if err := cfg.AIMD.Validate(); err != nil {
 		return nil, fmt.Errorf("aimd defaults: %w", err)
 	}
-	return &Service{cfg: cfg, store: store, queues: queues, now: now, logger: logger, queueByAddr: map[string]QueueDepth{}, stopping: make(chan struct{})}, nil
+	return &Service{cfg: cfg, store: store, queues: queues, now: now, started: now(), logger: logger, queueByAddr: map[string]QueueDepth{}, stopping: make(chan struct{})}, nil
 }
 
 func (s *Service) Register(server *grpc.Server) {
@@ -550,6 +551,9 @@ func (s *Service) ceiling(ref *externalscaler.ScaledObjectRef, t trigger, bucket
 	floor := drainFloor(t, buckets)
 	switch {
 	case matched == 0:
+		if age := now.Sub(s.started); age < t.cfg.StepInterval {
+			return 0, status.Errorf(codes.Unavailable, "no answered call for %s/%s since quotaware started %s ago; the default ceiling applies after %s", t.provider, t.model, age.Round(time.Second), t.cfg.StepInterval)
+		}
 		return s.report(ref, t, t.cfg.DefaultCeiling, floor, now)
 	case t.scope == quotaPerCredential:
 		unanswered := headroom.DrainFloor(t.cfg, headroom.Observation{InFlight: waiting})
