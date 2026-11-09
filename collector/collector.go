@@ -223,19 +223,11 @@ func (r roundTripper) RoundTrip(request *http.Request) (*http.Response, error) {
 		return r.next.RoundTrip(request)
 	}
 	prefix, err := io.ReadAll(io.LimitReader(request.Body, c.cfg.MaxRequestBytes+1))
-	if err != nil {
-		_ = request.Body.Close()
-		return nil, fmt.Errorf("quotaware collector: read request body: %w", err)
+	if err != nil || int64(len(prefix)) > c.cfg.MaxRequestBytes {
+		c.unobserved.Add(1)
+		return r.next.RoundTrip(resumed(request, prefix))
 	}
 	clone := request.Clone(request.Context())
-	if int64(len(prefix)) > c.cfg.MaxRequestBytes {
-		c.unobserved.Add(1)
-		clone.Body = struct {
-			io.Reader
-			io.Closer
-		}{io.MultiReader(bytes.NewReader(prefix), request.Body), request.Body}
-		return r.next.RoundTrip(clone)
-	}
 	_ = request.Body.Close()
 	clone.Body = io.NopCloser(bytes.NewReader(prefix))
 	clone.ContentLength = int64(len(prefix))
@@ -277,6 +269,15 @@ func (r roundTripper) RoundTrip(request *http.Request) (*http.Response, error) {
 		c.enqueue(pendingObservation{observation: observation, headersAt: headersAt})
 	})
 	return response, nil
+}
+
+func resumed(request *http.Request, read []byte) *http.Request {
+	clone := request.Clone(request.Context())
+	clone.Body = struct {
+		io.Reader
+		io.Closer
+	}{io.MultiReader(bytes.NewReader(read), request.Body), request.Body}
+	return clone
 }
 
 func rateLimitHeaders(h http.Header) map[string]string {

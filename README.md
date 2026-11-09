@@ -318,7 +318,10 @@ answered with InvalidArgument, so a misspelt knob cannot run on its default unno
 Workers that cannot or should not route through the proxy can report what they
 see themselves. Both collectors post the same observation to `POST /v1/observe` on
 the admin port and never block or fail the call they observe: a full queue drops, a
-failed delivery is counted, an error inside the hook is counted. An observation for a
+failed delivery is counted, an error inside the hook is counted. The one call that
+still fails is one whose own request body breaks while the Go collector reads it: the
+collector hands the body on as far as it got, so the call ends with the body's error,
+as it would without the collector, and counts as unobserved. An observation for a
 bucket the `-max-buckets` limit refuses is answered 503 and counts as a failed delivery. quotaware refuses
 to start without `-observe-token` (or `QUOTAWARE_OBSERVE_TOKEN`) unless
 `-observe-insecure` is passed, because anyone who can post an observation can move
@@ -364,8 +367,8 @@ in the collector queue. Call latency still ends when the response body finishes.
 observations were still queued when it gave up, and the Go collector's `Close` returns
 `ErrUndelivered` then; deliveries quotaware refused count in `failed` (`Failed()`),
 observations dropped on a full queue in `dropped` (`Dropped()`), and calls whose
-request the hook could not read (a body over 8 MiB, not JSON, or without a string
-`model`) in `unobserved` (`Unobserved()`).
+request the hook could not read (a body over 8 MiB, not JSON, without a string
+`model`, or failing while the Go collector reads it) in `unobserved` (`Unobserved()`).
 Collector traffic is not counted as in flight, so the drain guard only sees proxied
 calls (ADR 0007).
 

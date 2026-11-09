@@ -369,18 +369,28 @@ func TestCollector(t *testing.T) {
 		}
 	})
 
-	t.Run("closes the request body when reading it fails", func(t *testing.T) {
+	t.Run("hands a request body it cannot read on unobserved, so the call ends with the body's own error", func(t *testing.T) {
 		c := newCollector(t, "http://127.0.0.1:1", nil)
-		body := &failingBody{}
+		body := &failingBody{prefix: []byte(`{"model":`)}
+		var forwarded []byte
+		next := roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			var err error
+			forwarded, err = io.ReadAll(r.Body)
+			_ = r.Body.Close()
+			return nil, err
+		})
 		request, err := http.NewRequest(http.MethodPost, "http://provider.test/v1/chat/completions", body)
 		if err != nil {
 			t.Fatal(err)
 		}
 
-		_, err = c.Wrap(nil).RoundTrip(request)
+		_, err = c.Wrap(next).RoundTrip(request)
 
-		if err == nil || !body.closed {
-			t.Fatalf("err = %v closed = %v, want the read error and the body closed", err, body.closed)
+		if !errors.Is(err, errClientGone) || string(forwarded) != `{"model":` {
+			t.Fatalf("err = %v forwarded = %q, want the body's own error after what was read reached the upstream", err, forwarded)
+		}
+		if !body.closed || c.Unobserved() != 1 {
+			t.Fatalf("closed = %v unobserved = %d, want the body closed and the call counted as unobserved", body.closed, c.Unobserved())
 		}
 	})
 
@@ -402,12 +412,24 @@ func ExampleNew() {
 	// Output: true
 }
 
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+var errClientGone = errors.New("client went away")
+
 type failingBody struct {
+	prefix []byte
 	closed bool
 }
 
-func (b *failingBody) Read([]byte) (int, error) {
-	return 0, errors.New("client went away")
+func (b *failingBody) Read(p []byte) (int, error) {
+	if len(b.prefix) == 0 {
+		return 0, errClientGone
+	}
+	n := copy(p, b.prefix)
+	b.prefix = b.prefix[n:]
+	return n, nil
 }
 
 func (b *failingBody) Close() error {
