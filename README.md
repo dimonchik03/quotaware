@@ -191,15 +191,14 @@ it becomes a label.
 
 ## Deploy with KEDA
 
-The stable installation below uses v0.3.0. To reproduce the development-branch
-benchmark or try workload-scoped drain, use `make bench-changing` or `make demo`
-from this checkout. Both build their images locally.
+The installation below uses the v0.4.0 release. `make bench-changing` and `make demo`
+reproduce the benchmark and the demo from a checkout; both build their images locally.
 
 The chart runs `quotaware all`: the proxy, the metrics endpoint and the KEDA
 external scaler in one pod, from the image `ghcr.io/dimonchik03/quotaware` that
 every release publishes for linux/amd64 and linux/arm64:
 
-    git clone --branch v0.3.0 https://github.com/dimonchik03/quotaware && cd quotaware
+    git clone --branch v0.4.0 https://github.com/dimonchik03/quotaware && cd quotaware
     kubectl create namespace llm
     kubectl -n llm create secret generic quotaware-observe \
       --from-literal=observe-token="$(openssl rand -hex 16)"
@@ -293,7 +292,7 @@ scaler rejects a provider other than openai or anthropic, a model longer than 25
 bytes, a `credential` that is neither such a hash nor `anonymous`, and requests
 over 64 KiB.
 
-**On the development branch.** When multiple queues use the same provider key and model, give each worker deployment
+When several queues use the same provider key and model, give each worker deployment
 a unique DNS label in the `X-Quotaware-Workload` request header and set its trigger’s
 `workload` metadata to the same label. The proxy removes the header before
 forwarding. Quota stays shared, while an empty queue retains workers only for calls
@@ -492,24 +491,29 @@ Not a gateway, not a rate limiter, not a cost dashboard. See `docs/SPEC.md`.
 
 ## Status
 
-v0.3.0 is the latest published release. It includes [Linux and macOS binaries](https://github.com/dimonchik03/quotaware/releases/tag/v0.3.0), the
-image `ghcr.io/dimonchik03/quotaware:0.3.0`, the v0.x scope of `docs/SPEC.md`
-implemented, and the two-trigger mode benchmarked against a fixed-window fake
-provider. This checkout adds shared retry holds, workload-scoped drain, bounded
-collector capture, the changing-quota experiment, a look-ahead past an imminent
-reset and a guard that ignores 429s the headers explain (ADR 0013); set
-`lookAhead: "0s"` for the earlier instantaneous rate. It also keeps the halved value
-through a guard hold instead of the lowest value the hold saw, holds only for the
-`retry-after` of unexplained 429s, rejects trigger metadata keys it does not know
-(remove a misspelt knob before upgrading), answers 503 for an observation the bucket
-limit discards, bounds the proxy's open calls and its wait for a provider's headers,
-and makes the shutdown drain a flag (ADR 0014). Over v0.2.0 it dates quotas by when their headers arrived, limits raises of
-the value KEDA receives as well as each credential's, bounds the trigger metadata and
-the settings, caps `retry-after`, hands buckets without a computable rate to AIMD,
-bounds what the Python collector reads, hardens the chart's arguments, and builds
-with Go 1.26.10. v0.2.0 added the network defaults of ADR 0008 and 0009, the store
-limits, async hooks for the Python collector, one shared quota across credentials
-(ADR 0010) and the three-run fixed-quota benchmark in `docs/benchmark.md`.
+v0.4.0 is the latest release: [Linux and macOS binaries](https://github.com/dimonchik03/quotaware/releases/tag/v0.4.0),
+the image `ghcr.io/dimonchik03/quotaware:0.4.0` for linux/amd64 and linux/arm64, and
+the v0.x scope of `docs/SPEC.md` implemented. Over v0.3.0 it adds the look-ahead past
+an imminent reset and a guard that reacts only to 429s the headers do not explain,
+holds for the longest `retry-after` among them and keeps the halved value through
+the hold (ADR 0013), shared retry holds and workload-scoped drain (ADR 0012), the
+changing-quota benchmark above, bounded collector capture, and the bounds of
+ADR 0014: `-max-inflight`, `-upstream-header-timeout`, `-drain-timeout`,
+`quotaware_calls_rejected_total`, 503 for an observation the bucket limit discards
+and InvalidArgument for trigger metadata keys it does not know. v0.3.0 dated quotas
+by when their headers arrived, limited raises of the value KEDA receives, bounded the
+trigger metadata and the settings, capped `retry-after`, handed buckets without a
+computable rate to AIMD and moved to Go 1.26.10. v0.2.0 added the network defaults
+of ADR 0008 and 0009, the store limits, async hooks for the Python collector, one
+shared quota across credentials (ADR 0010) and the fixed-quota benchmark in
+`docs/benchmark.md`.
+
+Upgrading from v0.3.0: remove trigger metadata keys quotaware does not know, since a
+misspelt knob now fails the trigger with InvalidArgument instead of running on its
+default; `lookAhead: "0s"` restores the instantaneous rate of v0.3.0; collectors see
+503 where a full store answered 202; a provider that sends no response headers for
+ten minutes fails the call with 504; keep the pod's termination grace period above
+`-drain-timeout`.
 
 Upgrading from v0.2.0: the scaler now refuses trigger metadata it used to accept, so
 check each ScaledObject: `bucket` must name openai or anthropic and a model of at
