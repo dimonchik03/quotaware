@@ -33,6 +33,14 @@ fewer pod-seconds and receives about 94% fewer 429s, with a p95 19–21% higher.
 cap holds the advantage it was designed with: its maximum equals what this
 provider's quota feeds, which an operator has to know in advance and keep current.
 
+A later run on
+[main at 0da8771](https://github.com/dimonchik03/quotaware/commit/0da87711096c3a6d8b458e2607a47e9749dc1885)
+([CI execution](https://github.com/dimonchik03/quotaware/actions/runs/42584621163)),
+after the guard changes of ADR 0014, repeated the shape: per pass Quotaware used
+23–28% fewer pod-seconds and received 72–76% fewer 429s than the static cap, with a
+mean latency 18–29% and a p95 10–17% higher and a queue that emptied 15–30 seconds
+later.
+
 ### Where Quotaware loses time
 
 The queued-job gap to the static cap grows at three moments, each adding 60 to 130

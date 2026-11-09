@@ -66,7 +66,13 @@ Each run starts fresh provider windows, workers and scaler state. The published
 measurements came from
 [commit 6e3723b](https://github.com/dimonchik03/quotaware/commit/6e3723bf8bfbcf9d10568354d85e1e3e04aeb8b4)
 on one GitHub-hosted Ubuntu runner; check it out and run `make bench-changing` to
-reproduce them.
+reproduce them. A later run on
+[main at 0da8771](https://github.com/dimonchik03/quotaware/commit/0da87711096c3a6d8b458e2607a47e9749dc1885)
+([CI execution](https://github.com/dimonchik03/quotaware/actions/runs/42584621163)),
+after the guard changes of ADR 0014, repeated the shape: per pass Quotaware used
+23–28% fewer pod-seconds and received 72–76% fewer 429s than the static cap, with a
+mean latency 18–29% and a p95 10–17% higher and a queue that emptied 15–30 seconds
+later.
 [Raw data and all three passes](bench/results/2026-11-06-changing/) ·
 [Method, the 2026-11-05 trial and the fixed-quota experiment](docs/benchmark.md) ·
 [CI execution](https://github.com/dimonchik03/quotaware/actions/runs/42232333742)
