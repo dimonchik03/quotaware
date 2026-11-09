@@ -120,7 +120,8 @@ the reset brings and the ceiling stays at 4. With `-look-ahead 0s` the bound dro
 to 1 at 18:00:59, the drain guard keeps three pods for the twelve open calls, and
 the raise after the reset waits out the step interval. `simulate` replays the
 headroom rules the scaler applies, without the AIMD guard, which needs the 429
-history of a live bucket. Run with `-h` for every knob.
+history of a live bucket, and without a default ceiling reported before the first
+observation, which in the scaler limits the first raise. Run with `-h` for every knob.
 
 ## Run the proxy
 
@@ -285,10 +286,12 @@ separate organizations for instance, sets `quotaScope: credential` to add their
 ceilings up instead (ADR 0010). `maxStepUp` limits the value KEDA receives as well as
 each credential's ceiling, so a new key cannot lift it past one step, and
 `quotaware_ceiling{key="combined"}` shows the quota ceiling before Redis demand is applied. With an empty queue the gauge can read 4 while KEDA receives 0. A key the provider has only answered with 401 or 403
-counts for nothing. Set `credential`, the 12-character hash in the `key` label, when other teams' keys for
+counts for nothing. Set `credential`, the 12-character hash in the `key` label
+(`anonymous` for calls that carried no credential), when other teams' keys for
 the same model go through the same proxy, or their headers may be the newest. The
 scaler rejects a provider other than openai or anthropic, a model longer than 256
-bytes, a `credential` that is not such a hash, and requests over 64 KiB.
+bytes, a `credential` that is neither such a hash nor `anonymous`, and requests
+over 64 KiB.
 
 **On the development branch.** When multiple queues use the same provider key and model, give each worker deployment
 a unique DNS label in the `X-Quotaware-Workload` request header and set its trigger’s
@@ -430,8 +433,8 @@ prints the build version.
 | `-ewma-alpha` | `0.2` | weight of the newest sample in tokens per call and latency |
 | `-max-buckets` | `10000` | `(provider, model, credential)` buckets tracked |
 | `-max-scaled-objects` | `1000` | `(ScaledObject, trigger, credential)` ceilings tracked |
-| `-max-request-bytes` | 8 MiB | largest request body accepted |
-| `-max-capture-bytes` | 4 MiB | largest response body read for usage |
+| `-max-request-bytes` | `8388608` (8 MiB) | largest request body accepted, in bytes |
+| `-max-capture-bytes` | `4194304` (4 MiB) | largest response body read for usage, in bytes |
 | `-read-body-timeout` | `30s` | time a client may take to send the request body |
 | `-upstream-header-timeout` | `10m` | time the provider may take to answer with headers before the call gets 504 |
 | `-max-inflight` | `256` | proxied calls open at once; more get 503 |
@@ -466,7 +469,10 @@ prints the build version.
   256Mi memory limit fits typical call sizes, not that worst case. Lower the three
   flags together to bound it.
 - The proxy and the scaler run in one pod with in-memory state: a restart starts
-  every bucket afresh, the proxy is in the path of every call it carries, and the
+  every bucket afresh, so the polls after it report `defaultCeiling` until the first
+  proxied call lands and the ceiling then climbs back by `maxStepUp` per
+  `stepInterval`, while the HPA's scale-down stabilization (300 s by default) keeps
+  the pods; the proxy is in the path of every call it carries, and the
   chart replaces the pod on every upgrade (`strategy: Recreate`), so an upgrade
   interrupts proxied calls until the new pod is ready. On a shutdown signal the proxy
   stops accepting calls, gives the open ones `-drain-timeout` (10 s) to finish, then

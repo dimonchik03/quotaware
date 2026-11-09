@@ -122,13 +122,15 @@ Quotaware uses `safety: "1"` and `maxStepUp: "4"`. The default safety setting is
 The adaptive ceiling follows the reduction in available quota and keeps fewer
 workers alive through it. Across these two trials it uses about 8% fewer worker
 pod-seconds than the static cap, while p95 rises into the next histogram bucket.
-Its worker also abandons jobs when a scale-down interrupts retry backoff. Completed
+Its worker also abandoned jobs when a scale-down interrupted retry backoff. Completed
 jobs alone enter the latency histogram, so the resource totals must be read with
 the completion counts. The static ten-worker cap completes this workload sooner
 and preserves every job.
 
-The worker uses a destructive Redis pop. A production worker needs queue leases
-or requeue-on-shutdown behavior for work between provider calls. Quotaware's drain
+The worker used a destructive Redis pop; it hands jobs back since
+[2603524](https://github.com/dimonchik03/quotaware/commit/2603524e76090a333af17789ab0e32a7d128ae37)
+(2026-11-06). A production worker needs queue leases or requeue-on-shutdown
+behaviour for work between provider calls. Quotaware's drain
 floor sees open HTTP calls. It cannot preserve a job sleeping between retries,
 and KEDA can choose any worker to terminate.
 

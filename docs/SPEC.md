@@ -42,7 +42,7 @@ into the autoscaler. quotaware does.
 ## How it works
 
 One Go binary, `quotaware`, with subcommands `proxy`, `all` (proxy and scaler in
-one process, the v0.1 deployment) and `simulate`. A standalone `scaler` arrives with
+one process, the deployment the chart runs) and `simulate`. A standalone `scaler` arrives with
 the shared state backend, since the scaler reads what the proxy observed.
 
 ### 1. Observation: `quotaware proxy`
@@ -140,7 +140,7 @@ Guards:
   ceiling; older than `stale_hard` (default 10 min) fall back to `default_ceiling`.
 - `share`: fraction of the organization quota this workload may use (default 1.0).
   Headers reflect org-wide usage, so two quotaware instances for two services would
-  each claim the whole headroom. Documented limitation in v0.1.
+  each claim the whole headroom. Listed under the known limitations.
 - `default_ceiling` must lie within `[min_replicas, max_replicas]`; a trigger that
   says otherwise is rejected instead of clamped.
 
@@ -177,8 +177,9 @@ A gRPC server implementing KEDA's `ExternalScaler` service
 - A raise of the ceiling is limited to `maxStepUp` per `stepInterval` (default 15 s)
   however often KEDA polls, counted from the last change of the ceiling before the
   drain guard; a drop is immediate. The limit applies to each credential's ceiling and
-  again to the value KEDA receives, so a credential seen for the first time, or the
-  switch from the default ceiling to the first answered one, cannot jump past it. Ceilings are evaluated under the
+  again to the value KEDA receives, so a credential that joins a trigger already
+  polled, or the switch from a reported default ceiling to the first answered one,
+  cannot jump past it; the first poll of a trigger reports what it computes. Ceilings are evaluated under the
   store's lock, so concurrent polls cannot raise twice.
 
 Trigger metadata: `scalerAddress`, `bucket` (`openai/gpt-4.1-mini`), `concurrency` (k),
@@ -234,7 +235,7 @@ not protect calls in flight from a queue-driven scale-down in this mode; Mode B 
 it.
 
 Mode B, single trigger, for clusters where `scalingModifiers` is unavailable:
-quotaware reads the queue depth itself (Redis list in v0.1) and returns
+quotaware reads the queue depth itself (Redis lists today) and returns
 `max(min(demand_replicas, ceiling), drain_floor)`; activation follows the queue and
 the calls still open. The manifest is
 `deploy/examples/scaledobject-mode-b.yaml`.
@@ -277,11 +278,19 @@ quotas in place, which freeze after `stale_after` and hand the bucket to AIMD af
 
 ## Benchmark
 
-Runs on a laptop with `kind`, costs zero tokens, reproducible with `make bench`.
-The exported series, the three SVG charts, the summary table and `run.json` (start,
-end, label, the commit the images were built from and whether the tree was dirty)
-are committed under `bench/results/<date>/`; the manifests and the fake provider's
-limits are the ones in `bench/` at that commit.
+Runs on a laptop or a GitHub-hosted runner with `kind`, costs zero tokens, and comes
+in two profiles: `make bench` holds the quota fixed over a phased schedule, and
+`make bench-changing` (`BENCH_PROFILE=changing`) drops the provider's request quota
+from 600 to 180 per minute and restores it while three arms run `BENCH_PASSES`
+times in an order that changes with each pass (A B C, C B A, B C A): the queue
+trigger alone, the same trigger with a static `maxReplicaCount` of ten, and the
+trigger capped by quotaware at `safety: "1"`. The `changing-quota benchmark`
+workflow runs the second profile on pushes to `main` that change application, chart
+or benchmark sources and on demand; `docs/benchmark.md` reports both. The exported
+series, the SVG charts, the summary table and `run.json` (start, end, label, profile,
+phases, rpm_windows, adaptive, the commit the images were built from and whether the
+tree was dirty) are committed under `bench/results/<date>/`; the manifests and the
+fake provider's limits are the ones in `bench/` at that commit.
 
 Components under `bench/`:
 
@@ -303,7 +312,7 @@ Components under `bench/`:
 - `plot/`: turns the Prometheus export into three SVG charts and a Markdown table,
   one column per run.
 
-Three runs that differ by design only in the ScaledObject:
+The fixed profile runs three variants that differ by design only in the ScaledObject:
 
 - A, baseline: Redis list trigger only (`listLength: 10`).
 - B, quotaware: the same trigger capped by the quotaware ceiling (Mode A) at the
@@ -315,7 +324,7 @@ minute, job latency p50 and p95, time to drain the burst, total pod-seconds, idl
 pod-seconds (seconds in backoff divided by the calls per pod), jobs abandoned on
 shutdown and jobs unaccounted for.
 
-Hypothesis, stated before running: under quota both runs look the same, and quotaware
+Hypothesis, stated before running: under quota the runs look the same, and quotaware
 must not hurt there; at and above quota B shows fewer 429s, fewer pod-seconds and a
 lower p95 at the same throughput, because throughput is capped by the quota either
 way. If B does not win, that is still the write-up, and a bug hunt.
@@ -337,7 +346,8 @@ way. If B does not win, that is still the write-up, and a bug hunt.
       deploy/                 Helm chart (Deployment, Service, ScaledObject examples), grafana/
       bench/                  fakeprovider/, producer/, worker/, kind/, prometheus/, plot/, results/
       docs/                   SPEC.md, design.md, adr/, benchmark.md, release.md
-      .github/workflows/      race tests, lint, tidy, chart checks, compose e2e and the Python tests on PR; release on tag
+      .github/workflows/      ci (race tests, lint, tidy, chart checks, compose e2e, Python tests, commit subjects),
+                              release-check on PR, release on tag, changing-quota benchmark on main and on demand
 
 Dependency direction, inward only: `headroom` and `aimd` are the domain and import
 nothing from the repository; `state` is the application layer and depends on the
@@ -346,9 +356,9 @@ adapters and depend on the application and the domain, never on each other. `cmd
 
 Tooling: Go 1.26 (pinned in `go.mod`), `google.golang.org/grpc`,
 `prometheus/client_golang`, standard library `httputil.ReverseProxy`, `golangci-lint`,
-`goreleaser` for the v0.1.0 release and a `ghcr.io` image. No web framework.
+`goreleaser` for the releases and a `ghcr.io` image. No web framework.
 
-## Milestones, one pull request each
+## Milestones of v0.1.0, one pull request each
 
 1. Headers and algorithm. Parsers for OpenAI and Anthropic with fixture tests; the
    headroom functions with table tests; `quotaware simulate` that replays a JSONL of
