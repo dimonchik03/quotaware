@@ -79,7 +79,10 @@ func (o *Observer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		sample.HasUsage, sample.Usage = true, *observation.Usage
 	}
 	key := state.Key{Provider: string(provider), Model: observation.Model, Key: observation.Credential}
-	o.store.Observe(key, sample)
+	if !o.store.Observe(key, sample) {
+		writeError(w, http.StatusServiceUnavailable, "bucket limit reached, observation discarded")
+		return
+	}
 	w.WriteHeader(http.StatusAccepted)
 }
 

@@ -4,7 +4,8 @@ Date: 2026-11-01
 
 ## Status
 
-Accepted
+Accepted. ADR 0013 limits the guard on a header ceiling to 429s the
+headers do not explain.
 
 ## Context
 

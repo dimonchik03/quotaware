@@ -48,7 +48,7 @@ other; `cmd/quotaware` wires them.
 4. KEDA asks the scaler for the ceiling of a ScaledObject. For every bucket that
    matches the trigger metadata, the scaler evaluates the domain under the store's
    lock: the headroom formula when a usable quota is known, AIMD otherwise, with
-   the AIMD guard on top while 429s exceed the threshold. Raises are limited to
+   the AIMD guard on top while 429s the headers do not explain exceed the threshold. Raises are limited to
    `maxStepUp` per `stepInterval` from the last change of the bound, the ceiling before
    the drain guard, so open calls moving the drain floor never delay a raise; drops are
    immediate; the drain guard never reports fewer pods than the open calls need.
@@ -64,12 +64,14 @@ other; `cmd/quotaware` wires them.
     pod_rate     = concurrency / latency
     steady_rate  = min(limit_requests, limit_tokens / tokens_per_call) / window
     instant_rate = min(remaining_requests / until_reset, remaining_tokens / tokens_per_call / until_reset)
+                   with each remaining raised by limit * (look_ahead - until_reset) / window
+                   and divided by look_ahead instead once the reset is closer than look_ahead
     ceiling      = floor(min(steady_rate, instant_rate) * safety * share / pod_rate)
 
 bounded by `minReplicas` and `maxReplicas`, raised by at most `maxStepUp` per
 `stepInterval`, never below `ceil(in_flight / concurrency)`, frozen after
 `staleAfter` and handed to AIMD, starting from `defaultCeiling`, after `staleHard`
-(ADR 0002, 0003, 0006).
+(ADR 0002, 0003, 0006, 0013).
 
 ## Without headers
 
@@ -80,8 +82,9 @@ last minute exceeds `aimdThreshold`, then hold for the longest `retry-after` see
 at least one window, and never halve twice on one burst. The window counts only the
 responses that carry the provider's verdict on the quota, 2xx and 429, so a 401 or
 an outage neither dilutes the share nor passes for clean traffic (ADR 0009). The same rule guards a
-header-derived ceiling: a burst of 429s halves it even when the headers still look
-healthy. Both act on the ceiling before the drain guard, and the store keeps that
+header-derived ceiling: a burst of 429s that the headers did not predict halves it
+even when the headers still look healthy. A 429 whose own headers show a spent
+window is counted apart and left to the headroom formula (ADR 0013). Both act on the ceiling before the drain guard, and the store keeps that
 bound next to the reported value (ADR 0006).
 
 The shared trigger also honors an active retry hold on any matching credential.
@@ -110,7 +113,9 @@ buckets and the ceilings it tracks and counts what it refused, and the scaler bo
 the names, models, credentials and request sizes it accepts, so an unauthenticated
 caller cannot grow memory or label cardinality without limit. It can still fill both
 tables and lock new buckets or ScaledObjects out until eviction; the NetworkPolicy is
-the fence against that (ADR 0009).
+the fence against that (ADR 0009). The proxy keeps at most `-max-inflight` calls open
+and waits at most `-upstream-header-timeout` for a provider's headers, so neither a
+worker fleet nor a hung provider can grow it past its memory limit (ADR 0014).
 
 ## What is deliberately not here
 

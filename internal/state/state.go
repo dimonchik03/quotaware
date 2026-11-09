@@ -57,6 +57,17 @@ func (q Quotas) reportedAt(at time.Time) Quotas {
 	return q
 }
 
+func (q Quotas) exhausted(tokensPerCall float64) bool {
+	if spent(q.Requests, 1) {
+		return true
+	}
+	return tokensPerCall > 0 && (spent(q.Tokens, tokensPerCall) || spent(q.ProjectTokens, tokensPerCall))
+}
+
+func spent(window headroom.Quota, perCall float64) bool {
+	return window.Known() && window.Remaining < perCall
+}
+
 func keep(current, update headroom.Quota) headroom.Quota {
 	if update.Known() {
 		return update
@@ -79,9 +90,11 @@ type Sample struct {
 }
 
 type Recent struct {
-	Responses   int64
-	RateLimited int64
-	RetryAfter  time.Duration
+	Responses             int64
+	RateLimited           int64
+	Unexplained           int64
+	RetryAfter            time.Duration
+	UnexplainedRetryAfter time.Duration
 }
 
 type Bucket struct {
@@ -96,6 +109,7 @@ type Bucket struct {
 	Responses        int64
 	Succeeded        int64
 	RateLimited      int64
+	Unexplained      int64
 	Refused          int64
 	Aborted          int64
 	UpstreamErrors   int64
@@ -113,17 +127,19 @@ const (
 )
 
 type bin struct {
-	slot        int64
-	responses   int64
-	rateLimited int64
-	retryAfter  time.Duration
+	slot                  int64
+	responses             int64
+	rateLimited           int64
+	unexplained           int64
+	retryAfter            time.Duration
+	unexplainedRetryAfter time.Duration
 }
 
 type window struct {
 	bins [binCount]bin
 }
 
-func (w *window) record(at time.Time, rateLimited bool, retryAfter time.Duration) {
+func (w *window) record(at time.Time, rateLimited, unexplained bool, retryAfter time.Duration) {
 	slot := at.Unix() / binSeconds
 	b := &w.bins[(slot%binCount+binCount)%binCount]
 	switch {
@@ -137,6 +153,10 @@ func (w *window) record(at time.Time, rateLimited bool, retryAfter time.Duration
 		b.rateLimited++
 		b.retryAfter = max(b.retryAfter, retryAfter)
 	}
+	if unexplained {
+		b.unexplained++
+		b.unexplainedRetryAfter = max(b.unexplainedRetryAfter, retryAfter)
+	}
 }
 
 func (w *window) recent(at time.Time) Recent {
@@ -146,7 +166,9 @@ func (w *window) recent(at time.Time) Recent {
 		if b.slot > latest-binCount && b.slot <= latest {
 			r.Responses += b.responses
 			r.RateLimited += b.rateLimited
+			r.Unexplained += b.unexplained
 			r.RetryAfter = max(r.RetryAfter, b.retryAfter)
+			r.UnexplainedRetryAfter = max(r.UnexplainedRetryAfter, b.unexplainedRetryAfter)
 		}
 	}
 	return r
@@ -210,6 +232,7 @@ type Ceiling struct {
 	Consumer       Consumer
 	Value          int
 	Bound          int
+	Held           int
 	Mode           Mode
 	BoundChangedAt time.Time
 	Seen           time.Time
@@ -237,6 +260,7 @@ type Stats struct {
 	Consumers         int
 	RejectedBuckets   int64
 	RejectedConsumers int64
+	RejectedCalls     int64
 }
 
 type Store struct {
@@ -265,6 +289,12 @@ func (s *Store) Stats() Stats {
 	stats := s.stats
 	stats.Buckets, stats.Consumers = len(s.buckets), len(s.ceilings)
 	return stats
+}
+
+func (s *Store) RejectCall() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.stats.RejectedCalls++
 }
 
 func (s *Store) UpdateCeiling(consumer Consumer, update func(previous Ceiling, known bool) Ceiling) (Ceiling, error) {
@@ -360,14 +390,15 @@ func (s *Store) End(key Key, sample Sample, workload string) {
 	s.record(key, b, sample)
 }
 
-func (s *Store) Observe(key Key, sample Sample) {
+func (s *Store) Observe(key Key, sample Sample) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	b, ok := s.bucket(key)
 	if !ok {
-		return
+		return false
 	}
 	s.record(key, b, sample)
+	return true
 }
 
 func (s *Store) record(key Key, b *Bucket, sample Sample) {
@@ -376,15 +407,20 @@ func (s *Store) record(key Key, b *Bucket, sample Sample) {
 	if succeeded(sample.Status) {
 		b.Succeeded++
 	}
-	if sample.Status == http.StatusTooManyRequests {
+	rateLimited := sample.Status == http.StatusTooManyRequests
+	unexplained := rateLimited && !sample.Quotas.exhausted(b.TokensPerCall)
+	if rateLimited {
 		b.RateLimited++
 		b.RetryAfter = sample.RetryAfter
+	}
+	if unexplained {
+		b.Unexplained++
 	}
 	if refused(sample.Status) {
 		b.Refused++
 	}
 	if carriesLimits(sample.Status) {
-		s.window(key).record(sample.At, sample.Status == http.StatusTooManyRequests, sample.RetryAfter)
+		s.window(key).record(sample.At, rateLimited, unexplained, sample.RetryAfter)
 	}
 	switch sample.Headers {
 	case HeadersPresent:

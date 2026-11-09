@@ -70,7 +70,7 @@ func writeRunAt(t *testing.T, root, name string, runStart time.Time, replicas, r
 	write("queue_length.json", matrixJSON(t, queue))
 	write("multiplier.json", matrixJSON(t, multiplier))
 	write("ceiling.json", matrixJSON(t, ceiling))
-	for _, metric := range []string{"jobs_total", "completed_total", "failed_total", "abandoned_total", "retries_total", "rate_limited_total", "latency_p50", "latency_p95", "backoff_seconds_total"} {
+	for _, metric := range []string{"jobs_total", "completed_total", "failed_total", "abandoned_total", "requeued_total", "retries_total", "rate_limited_total", "latency_mean", "latency_p50", "latency_p95", "backoff_seconds_total"} {
 		write(metric+".json", vectorJSON(t, totals[metric]))
 	}
 }
@@ -88,7 +88,7 @@ func TestReport(t *testing.T) {
 		[][2]float64{{at(0), 0}, {at(60), 10}, {at(120), 400}, {at(180), 300}, {at(240), 0}},
 		multiplier,
 		nil,
-		map[string]float64{"jobs_total": 900, "completed_total": 900, "failed_total": 0, "rate_limited_total": 500, "retries_total": 500, "latency_p50": 12, "latency_p95": 60, "backoff_seconds_total": 840})
+		map[string]float64{"jobs_total": 900, "completed_total": 900, "failed_total": 0, "rate_limited_total": 500, "retries_total": 500, "latency_mean": 20, "latency_p50": 12, "latency_p95": 60, "backoff_seconds_total": 840})
 	later := 1800.0
 	writeRunAt(t, root, "B", start.Add(30*time.Minute),
 		shift([][2]float64{{at(0), 1}, {at(60), 4}, {at(120), 8}, {at(180), 8}, {at(240), 8}}, later),
@@ -96,7 +96,7 @@ func TestReport(t *testing.T) {
 		shift([][2]float64{{at(0), 0}, {at(60), 10}, {at(120), 500}, {at(180), 200}, {at(240), 0}}, later),
 		shift(multiplier, later),
 		shift([][2]float64{{at(0), 1}, {at(60), 8}, {at(120), 8}, {at(180), 8}, {at(240), 8}}, later),
-		map[string]float64{"jobs_total": 900, "completed_total": 900, "failed_total": 0, "rate_limited_total": 0, "retries_total": 0, "latency_p50": 15, "latency_p95": 40, "backoff_seconds_total": 0})
+		map[string]float64{"jobs_total": 900, "completed_total": 900, "failed_total": 0, "rate_limited_total": 0, "retries_total": 0, "latency_mean": 18, "latency_p50": 15, "latency_p95": 40, "backoff_seconds_total": 0})
 	baseline, err := plot.LoadRun(filepath.Join(root, "A"))
 	if err != nil {
 		t.Fatal(err)
@@ -122,7 +122,7 @@ func TestReport(t *testing.T) {
 
 	t.Run("summarises both runs in a table", func(t *testing.T) {
 		table := report.Markdown()
-		for _, want := range []string{"| Metric | A | B |", "| 429 responses | 500 | 0 |", "| Peak replicas | 12 | 8 |", "| Peak retries per minute | 300 | 0 |", "| Idle pod-seconds (in backoff) | 420 | 0 |", "| Job latency p95 | 60.0 s | 40.0 s |", "| Time to drain the burst | 60 s | 60 s |", "| Jobs unaccounted for | 0 | 0 |"} {
+		for _, want := range []string{"| Metric | A | B |", "| 429 responses | 500 | 0 |", "| Peak replicas | 12 | 8 |", "| Peak retries per minute | 300 | 0 |", "| Idle pod-seconds (in backoff) | 420 | 0 |", "| Job latency mean | 20.0 s | 18.0 s |", "| Job latency p95 | 60.0 s | 40.0 s |", "| Time to drain the burst | 60 s | 60 s |", "| Jobs unaccounted for | 0 | 0 |"} {
 			if !strings.Contains(table, want) {
 				t.Fatalf("table lacks %q:\n%s", want, table)
 			}
@@ -142,7 +142,7 @@ func TestReport(t *testing.T) {
 			shift([][2]float64{{at(0), 0}, {at(60), 10}, {at(120), 450}, {at(180), 100}, {at(240), 0}}, 3600),
 			shift(multiplier, 3600),
 			shift([][2]float64{{at(0), 1}, {at(60), 10}, {at(120), 10}, {at(180), 10}, {at(240), 10}}, 3600),
-			map[string]float64{"jobs_total": 900, "completed_total": 880, "failed_total": 0, "abandoned_total": 5, "rate_limited_total": 40, "retries_total": 40, "latency_p50": 13, "latency_p95": 45, "backoff_seconds_total": 10})
+			map[string]float64{"jobs_total": 900, "completed_total": 880, "failed_total": 0, "abandoned_total": 5, "requeued_total": 12, "rate_limited_total": 40, "retries_total": 40, "latency_mean": 19, "latency_p50": 13, "latency_p95": 45, "backoff_seconds_total": 10})
 		if err := os.WriteFile(filepath.Join(root, "C", "run.json"), []byte(`{"start":`+strconvFloat(float64(start.Add(60*time.Minute).Unix()))+`,"end":`+strconvFloat(float64(start.Add(64*time.Minute).Unix()))+`,"label":"safety 1","commit":"abc1234"}`), 0o644); err != nil {
 			t.Fatal(err)
 		}
@@ -157,7 +157,7 @@ func TestReport(t *testing.T) {
 			t.Fatalf("run = %+v, want the commit and the label loaded", third)
 		}
 		table := wide.Markdown()
-		for _, want := range []string{"| Metric | A | B | C (safety 1) |", "| 429 responses | 500 | 0 | 40 |", "| Jobs abandoned on shutdown | 0 | 0 | 5 |", "| Jobs unaccounted for | 0 | 0 | 15 |"} {
+		for _, want := range []string{"| Metric | A | B | C (safety 1) |", "| 429 responses | 500 | 0 | 40 |", "| Jobs abandoned on shutdown | 0 | 0 | 5 |", "| Jobs handed back on shutdown | 0 | 0 | 12 |", "| Jobs unaccounted for | 0 | 0 | 15 |"} {
 			if !strings.Contains(table, want) {
 				t.Fatalf("table lacks %q:\n%s", want, table)
 			}

@@ -13,7 +13,7 @@ import (
 func runDir(t *testing.T, files map[string]string) string {
 	t.Helper()
 	dir := t.TempDir()
-	for _, name := range []string{"jobs_total", "completed_total", "failed_total", "abandoned_total", "rate_limited_total", "retries_total", "backoff_seconds_total", "latency_p50", "latency_p95"} {
+	for _, name := range []string{"jobs_total", "completed_total", "failed_total", "abandoned_total", "requeued_total", "rate_limited_total", "retries_total", "backoff_seconds_total", "latency_mean", "latency_p50", "latency_p95"} {
 		if _, ok := files[name+".json"]; !ok {
 			files[name+".json"] = `{"status":"success","data":{"resultType":"vector","result":[{"value":[1793556000,"0"]}]}}`
 		}
@@ -56,6 +56,21 @@ func TestLoadRun(t *testing.T) {
 			t.Fatalf("err = %v, want a refusal naming the file", err)
 		}
 	})
+
+	for _, total := range []string{"requeued_total", "latency_mean"} {
+		t.Run("refuses a run without "+total, func(t *testing.T) {
+			dir := runDir(t, map[string]string{})
+			if err := os.Remove(filepath.Join(dir, total+".json")); err != nil {
+				t.Fatal(err)
+			}
+
+			_, err := plot.LoadRun(dir)
+
+			if err == nil || !strings.Contains(err.Error(), total) {
+				t.Fatalf("err = %v, want a refusal naming the file", err)
+			}
+		})
+	}
 
 	t.Run("refuses a total made of several series", func(t *testing.T) {
 		dir := runDir(t, map[string]string{

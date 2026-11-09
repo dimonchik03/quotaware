@@ -57,6 +57,7 @@ func runSimulate(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	flags.Float64Var(&cfg.Safety, "safety", cfg.Safety, "fraction of the allowed rate to use")
 	flags.Float64Var(&cfg.Share, "share", cfg.Share, "fraction of the organization quota this workload may use")
 	flags.DurationVar(&cfg.Window, "window", cfg.Window, "rate-limit window of the provider")
+	flags.DurationVar(&cfg.LookAhead, "look-ahead", cfg.LookAhead, "horizon in which a coming reset adds the next window to the instantaneous rate, at most -window; the default shrinks to fit a shorter window")
 	flags.IntVar(&cfg.MinReplicas, "min", cfg.MinReplicas, "minimum replica count")
 	flags.IntVar(&cfg.MaxReplicas, "max", cfg.MaxReplicas, "maximum replica count")
 	flags.IntVar(&cfg.MaxStepUp, "max-step-up", cfg.MaxStepUp, "largest raise of the ceiling per step interval")
@@ -70,6 +71,9 @@ func runSimulate(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			return 0
 		}
 		return 2
+	}
+	if !isSet(flags, "look-ahead") {
+		cfg.LookAhead = min(cfg.LookAhead, cfg.Window)
 	}
 	if err := cfg.Validate(); err != nil {
 		fmt.Fprintf(stderr, "quotaware simulate: %v\n", err)
@@ -85,6 +89,14 @@ func runSimulate(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return 1
 	}
 	return 0
+}
+
+func isSet(flags *flag.FlagSet, name string) bool {
+	set := false
+	flags.Visit(func(f *flag.Flag) {
+		set = set || f.Name == name
+	})
+	return set
 }
 
 func openInput(path string, stdin io.Reader) (io.Reader, error) {

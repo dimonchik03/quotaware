@@ -31,8 +31,10 @@ type Collector struct {
 	inflight          *prometheus.Desc
 	retryAfterSeconds *prometheus.Desc
 	rateLimitedRatio  *prometheus.Desc
+	unexplainedRatio  *prometheus.Desc
 	responses         *prometheus.Desc
 	rateLimited       *prometheus.Desc
+	unexplained       *prometheus.Desc
 	aborted           *prometheus.Desc
 	upstreamErrors    *prometheus.Desc
 	headersMissing    *prometheus.Desc
@@ -43,6 +45,7 @@ type Collector struct {
 	consumers         *prometheus.Desc
 	bucketsRejected   *prometheus.Desc
 	consumersRejected *prometheus.Desc
+	callsRejected     *prometheus.Desc
 }
 
 func NewCollector(store *state.Store, now func() time.Time) *Collector {
@@ -62,8 +65,10 @@ func NewCollector(store *state.Store, now func() time.Time) *Collector {
 		inflight:          describe("inflight", "Calls currently open through the proxy."),
 		retryAfterSeconds: describe("retry_after_seconds", "Retry-After of the last 429."),
 		rateLimitedRatio:  describe("rate_limited_ratio", "Share of 429 among the 2xx and 429 responses of the last minute."),
+		unexplainedRatio:  describe("unexplained_rate_limited_ratio", "Share of unexplained 429 among the 2xx and 429 responses of the last minute; the guard on a header ceiling reacts to it."),
 		responses:         describe("responses_total", "Responses observed from the provider."),
 		rateLimited:       describe("429_total", "Responses with status 429."),
+		unexplained:       describe("unexplained_429_total", "Responses with status 429 that their own rate-limit headers do not explain: no headers, or no spent window the ceiling reads."),
 		aborted:           describe("aborted_total", "Calls the client gave up on, before the provider answered or while reading the answer."),
 		upstreamErrors:    describe("upstream_errors_total", "Calls the upstream failed: no response at all, or a body that broke mid-stream."),
 		headersMissing:    describe("headers_missing_total", "Responses that should carry rate-limit headers but did not."),
@@ -74,6 +79,7 @@ func NewCollector(store *state.Store, now func() time.Time) *Collector {
 		consumers:         prometheus.NewDesc("quotaware_scaled_objects", "Ceilings currently tracked, one per scaled object, trigger and credential.", nil, nil),
 		bucketsRejected:   prometheus.NewDesc("quotaware_buckets_rejected_total", "New bucket admissions refused because the bucket limit was reached.", nil, nil),
 		consumersRejected: prometheus.NewDesc("quotaware_scaled_objects_rejected_total", "Ceiling evaluations refused because the ceiling limit was reached.", nil, nil),
+		callsRejected:     prometheus.NewDesc("quotaware_calls_rejected_total", "Proxied calls answered 503 because the in-flight limit was reached.", nil, nil),
 	}
 }
 
@@ -126,9 +132,11 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 		gauge(c.latencySeconds, b.Latency.Seconds())
 		gauge(c.inflight, float64(b.InFlight))
 		gauge(c.retryAfterSeconds, b.RetryAfter.Seconds())
-		gauge(c.rateLimitedRatio, ratio(b.Recent))
+		gauge(c.rateLimitedRatio, ratio(b.Recent.Responses, b.Recent.RateLimited))
+		gauge(c.unexplainedRatio, ratio(b.Recent.Responses, b.Recent.Unexplained))
 		counter(c.responses, b.Responses)
 		counter(c.rateLimited, b.RateLimited)
+		counter(c.unexplained, b.Unexplained)
 		counter(c.aborted, b.Aborted)
 		counter(c.upstreamErrors, b.UpstreamErrors)
 		counter(c.headersMissing, b.HeadersMissing)
@@ -145,19 +153,20 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 	ch <- prometheus.MustNewConstMetric(c.consumers, prometheus.GaugeValue, float64(stats.Consumers))
 	ch <- prometheus.MustNewConstMetric(c.bucketsRejected, prometheus.CounterValue, float64(stats.RejectedBuckets))
 	ch <- prometheus.MustNewConstMetric(c.consumersRejected, prometheus.CounterValue, float64(stats.RejectedConsumers))
+	ch <- prometheus.MustNewConstMetric(c.callsRejected, prometheus.CounterValue, float64(stats.RejectedCalls))
 }
 
 func (c *Collector) descs() []*prometheus.Desc {
 	return []*prometheus.Desc{
 		c.limitRequests, c.remainingRequests, c.limitTokens, c.remainingTokens, c.resetSeconds,
-		c.tokensPerCall, c.latencySeconds, c.inflight, c.retryAfterSeconds, c.rateLimitedRatio,
-		c.responses, c.rateLimited, c.aborted, c.upstreamErrors, c.headersMissing, c.headersMalformed, c.usageMissing,
-		c.ceiling, c.buckets, c.consumers, c.bucketsRejected, c.consumersRejected,
+		c.tokensPerCall, c.latencySeconds, c.inflight, c.retryAfterSeconds, c.rateLimitedRatio, c.unexplainedRatio,
+		c.responses, c.rateLimited, c.unexplained, c.aborted, c.upstreamErrors, c.headersMissing, c.headersMalformed, c.usageMissing,
+		c.ceiling, c.buckets, c.consumers, c.bucketsRejected, c.consumersRejected, c.callsRejected,
 	}
 }
 
-func ratio(recent state.Recent) float64 {
-	return aimd.Signal{Responses: recent.Responses, RateLimited: recent.RateLimited}.Ratio()
+func ratio(responses, rateLimited int64) float64 {
+	return aimd.Signal{Responses: responses, RateLimited: rateLimited}.Ratio()
 }
 
 func secondsUntil(q headroom.Quota, now time.Time) float64 {

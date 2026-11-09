@@ -12,44 +12,64 @@ or report observations with the Go and Python collectors.
 
 ## When the provider changes its quota
 
-We compared queue-only scaling, a static maximum of ten workers and Quotaware on a
-kind cluster on GitHub-hosted Ubuntu. Each run received 1,800 jobs. The fake provider
-allowed up to 600 requests in minute one, 180 in minute two and 600 per minute after that. Ten
-workers could consume the full nominal quota. The experiment asks what happens when
-that same cap outlasts the capacity it was chosen for.
+We compared three ways to scale the same LLM workers on a kind cluster on a
+GitHub-hosted Ubuntu runner: KEDA's queue-depth trigger alone, the same trigger
+with a static maximum of ten workers, and the same trigger capped by Quotaware.
+Each trial received 3,960 jobs over six minutes, 10% more than the nominal quota.
+The fake provider allowed 600 requests per minute, cut that to 180 for four minutes
+after a two-minute warm-up, then restored 600. Ten workers consume the full 600, so
+the static cap is the setting a team would pick if it knew the quota in advance.
 
-![Static and adaptive worker counts while the provider quota changes](bench/results/2026-11-05-changing/pass-1/static-vs-adaptive.svg)
+![Static and adaptive worker counts while the provider quota changes](bench/results/2026-11-06-changing/pass-1/static-vs-adaptive.svg)
 
-Each cell shows pass 1 / pass 2. The second pass reverses A/B/C to C/B/A.
-Quotaware uses `safety: "1"` and `maxStepUp: "4"`. The default safety setting is
-0.85. All arms use two concurrent provider calls per worker.
+Three passes ran the arms in the orders A/B/C, C/B/A and B/C/A; each cell shows the
+lowest and the highest value. Quotaware uses `safety: "1"` and `maxStepUp: "4"`.
+The default safety setting is 0.85. All arms use two concurrent provider calls per
+worker.
 
 | Metric | Queue only | Static cap of 10 | Quotaware |
 |---|---|---|---|
-| Jobs completed, out of 1,800 | 1,800 / 1,800 | 1,800 / 1,800 | 1,784 / 1,782 |
-| Jobs abandoned on shutdown | 0 / 0 | 0 / 0 | 16 / 18 |
-| HTTP 429 responses | 158 / 150 | 24 / 24 | 18 / 20 |
-| Worker pod-seconds | 4,875 / 5,280 | 2,385 / 2,310 | 2,032.5 / 2,295 |
-| Job latency p95 | 92.1 s / 92.1 s | 136.5 s / 136.5 s | 197.9 s / 206.9 s |
-| Time from end of load phase to empty queue | 75 s / 75 s | 105 s / 105 s | 150 s / 165 s |
+| Jobs completed, out of 3,960 | 3,960 | 3,960 | 3,960 |
+| HTTP 429 responses | 442 | 88–92 | 24–26 |
+| Worker pod-seconds | 13,598–13,680 | 5,738–5,805 | 4,215–4,402 |
+| Pod-seconds of scheduled retry backoff | 9,602–9,641 | 1,676–1,678 | 416–424 |
+| Mean job latency | 113.2–114.5 s | 130.3–130.7 s | 156.0–161.6 s |
+| Job latency p95 | 199.8–200.7 s | 213.2–213.4 s | 238.2–243.4 s |
+| Time from end of load phase to empty queue | 195 s | 210 s | 240 s |
 
-Quotaware follows the quota reduction and uses about 8% fewer worker pod-seconds
-than the static cap across these two trials. Its p95 is one histogram bucket higher,
-and it completes fewer jobs. The static cap finishes this schedule sooner and
-preserves every job.
+In every pass Quotaware completed every job with 23–27% fewer worker pod-seconds
+and about 72% fewer 429s than the static cap, and with 68–69% fewer pod-seconds and
+about 94% fewer 429s than the queue trigger alone. It paid in latency: the mean is
+19–24% and the p95 12–14% above the static cap, and the queue empties 30 seconds
+later.
 
-The benchmark worker uses a destructive Redis pop and abandons a job if shutdown
-interrupts retry backoff. Open-call tracking cannot protect work between HTTP
-attempts. Production workers need queue leases or requeue-on-shutdown behavior.
-The latency histogram includes completed jobs only.
+Quotaware's backlog falls further behind the static cap's at three moments, each
+adding 60 to 130 queued jobs. At the start the ceiling climbs 1, 5, 9, 10 in 15-second steps while
+the static arm scales straight to ten. When the first reduced minute is spent, its
+reset is still more than 30 seconds away, beyond the default `lookAhead`, so
+Quotaware drops to one worker and is back at three within the next minute. When the quota returns to 600,
+Quotaware learns it from the first response of the new window and needs about half a
+minute to reach ten workers, which the static cap already runs. The static cap wins
+on latency because it was chosen for this provider's quota; Quotaware stays within
+15% at p95 without being told the quota.
 
-Run `make bench-changing` to reproduce the six trials. Each run starts fresh
-provider windows, workers and scaler state. The published measurements came from
-[commit 4b602e1](https://github.com/dimonchik03/quotaware/commit/4b602e16c46a0eefed44002e16dbc223820ca2a1)
-on one GitHub-hosted Ubuntu runner.
-[Raw data and both passes](bench/results/2026-11-05-changing/) ·
-[Method and earlier fixed-quota experiment](docs/benchmark.md) ·
-[CI execution](https://github.com/dimonchik03/quotaware/actions/runs/41928303907)
+An earlier trial on 2026-11-05 lost jobs and saved only 8% of pod-seconds: the AIMD
+guard held the ceiling at one worker past the reset of a spent window, and the bench
+worker dropped jobs on scale-down.
+[ADR 0013](docs/adr/0013-look-past-a-reset-and-guard-unexplained-429s.md) ignores
+429s that the headers explain and counts the refill of a reset less than `lookAhead`
+away; the worker now hands a job back to the queue when shutdown interrupts its retry
+wait, 18 per Quotaware trial. A crashed worker still loses its job, so
+production workers need queue leases.
+
+Each run starts fresh provider windows, workers and scaler state. The published
+measurements came from
+[commit 6e3723b](https://github.com/dimonchik03/quotaware/commit/6e3723bf8bfbcf9d10568354d85e1e3e04aeb8b4)
+on one GitHub-hosted Ubuntu runner; check it out and run `make bench-changing` to
+reproduce them.
+[Raw data and all three passes](bench/results/2026-11-06-changing/) ·
+[Method, the 2026-11-05 trial and the fixed-quota experiment](docs/benchmark.md) ·
+[CI execution](https://github.com/dimonchik03/quotaware/actions/runs/42232333742)
 
 ## How it works
 
@@ -70,11 +90,11 @@ algorithm and prints the replica ceiling it would report for each one:
     at                    ceiling  reason    allowed_rate  pod_rate
     2026-11-01T18:00:00Z  4        headroom  8.36          2.00
     2026-11-01T18:00:20Z  3        headroom  7.44          2.00
-    2026-11-01T18:00:55Z  3        headroom  6.80          2.00
-    2026-11-01T18:00:59Z  3        drain     0.00          2.00
-    2026-11-01T18:01:05Z  2        drain     8.50          2.00
-    2026-11-01T18:01:25Z  3        step_up   8.50          2.00
-    2026-11-01T18:04:00Z  3        frozen    0.00          0.00
+    2026-11-01T18:00:55Z  4        headroom  8.22          2.00
+    2026-11-01T18:00:59Z  4        headroom  8.22          2.00
+    2026-11-01T18:01:05Z  4        headroom  8.50          2.00
+    2026-11-01T18:01:25Z  4        headroom  8.50          2.00
+    2026-11-01T18:04:00Z  4        frozen    0.00          0.00
 
 Each input line is one JSON object describing a bucket at a point in time:
 
@@ -94,11 +114,13 @@ the headroom formula, a clamp to `-min` or `-max`, the step-up rule (a raise wai
 `-step-interval` after the last change and then climbs by at most `-max-step-up`),
 the drain guard that keeps pods alive for calls in flight, a frozen ceiling for
 stale observations, or the default when nothing usable was observed. In the run
-above the quota is spent at 18:00:59; after the window resets the raise waits out
-the step interval, the drain guard keeps two pods for the eight open calls, and at
-18:01:25 the bound climbs from 1 to 3. `simulate` replays the headroom rules the scaler applies,
-without the AIMD guard, which needs the 429 history of a live bucket. Run with
-`-h` for every knob.
+above the window is almost spent at 18:00:55 and empty at 18:00:59. Both lines are
+within `-look-ahead` (30 s) of the reset at 18:01:00, so the rate counts the refill
+the reset brings and the ceiling stays at 4. With `-look-ahead 0s` the bound drops
+to 1 at 18:00:59, the drain guard keeps three pods for the twelve open calls, and
+the raise after the reset waits out the step interval. `simulate` replays the
+headroom rules the scaler applies, without the AIMD guard, which needs the 429
+history of a live bucket. Run with `-h` for every knob.
 
 ## Run the proxy
 
@@ -116,7 +138,12 @@ port serves `/metrics`, `/healthz` and `/v1/observe`; the last one needs a token
 below). A client that stalls while sending a request body gets 408 after
 `-read-body-timeout` (30 s); the buffered body is handed to the transport as
 replayable, so a pooled connection found dead before the request is written is
-retried instead of answered with 502.
+retried instead of answered with 502. A provider that accepts the connection but
+sends no response headers within `-upstream-header-timeout` (10 min, the SDKs' own
+default), or whose dial or TLS handshake times out, gets 504 and counts as an
+upstream error, so a hung provider cannot park calls and their buffers for good. At most `-max-inflight` (256) proxied calls are
+open at once; a call beyond that is answered 503 before its body is read and
+counted in `quotaware_calls_rejected_total`.
 
 To see it work without a provider account, `docker compose up --build` starts the
 proxy in front of `bench/fakeprovider`, a provider stand-in with real rate-limit
@@ -270,16 +297,19 @@ forwarding. Quota stays shared, while an empty queue retains workers only for ca
 from its own deployment. Without a label, matching open calls from every workload
 count toward the drain floor. The scaler needs at least two ceiling slots, one
 combined slot per trigger plus one for each accepted credential it observes.
-The remaining knobs (`credential`, `quotaScope`, `safety`, `share`,
+The remaining knobs (`credential`, `quotaScope`, `safety`, `share`, `lookAhead`,
 `maxStepUp`, `stepInterval`, `defaultCeiling`, `minReplicas`, `staleAfter`,
-`staleHard`, `window`) and their defaults are listed in `docs/SPEC.md`. A [Grafana dashboard](deploy/grafana/quotaware.json) is included.
+`staleHard`, `window`) and their defaults are listed in `docs/SPEC.md`. A key outside
+that list, apart from `scalerAddress` and the TLS settings KEDA reads for itself, is
+answered with InvalidArgument, so a misspelt knob cannot run on its default unnoticed. A [Grafana dashboard](deploy/grafana/quotaware.json) is included.
 
 ## Without the proxy hop
 
 Workers that cannot or should not route through the proxy can report what they
 see themselves. Both collectors post the same observation to `POST /v1/observe` on
 the admin port and never block or fail the call they observe: a full queue drops, a
-failed delivery is counted, an error inside the hook is counted. quotaware refuses
+failed delivery is counted, an error inside the hook is counted. An observation for a
+bucket the `-max-buckets` limit refuses is answered 503 and counts as a failed delivery. quotaware refuses
 to start without `-observe-token` (or `QUOTAWARE_OBSERVE_TOKEN`) unless
 `-observe-insecure` is passed, because anyone who can post an observation can move
 the ceiling; give the collectors the same token.
@@ -338,8 +368,12 @@ multiply by `aimdDecrease` (0.5) when more than `aimdThreshold` (2 %) of the las
 minute's accepted responses, 2xx and 429, were 429, then hold for the longest
 `retry-after` seen, at least one minute and at most `staleHard`, so one burst is
 halved once; a `retry-after` beyond a day counts as malformed. The same rule guards a header-derived
-ceiling, so a burst of 429s halves it even while the headers still look healthy.
-`quotaware_rate_limited_ratio` shows the share the rule reacts to (ADR 0006).
+ceiling against 429s the headers did not predict, such as acceleration limits: a
+429 whose own headers show a spent request window, or once tokens per call are known
+a spent token window, is already in the headroom formula and does not count, for the
+share or for the length of the hold. `quotaware_rate_limited_ratio` shows the share of every 429, and
+`quotaware_unexplained_rate_limited_ratio` the share the guard reacts to (ADR 0006,
+ADR 0013).
 
 ## Watch it on kind
 
@@ -353,9 +387,11 @@ pod, backing off on `retry-after`) scaled by the two-trigger ScaledObject in
 requests per minute in one window per model that every key shares; 200 queued jobs
 keep demand at 20. After 90 seconds a job with another credential bursts the shared
 quota for a minute. The transcript below was recorded on 2026-11-01, before v0.1.0,
-and keeps only the lines where something changed; since then the step interval counts
-from the last change of the bound and limits the combined value, so a run today steps
-up a little later after the drop:
+and keeps only the lines where something changed. Since then the step interval counts
+from the last change of the bound and limits the combined value, and ADR 0013 lets the
+ceiling count the refill of a reset less than `lookAhead` away and stops the guard
+from halving it on 429s that show the spent window, so a run today climbs back
+earlier; it has not been re-recorded:
 
     time      replicas  desired  ceiling (quotaware log)
     21:40:33  -         -        0 -> 8 (headroom)
@@ -372,8 +408,8 @@ up a little later after the drop:
 Eight replicas is what 600 requests per minute feeds at about one call per second per
 pod with the safety factor applied. Once the burst has spent the shared window, every
 call gets a 429 until the reset, the workers' included: the ceiling follows the
-remaining quota down, so fewer worker pods sit in backoff, and after the window resets
-it steps back up by `maxStepUp` per interval. The log shows the last ceiling change of
+remaining quota down, so fewer worker pods sit in backoff, and as the reset approaches
+it steps back up by at most `maxStepUp` per interval. The log shows the last ceiling change of
 each 15 s line only. The demo also prints the workers' 429s per line; this recording
 predates a fix to that count, so the column is left out.
 
@@ -397,6 +433,9 @@ prints the build version.
 | `-max-request-bytes` | 8 MiB | largest request body accepted |
 | `-max-capture-bytes` | 4 MiB | largest response body read for usage |
 | `-read-body-timeout` | `30s` | time a client may take to send the request body |
+| `-upstream-header-timeout` | `10m` | time the provider may take to answer with headers before the call gets 504 |
+| `-max-inflight` | `256` | proxied calls open at once; more get 503 |
+| `-drain-timeout` | `10s` | time open calls get to finish after a shutdown signal before they are closed |
 | `-redis-address` (`all`) | none | Redis addresses single-trigger mode may read |
 | `-push-interval` (`all`) | `5s` | how often `StreamIsActive` re-checks a queue |
 
@@ -410,7 +449,8 @@ prints the build version.
   most restrictive one; quotaware exports all of them but bounds the ceiling by
   `tokens-*` against input plus output per call, which is conservative when the output
   limit binds.
-- The instant term reads `remaining / time to reset` as if the window were fixed.
+- The instant term reads `remaining / time to reset` as if the window were fixed,
+  and within `lookAhead` of a reset it assumes the next window has the same limit.
   Both providers refill continuously, so near the limit the ceiling is lower and
   moves more than the refill rate alone would justify.
 - The proxy and the Go collector read usage from identity and gzip bodies only; a
@@ -421,13 +461,18 @@ prints the build version.
   and Brotli when bounded decoders are installed. A larger body or unsupported
   encoding still delivers headers and status.
 - Each open proxied call may buffer up to `-max-request-bytes` of request and
-  `-max-capture-bytes` of response, 12 MiB with the defaults, so size the chart's
-  256Mi memory limit for the calls you expect in flight or lower the two flags.
+  `-max-capture-bytes` of response, 12 MiB with the defaults, and `-max-inflight`
+  (256) bounds how many are open, so the worst case is their product; the chart's
+  256Mi memory limit fits typical call sizes, not that worst case. Lower the three
+  flags together to bound it.
 - The proxy and the scaler run in one pod with in-memory state: a restart starts
   every bucket afresh, the proxy is in the path of every call it carries, and the
   chart replaces the pod on every upgrade (`strategy: Recreate`), so an upgrade
-  interrupts proxied calls until the new pod is ready. Run collectors instead of the
-  proxy where that matters.
+  interrupts proxied calls until the new pod is ready. On a shutdown signal the proxy
+  stops accepting calls, gives the open ones `-drain-timeout` (10 s) to finish, then
+  closes them, logs that it did and exits cleanly; keep the pod's termination grace
+  period (30 s by default) above the drain. Run collectors instead of the proxy where
+  that matters.
 - Only OpenAI- and Anthropic-shaped APIs are understood: the proxy serves its two
   paths at the root of an origin, and the scaler and `/v1/observe` accept only the
   openai and anthropic providers. Gemini's OpenAI-compatible endpoint sits under a
@@ -445,13 +490,20 @@ v0.3.0 is the latest published release. It includes [Linux and macOS binaries](h
 image `ghcr.io/dimonchik03/quotaware:0.3.0`, the v0.x scope of `docs/SPEC.md`
 implemented, and the two-trigger mode benchmarked against a fixed-window fake
 provider. This checkout adds shared retry holds, workload-scoped drain, bounded
-collector capture and the changing-quota experiment. Over v0.2.0 it dates quotas by when their headers arrived, limits raises of
+collector capture, the changing-quota experiment, a look-ahead past an imminent
+reset and a guard that ignores 429s the headers explain (ADR 0013); set
+`lookAhead: "0s"` for the earlier instantaneous rate. It also keeps the halved value
+through a guard hold instead of the lowest value the hold saw, holds only for the
+`retry-after` of unexplained 429s, rejects trigger metadata keys it does not know
+(remove a misspelt knob before upgrading), answers 503 for an observation the bucket
+limit discards, bounds the proxy's open calls and its wait for a provider's headers,
+and makes the shutdown drain a flag (ADR 0014). Over v0.2.0 it dates quotas by when their headers arrived, limits raises of
 the value KEDA receives as well as each credential's, bounds the trigger metadata and
 the settings, caps `retry-after`, hands buckets without a computable rate to AIMD,
 bounds what the Python collector reads, hardens the chart's arguments, and builds
 with Go 1.26.10. v0.2.0 added the network defaults of ADR 0008 and 0009, the store
 limits, async hooks for the Python collector, one shared quota across credentials
-(ADR 0010) and the three-run benchmark above.
+(ADR 0010) and the three-run fixed-quota benchmark in `docs/benchmark.md`.
 
 Upgrading from v0.2.0: the scaler now refuses trigger metadata it used to accept, so
 check each ScaledObject: `bucket` must name openai or anthropic and a model of at

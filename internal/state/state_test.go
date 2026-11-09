@@ -690,3 +690,88 @@ func TestFinishingACallReleasesOnlyItsWorkload(t *testing.T) {
 		})
 	}
 }
+
+func rateLimited(quotas state.Quotas) state.Sample {
+	sample := success(0, 50*time.Millisecond)
+	sample.Status, sample.HasUsage, sample.Quotas = http.StatusTooManyRequests, false, quotas
+	sample.RetryAfter, sample.HeadersAt, sample.At = 30*time.Second, now.Add(time.Second), now.Add(time.Second)
+	return sample
+}
+
+func TestASpentTokenWindowExplainsNoRateLimitBeforeTokensPerCallAreKnown(t *testing.T) {
+	spentTokens := quotas()
+	spentTokens.Tokens.Remaining = 0
+	s := store(t, 0.5)
+
+	s.End(key, rateLimited(spentTokens), "")
+
+	b := bucketAt(t, s, now.Add(2*time.Second))
+	if b.TokensPerCall != 0 || b.Unexplained != 1 {
+		t.Fatalf("tokens per call = %v, unexplained = %d, want the 429 unexplained while the ceiling cannot read the token window", b.TokensPerCall, b.Unexplained)
+	}
+}
+
+func TestUnexplainedRateLimits(t *testing.T) {
+	spentRequests := quotas()
+	spentRequests.Requests.Remaining = 0
+	spentTokens := quotas()
+	spentTokens.Tokens.Remaining = 400
+	spentProjectTokens := quotas()
+	spentProjectTokens.ProjectTokens = headroom.Quota{Limit: 300000, Remaining: 0, ResetAt: now.Add(time.Minute)}
+	spentInputTokens := quotas()
+	spentInputTokens.InputTokens = headroom.Quota{Limit: 400000, Remaining: 0, ResetAt: now.Add(time.Minute)}
+	cases := []struct {
+		name            string
+		quotas          state.Quotas
+		wantUnexplained int64
+	}{
+		{"a 429 whose headers show no request remaining is explained", spentRequests, 0},
+		{"a 429 whose headers show fewer tokens than a call uses is explained", spentTokens, 0},
+		{"a 429 whose project window is spent is explained", spentProjectTokens, 0},
+		{"a 429 whose headers still show quota for another call is unexplained", quotas(), 1},
+		{"a 429 without headers is unexplained", state.Quotas{}, 1},
+		{"a 429 whose only spent window is one the ceiling does not read is unexplained", spentInputTokens, 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := store(t, 0.5)
+			s.End(key, success(1000, 2*time.Second), "")
+
+			s.End(key, rateLimited(tc.quotas), "")
+
+			b := bucketAt(t, s, now.Add(2*time.Second))
+			if b.RateLimited != 1 || b.Unexplained != tc.wantUnexplained {
+				t.Fatalf("rate limited = %d, unexplained = %d, want 1 and %d", b.RateLimited, b.Unexplained, tc.wantUnexplained)
+			}
+			if b.Recent.RateLimited != 1 || b.Recent.Unexplained != tc.wantUnexplained {
+				t.Fatalf("recent = %+v, want 1 limited and %d unexplained in the window", b.Recent, tc.wantUnexplained)
+			}
+		})
+	}
+}
+
+func TestRetryAfterOfTheUnexplainedShare(t *testing.T) {
+	explained := quotas()
+	explained.Requests.Remaining = 0
+	cases := []struct {
+		name            string
+		quotas          state.Quotas
+		wantUnexplained time.Duration
+	}{
+		{"the retry-after of an explained 429 stays out of the unexplained share", explained, 0},
+		{"the retry-after of an unexplained 429 counts for the unexplained share", quotas(), 30 * time.Second},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := store(t, 0.5)
+			s.End(key, success(1000, 2*time.Second), "")
+
+			s.End(key, rateLimited(tc.quotas), "")
+
+			b := bucketAt(t, s, now.Add(2*time.Second))
+			if b.Recent.RetryAfter != 30*time.Second || b.Recent.UnexplainedRetryAfter != tc.wantUnexplained {
+				t.Fatalf("recent = %+v, want retry-after 30s for the window and %v for the unexplained share", b.Recent, tc.wantUnexplained)
+			}
+		})
+	}
+}

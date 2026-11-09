@@ -202,3 +202,27 @@ func composeProvider(t *testing.T, action string) {
 		t.Fatalf("compose %s fakeprovider: %v: %s", action, err, out)
 	}
 }
+
+func TestAJobHandedBackIsPoppedNext(t *testing.T) {
+	waitUntilReady(t, env("E2E_PROXY_URL", "http://localhost:18080"), env("E2E_ADMIN_URL", "http://localhost:19100"))
+	jobs := queue.NewRedis(env("E2E_REDIS_ADDRESS", "localhost:16379"))
+	defer func() { _ = jobs.Close() }()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := jobs.Clear(ctx, "e2e-requeue"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = jobs.Clear(context.Background(), "e2e-requeue") })
+	if err := jobs.Push(ctx, "e2e-requeue", "first", "second"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := jobs.Requeue(ctx, "e2e-requeue", "handed back"); err != nil {
+		t.Fatal(err)
+	}
+
+	popped, err := jobs.Pop(ctx, "e2e-requeue", time.Second)
+	if err != nil || popped != "handed back" {
+		t.Fatalf("popped %q, err = %v, want the handed-back job before the waiting ones", popped, err)
+	}
+}

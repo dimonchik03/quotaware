@@ -8,15 +8,24 @@ phases="${BENCH_PHASES:-half:3m:0.5,full:3m:1,burst:4m:3,idle:4m:0}"
 results="${BENCH_RESULTS:-bench/results/$(date +%Y-%m-%d)}"
 profile="${BENCH_PROFILE:-fixed}"
 if [[ "$profile" == changing ]]; then
-  phases="${BENCH_PHASES:-load:2m:1.5,idle:1m:0}"
+  phases="${BENCH_PHASES:-load:6m:1.1,idle:1m:0}"
   results="${BENCH_RESULTS:-bench/results/$(date +%Y-%m-%d)-changing}"
-  rpm_windows=600,180,600
+  rpm_windows="${BENCH_RPM_WINDOWS:-600,600,180,180,180,180,600}"
+  passes="${BENCH_PASSES:-3}"
   if [[ -e "$results" ]]; then
     echo "choose a new BENCH_RESULTS directory to preserve $results" >&2
     exit 1
   fi
   if [[ ! "$phases" =~ ^[[:alnum:]_.:,+-]+$ ]]; then
     echo "invalid changing-quota phase schedule" >&2
+    exit 1
+  fi
+  if [[ ! "$rpm_windows" =~ ^[1-9][0-9]*(,[1-9][0-9]*)+$ ]]; then
+    echo "BENCH_RPM_WINDOWS must list at least two positive RPM limits, comma separated" >&2
+    exit 1
+  fi
+  if [[ ! "$passes" =~ ^[1-9][0-9]*$ ]]; then
+    echo "BENCH_PASSES must be a positive integer" >&2
     exit 1
   fi
 elif [[ "$profile" != fixed ]]; then
@@ -123,9 +132,11 @@ export_series() {
   instant completed_total 'sum(max_over_time(worker_jobs_completed_total['"$window"'s]))'
   instant failed_total 'sum(max_over_time(worker_jobs_failed_total['"$window"'s]))'
   instant abandoned_total 'sum(max_over_time(worker_jobs_abandoned_total['"$window"'s]))'
+  instant requeued_total 'sum(max_over_time(worker_jobs_requeued_total['"$window"'s]))'
   instant rate_limited_total 'sum(max_over_time(worker_calls_total{status="429"}['"$window"'s]))'
   instant retries_total 'sum(max_over_time(worker_retries_total['"$window"'s]))'
   instant backoff_seconds_total 'sum(max_over_time(worker_backoff_seconds_total['"$window"'s]))'
+  instant latency_mean 'sum(max_over_time(worker_job_latency_seconds_sum['"$window"'s])) / sum(max_over_time(worker_job_latency_seconds_count['"$window"'s]))'
   instant latency_p50 'histogram_quantile(0.5, sum(max_over_time(worker_job_latency_seconds_bucket['"$window"'s])) by (le))'
   instant latency_p95 'histogram_quantile(0.95, sum(max_over_time(worker_job_latency_seconds_bucket['"$window"'s])) by (le))'
   if [[ "$profile" == changing ]]; then
@@ -168,9 +179,9 @@ run_variant() {
 }
 
 if [[ "$profile" == changing ]]; then
-  for pass in 1 2; do
-    order=(A B C)
-    if [[ "$pass" == 2 ]]; then order=(C B A); fi
+  orders=("A B C" "C B A" "B C A")
+  for pass in $(seq 1 "$passes"); do
+    read -ra order <<<"${orders[$(( (pass - 1) % ${#orders[@]} ))]}"
     for arm in "${order[@]}"; do
       case "$arm" in
         A) manifest=scaledobject-a; label="queue only" ;;

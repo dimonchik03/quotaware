@@ -3,6 +3,7 @@ name: changing-quota benchmark
 on:
   workflow_dispatch:
   push:
+    branches: [main]
     paths:
       - bench/**
       - '!bench/results/**'
@@ -24,8 +25,8 @@ concurrency:
 
 jobs:
   compare:
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -43,7 +44,7 @@ jobs:
           curl -fsSLo "$RUNNER_TEMP/kind-linux-amd64.sha256sum" https://github.com/kubernetes-sigs/kind/releases/download/v0.33.0/kind-linux-amd64.sha256sum
           (cd "$RUNNER_TEMP" && sha256sum -c kind-linux-amd64.sha256sum)
           sudo install -m 0755 "$RUNNER_TEMP/kind-linux-amd64" /usr/local/bin/kind
-      - name: compare queue-only, static and adaptive policies twice
+      - name: compare queue-only, static and adaptive policies three times
         env:
           BENCH_RESULTS: ${{ runner.temp }}/changing-quota-results
         run: make bench-changing

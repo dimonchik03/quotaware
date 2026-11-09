@@ -21,11 +21,11 @@ func TestSimulate(t *testing.T) {
 			"at\tceiling\treason\tallowed_rate\tpod_rate",
 			"2026-11-01T18:00:00Z\t4\theadroom\t8.36\t2.00",
 			"2026-11-01T18:00:20Z\t3\theadroom\t7.44\t2.00",
-			"2026-11-01T18:00:55Z\t3\theadroom\t6.80\t2.00",
-			"2026-11-01T18:00:59Z\t3\tdrain\t0.00\t2.00",
-			"2026-11-01T18:01:05Z\t2\tdrain\t8.50\t2.00",
-			"2026-11-01T18:01:25Z\t3\tstep_up\t8.50\t2.00",
-			"2026-11-01T18:04:00Z\t3\tfrozen\t0.00\t0.00",
+			"2026-11-01T18:00:55Z\t4\theadroom\t8.22\t2.00",
+			"2026-11-01T18:00:59Z\t4\theadroom\t8.22\t2.00",
+			"2026-11-01T18:01:05Z\t4\theadroom\t8.50\t2.00",
+			"2026-11-01T18:01:25Z\t4\theadroom\t8.50\t2.00",
+			"2026-11-01T18:04:00Z\t4\tfrozen\t0.00\t0.00",
 		}
 		if len(lines) != len(want) {
 			t.Fatalf("got %d lines, want %d:\n%s", len(lines), len(want), stdout.String())
@@ -34,6 +34,37 @@ func TestSimulate(t *testing.T) {
 			if lines[i] != want[i] {
 				t.Fatalf("line %d = %q, want %q", i+1, lines[i], want[i])
 			}
+		}
+	})
+
+	t.Run("without a look-ahead a spent window drops the bound to the drain floor until the reset", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+
+		code := run([]string{"simulate", "-concurrency", "4", "-max", "40", "-look-ahead", "0s", "-input", "testdata/observations.jsonl"}, strings.NewReader(""), &stdout, &stderr)
+
+		lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
+		if code != 0 || len(lines) != 8 || lines[4] != "2026-11-01T18:00:59Z\t3\tdrain\t0.00\t2.00" || lines[5] != "2026-11-01T18:01:05Z\t2\tdrain\t8.50\t2.00" {
+			t.Fatalf("exit = %d, stdout = %q, want the spent window held at the drain floor and the raise delayed past the reset", code, stdout.String())
+		}
+	})
+
+	t.Run("fits the default look-ahead into a window shorter than it", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+
+		code := run([]string{"simulate", "-concurrency", "4", "-window", "20s", "-input", "testdata/observations.jsonl"}, strings.NewReader(""), &stdout, &stderr)
+
+		if code != 0 || stderr.Len() != 0 {
+			t.Fatalf("exit = %d, stderr = %q, want the simulation to run with a 20s look-ahead", code, stderr.String())
+		}
+	})
+
+	t.Run("refuses a look-ahead set beyond the window", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+
+		code := run([]string{"simulate", "-window", "20s", "-look-ahead", "30s", "-input", "testdata/observations.jsonl"}, strings.NewReader(""), &stdout, &stderr)
+
+		if code != 2 || !strings.Contains(stderr.String(), "look ahead") {
+			t.Fatalf("exit = %d, stderr = %q, want a refusal naming the look-ahead", code, stderr.String())
 		}
 	})
 

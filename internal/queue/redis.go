@@ -28,6 +28,10 @@ func (r *Redis) Push(ctx context.Context, name string, payloads ...string) error
 	return r.client.LPush(ctx, name, values...).Err()
 }
 
+func (r *Redis) Requeue(ctx context.Context, name, payload string) error {
+	return r.client.RPush(ctx, name, payload).Err()
+}
+
 func (r *Redis) Pop(ctx context.Context, name string, timeout time.Duration) (string, error) {
 	result, err := r.client.BRPop(ctx, timeout, name).Result()
 	if errors.Is(err, redis.Nil) {

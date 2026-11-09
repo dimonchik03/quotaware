@@ -19,29 +19,31 @@ import (
 )
 
 type Config struct {
-	List        string
-	ProxyURL    string
-	Model       string
-	APIKey      string
-	Concurrency int
-	MaxAttempts int
-	BaseBackoff time.Duration
-	MaxBackoff  time.Duration
-	PopTimeout  time.Duration
-	CallTimeout time.Duration
+	List           string
+	ProxyURL       string
+	Model          string
+	APIKey         string
+	Concurrency    int
+	MaxAttempts    int
+	BaseBackoff    time.Duration
+	MaxBackoff     time.Duration
+	PopTimeout     time.Duration
+	CallTimeout    time.Duration
+	RequeueTimeout time.Duration
 }
 
 func DefaultConfig() Config {
 	return Config{
-		List:        "jobs",
-		ProxyURL:    "http://quotaware:8080",
-		Model:       "gpt-4.1-mini",
-		Concurrency: 2,
-		MaxAttempts: 6,
-		BaseBackoff: time.Second,
-		MaxBackoff:  60 * time.Second,
-		PopTimeout:  time.Second,
-		CallTimeout: 2 * time.Minute,
+		List:           "jobs",
+		ProxyURL:       "http://quotaware:8080",
+		Model:          "gpt-4.1-mini",
+		Concurrency:    2,
+		MaxAttempts:    6,
+		BaseBackoff:    time.Second,
+		MaxBackoff:     60 * time.Second,
+		PopTimeout:     time.Second,
+		CallTimeout:    2 * time.Minute,
+		RequeueTimeout: 5 * time.Second,
 	}
 }
 
@@ -55,8 +57,8 @@ func (c Config) Validate() error {
 		return errors.New("max attempts must be positive")
 	case c.BaseBackoff <= 0 || c.MaxBackoff < c.BaseBackoff:
 		return errors.New("base backoff must be positive and max backoff at least base backoff")
-	case c.PopTimeout <= 0 || c.CallTimeout <= 0:
-		return errors.New("pop and call timeouts must be positive")
+	case c.PopTimeout <= 0 || c.CallTimeout <= 0 || c.RequeueTimeout <= 0:
+		return errors.New("pop, call and requeue timeouts must be positive")
 	}
 	return nil
 }
@@ -69,12 +71,14 @@ type Job struct {
 
 type Queue interface {
 	Pop(ctx context.Context, name string, timeout time.Duration) (string, error)
+	Requeue(ctx context.Context, name, payload string) error
 }
 
 type Metrics struct {
 	Completed   prometheus.Counter
 	Failed      prometheus.Counter
 	Abandoned   prometheus.Counter
+	Requeued    prometheus.Counter
 	Calls       *prometheus.CounterVec
 	Retries     prometheus.Counter
 	Backoff     prometheus.Counter
@@ -87,15 +91,16 @@ func NewMetrics(registry prometheus.Registerer) *Metrics {
 	m := &Metrics{
 		Completed:   prometheus.NewCounter(prometheus.CounterOpts{Name: "worker_jobs_completed_total", Help: "Jobs finished with a successful provider call."}),
 		Failed:      prometheus.NewCounter(prometheus.CounterOpts{Name: "worker_jobs_failed_total", Help: "Jobs given up after the last attempt or with an unreadable payload."}),
-		Abandoned:   prometheus.NewCounter(prometheus.CounterOpts{Name: "worker_jobs_abandoned_total", Help: "Jobs popped from the queue but dropped because the worker was shutting down."}),
+		Abandoned:   prometheus.NewCounter(prometheus.CounterOpts{Name: "worker_jobs_abandoned_total", Help: "Jobs popped from the queue and lost because the worker was shutting down and could not hand them back."}),
+		Requeued:    prometheus.NewCounter(prometheus.CounterOpts{Name: "worker_jobs_requeued_total", Help: "Jobs handed back to the queue because the worker was shutting down."}),
 		Calls:       prometheus.NewCounterVec(prometheus.CounterOpts{Name: "worker_calls_total", Help: "Provider calls by HTTP status, or error for transport failures."}, []string{"status"}),
 		Retries:     prometheus.NewCounter(prometheus.CounterOpts{Name: "worker_retries_total", Help: "Retry waits scheduled after a 429, a 5xx or a transport failure."}),
 		Backoff:     prometheus.NewCounter(prometheus.CounterOpts{Name: "worker_backoff_seconds_total", Help: "Seconds of retry backoff scheduled, including waits interrupted by shutdown."}),
 		InFlight:    prometheus.NewGauge(prometheus.GaugeOpts{Name: "worker_calls_inflight", Help: "Provider calls currently open."}),
-		JobLatency:  prometheus.NewHistogram(prometheus.HistogramOpts{Name: "worker_job_latency_seconds", Help: "Seconds from enqueue to completion.", Buckets: prometheus.ExponentialBuckets(0.5, 1.5, 24)}),
+		JobLatency:  prometheus.NewHistogram(prometheus.HistogramOpts{Name: "worker_job_latency_seconds", Help: "Seconds from enqueue to completion, in five-second buckets up to twenty minutes.", Buckets: prometheus.LinearBuckets(5, 5, 240)}),
 		CallLatency: prometheus.NewHistogram(prometheus.HistogramOpts{Name: "worker_call_latency_seconds", Help: "Seconds per provider call attempt.", Buckets: prometheus.ExponentialBuckets(0.1, 1.5, 20)}),
 	}
-	registry.MustRegister(m.Completed, m.Failed, m.Abandoned, m.Calls, m.Retries, m.Backoff, m.InFlight, m.JobLatency, m.CallLatency)
+	registry.MustRegister(m.Completed, m.Failed, m.Abandoned, m.Requeued, m.Calls, m.Retries, m.Backoff, m.InFlight, m.JobLatency, m.CallLatency)
 	for _, status := range []string{"200", "429", "error"} {
 		m.Calls.WithLabelValues(status)
 	}
@@ -150,7 +155,7 @@ func (w *Worker) loop(ctx context.Context) {
 		payload, err := w.queue.Pop(ctx, w.cfg.List, w.cfg.PopTimeout)
 		if ctx.Err() != nil {
 			if payload != "" {
-				w.metrics.Abandoned.Inc()
+				w.handBack(payload)
 			}
 			return
 		}
@@ -168,11 +173,22 @@ func (w *Worker) loop(ctx context.Context) {
 			w.logger.Warn("unreadable job", "error", err.Error())
 			continue
 		}
-		w.process(ctx, job)
+		w.process(ctx, job, payload)
 	}
 }
 
-func (w *Worker) process(ctx context.Context, job Job) {
+func (w *Worker) handBack(payload string) {
+	ctx, cancel := context.WithTimeout(context.Background(), w.cfg.RequeueTimeout)
+	defer cancel()
+	if err := w.queue.Requeue(ctx, w.cfg.List, payload); err != nil {
+		w.metrics.Abandoned.Inc()
+		w.logger.Warn("job abandoned on shutdown", "error", err.Error())
+		return
+	}
+	w.metrics.Requeued.Inc()
+}
+
+func (w *Worker) process(ctx context.Context, job Job, payload string) {
 	for attempt := 1; attempt <= w.cfg.MaxAttempts; attempt++ {
 		outcome := w.call(job)
 		if outcome.done {
@@ -189,8 +205,7 @@ func (w *Worker) process(ctx context.Context, job Job) {
 		w.metrics.Retries.Inc()
 		w.metrics.Backoff.Add(wait.Seconds())
 		if !w.sleep(ctx, wait) {
-			w.metrics.Abandoned.Inc()
-			w.logger.Info("job abandoned on shutdown", "id", job.ID)
+			w.handBack(payload)
 			return
 		}
 	}

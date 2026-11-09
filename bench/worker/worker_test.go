@@ -3,6 +3,7 @@ package worker_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -19,8 +20,26 @@ import (
 )
 
 type fakeQueue struct {
-	mu    sync.Mutex
-	items []string
+	mu         sync.Mutex
+	items      []string
+	requeueErr error
+	popped     func()
+}
+
+func (q *fakeQueue) Requeue(_ context.Context, _ string, payload string) error {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if q.requeueErr != nil {
+		return q.requeueErr
+	}
+	q.items = append([]string{payload}, q.items...)
+	return nil
+}
+
+func (q *fakeQueue) waiting() []string {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return append([]string(nil), q.items...)
 }
 
 func (q *fakeQueue) Pop(ctx context.Context, _ string, timeout time.Duration) (string, error) {
@@ -36,6 +55,9 @@ func (q *fakeQueue) Pop(ctx context.Context, _ string, timeout time.Duration) (s
 	}
 	item := q.items[0]
 	q.items = q.items[1:]
+	if q.popped != nil {
+		q.popped()
+	}
 	return item, nil
 }
 
@@ -144,6 +166,26 @@ func counter(c prometheus.Collector) float64 {
 	return testutil.ToFloat64(c)
 }
 
+func jobLatencyBuckets(t *testing.T, registry *prometheus.Registry) map[float64]uint64 {
+	t.Helper()
+	families, err := registry.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, family := range families {
+		if family.GetName() != "worker_job_latency_seconds" {
+			continue
+		}
+		cumulative := map[float64]uint64{}
+		for _, bucket := range family.GetMetric()[0].GetHistogram().GetBucket() {
+			cumulative[bucket.GetUpperBound()] = bucket.GetCumulativeCount()
+		}
+		return cumulative
+	}
+	t.Fatal("worker_job_latency_seconds is not registered")
+	return nil
+}
+
 func TestWorker(t *testing.T) {
 	t.Run("completes a job on a successful call and records its latency from enqueue", func(t *testing.T) {
 		f := newFixture(t)
@@ -156,6 +198,21 @@ func TestWorker(t *testing.T) {
 		}
 		if count := testutil.CollectAndCount(f.metrics.JobLatency); count != 1 {
 			t.Fatalf("latency histogram samples = %d, want 1", count)
+		}
+	})
+
+	t.Run("resolves job latency to five seconds across twenty minutes", func(t *testing.T) {
+		f := newFixture(t)
+		now := time.Now()
+		f.queue.push(t, worker.Job{ID: 11, EnqueuedAt: now.Add(-151 * time.Second), PromptTokens: 20})
+		f.queue.push(t, worker.Job{ID: 12, EnqueuedAt: now.Add(-157 * time.Second), PromptTokens: 20})
+		f.queue.push(t, worker.Job{ID: 13, EnqueuedAt: now.Add(-1100 * time.Second), PromptTokens: 20})
+
+		f.run(t, fastConfig(), func() bool { return counter(f.metrics.Completed) == 3 })
+
+		cumulative := jobLatencyBuckets(t, f.registry)
+		if cumulative[155] != 1 || cumulative[160] != 2 || cumulative[1200] != 3 {
+			t.Fatalf("jobs at or below 155 s, 160 s and 1200 s = %d, %d, %d, want 1, 2, 3", cumulative[155], cumulative[160], cumulative[1200])
 		}
 	})
 
@@ -189,15 +246,32 @@ func TestWorker(t *testing.T) {
 		}
 	})
 
-	t.Run("counts a job abandoned on shutdown while it waits to retry", func(t *testing.T) {
+	t.Run("hands a job back to the queue on shutdown while it waits to retry", func(t *testing.T) {
 		f := newFixture(t, http.StatusTooManyRequests)
 		f.retryAfter = "60"
 		f.queue.push(t, worker.Job{ID: 8, EnqueuedAt: time.Now(), PromptTokens: 20})
+		payload := f.queue.waiting()[0]
 
 		f.run(t, fastConfig(), func() bool { return counter(f.metrics.Retries) == 1 })
 
-		if counter(f.metrics.Abandoned) != 1 || counter(f.metrics.Completed) != 0 || counter(f.metrics.Failed) != 0 {
-			t.Fatalf("abandoned = %v completed = %v failed = %v, want the job counted as abandoned only", counter(f.metrics.Abandoned), counter(f.metrics.Completed), counter(f.metrics.Failed))
+		if counter(f.metrics.Requeued) != 1 || counter(f.metrics.Abandoned) != 0 || counter(f.metrics.Completed) != 0 || counter(f.metrics.Failed) != 0 {
+			t.Fatalf("requeued = %v abandoned = %v completed = %v failed = %v, want the job handed back only", counter(f.metrics.Requeued), counter(f.metrics.Abandoned), counter(f.metrics.Completed), counter(f.metrics.Failed))
+		}
+		if waiting := f.queue.waiting(); len(waiting) != 1 || waiting[0] != payload {
+			t.Fatalf("queue = %q, want the unchanged payload back at the head", waiting)
+		}
+	})
+
+	t.Run("counts a job abandoned on shutdown when the queue refuses it back", func(t *testing.T) {
+		f := newFixture(t, http.StatusTooManyRequests)
+		f.retryAfter = "60"
+		f.queue.requeueErr = errors.New("redis unavailable")
+		f.queue.push(t, worker.Job{ID: 9, EnqueuedAt: time.Now(), PromptTokens: 20})
+
+		f.run(t, fastConfig(), func() bool { return counter(f.metrics.Retries) == 1 })
+
+		if counter(f.metrics.Abandoned) != 1 || counter(f.metrics.Requeued) != 0 {
+			t.Fatalf("abandoned = %v requeued = %v, want the job counted as abandoned", counter(f.metrics.Abandoned), counter(f.metrics.Requeued))
 		}
 	})
 
@@ -283,6 +357,34 @@ func TestWorker(t *testing.T) {
 
 		if _, err := worker.New(cfg, &fakeQueue{}, http.DefaultClient, worker.NewMetrics(prometheus.NewRegistry()), time.Now, slog.Default()); err == nil {
 			t.Fatal("expected a validation error")
+		}
+	})
+
+	t.Run("rejects a requeue timeout that is not positive", func(t *testing.T) {
+		cfg := worker.DefaultConfig()
+		cfg.RequeueTimeout = 0
+
+		if _, err := worker.New(cfg, &fakeQueue{}, http.DefaultClient, worker.NewMetrics(prometheus.NewRegistry()), time.Now, slog.Default()); err == nil {
+			t.Fatal("expected a validation error")
+		}
+	})
+
+	t.Run("hands a job back to the queue when shutdown arrives as it is popped", func(t *testing.T) {
+		f := newFixture(t)
+		f.queue.push(t, worker.Job{ID: 14, EnqueuedAt: time.Now(), PromptTokens: 20})
+		ctx, cancel := context.WithCancel(context.Background())
+		f.queue.popped = cancel
+		cfg := fastConfig()
+		cfg.ProxyURL, cfg.APIKey = f.server.URL, "sk-bench"
+		w, err := worker.New(cfg, f.queue, f.server.Client(), f.metrics, time.Now, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		w.Run(ctx)
+
+		if counter(f.metrics.Requeued) != 1 || counter(f.metrics.Abandoned) != 0 || len(f.queue.waiting()) != 1 || f.calls.Load() != 0 {
+			t.Fatalf("requeued = %v, abandoned = %v, waiting = %d, calls = %d, want the job back in the queue without a call", counter(f.metrics.Requeued), counter(f.metrics.Abandoned), len(f.queue.waiting()), f.calls.Load())
 		}
 	})
 }
