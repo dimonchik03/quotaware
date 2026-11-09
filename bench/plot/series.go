@@ -116,11 +116,17 @@ func LoadRun(dir string) (Run, error) {
 	if err := run.validate(); err != nil {
 		return Run{}, fmt.Errorf("%s: %w", dir, err)
 	}
+	run.markUnmeasured()
 	return run, nil
 }
 
+var (
+	requiredTotals = []string{"jobs_total", "completed_total", "failed_total", "abandoned_total", "retries_total", "backoff_seconds_total", "latency_p50", "latency_p95", "rate_limited_total"}
+	optionalTotals = []string{"requeued_total", "latency_mean"}
+)
+
 func (r Run) validate() error {
-	for _, name := range []string{"jobs_total", "completed_total", "failed_total", "abandoned_total", "requeued_total", "retries_total", "backoff_seconds_total", "latency_mean", "latency_p50", "latency_p95", "rate_limited_total"} {
+	for _, name := range requiredTotals {
 		value, ok := r.Totals[name]
 		if !ok {
 			return fmt.Errorf("missing %s.json", name)
@@ -130,6 +136,11 @@ func (r Run) validate() error {
 				r.Totals[name] = 0
 				continue
 			}
+			return fmt.Errorf("no observation for %s", name)
+		}
+	}
+	for _, name := range optionalTotals {
+		if value, ok := r.Totals[name]; ok && math.IsNaN(value) {
 			return fmt.Errorf("no observation for %s", name)
 		}
 	}
@@ -172,6 +183,14 @@ func (r Run) validate() error {
 		}
 	}
 	return nil
+}
+
+func (r Run) markUnmeasured() {
+	for _, name := range optionalTotals {
+		if _, ok := r.Totals[name]; !ok {
+			r.Totals[name] = math.NaN()
+		}
+	}
 }
 
 func matrix(parsed response) (Series, error) {

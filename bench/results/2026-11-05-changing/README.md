@@ -19,7 +19,7 @@ The fake provider permits 600 requests in minute one, 180 in minute two and
 600 in subsequent minutes. The first request for the model anchors its minute
 windows. The token limit stays at two million per minute. All trials use the
 same seeded jobs, two concurrent calls per worker, two-second provider latency
-with 200 ms jitter, and matching HPA behavior.
+with 200 ms jitter, and matching HPA behaviour.
 
 Pass 1 runs A/B/C. Pass 2 runs C/B/A. The provider and scaler restart and the
 workers are recreated between trials. All six observed the full 600/180/600
@@ -50,7 +50,7 @@ the completion counts. The static ten-worker cap completes this workload sooner
 and preserves every job.
 
 The worker uses a destructive Redis pop. A production worker needs queue leases
-or requeue-on-shutdown behavior for work between provider calls. Quotaware's drain
+or requeue-on-shutdown behaviour for work between provider calls. Quotaware's drain
 floor sees open HTTP calls. It cannot preserve a job sleeping between retries,
 and KEDA can choose any worker to terminate.
 
@@ -79,5 +79,5 @@ trial, so the entire balanced experiment was rerun on this CI runner.
     BENCH_RESULTS=/tmp/quotaware-new-results make bench-changing
 
 Choose a new output directory. On macOS, prefix the command with `caffeinate -i`
-and keep the laptop open. The GitHub benchmark workflow runs on relevant source
-pushes and can also be dispatched manually.
+and keep the laptop open. The GitHub benchmark workflow runs on relevant pushes to
+main and can be dispatched manually on any branch.

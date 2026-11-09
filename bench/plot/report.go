@@ -113,6 +113,9 @@ func drainTime(run Run, bands []Band) string {
 }
 
 func count(v float64) string {
+	if math.IsNaN(v) {
+		return "n/a"
+	}
 	return fmt.Sprintf("%.0f", v)
 }
 

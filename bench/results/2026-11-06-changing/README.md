@@ -21,7 +21,7 @@ minutes, 180 in each of the next four and 600 in every minute after that. The
 first request for the model anchors its minute windows. The token limit stays at
 two million per minute. All trials use the same seeded jobs, two concurrent calls
 per worker, two-second provider latency with 200 ms jitter, and matching HPA
-behavior.
+behaviour.
 
 Pass 1 runs A/B/C, pass 2 C/B/A and pass 3 B/C/A. The provider and scaler restart
 and the workers are recreated between trials. All nine observed the full
