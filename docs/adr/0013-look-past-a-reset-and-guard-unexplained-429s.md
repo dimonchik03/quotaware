@@ -71,6 +71,10 @@ over-estimated for at most `lookAhead`, until the first poll that sees its heade
 A provider that sends 429s without headers, or with quota still remaining, triggers
 the guard as before, and so does a 429 on a spent token window before tokens per call
 are known. Each 429 is judged by its own headers, so one that carries none is
-unexplained. Once unexplained 429s trip the guard, its hold still lasts for the
-longest `retry-after` of any 429 in the last minute, explained ones included; an
-explained `retry-after` runs to a reset the headroom formula already waits for.
+unexplained. Once unexplained 429s trip the guard, its hold lasts for the longest
+`retry-after` among the unexplained 429s of the last minute; the `retry-after` of an
+explained one runs to a reset the headroom formula already waits for and is left to
+it. The rule reads `remaining` against the smoothed usage per call, so a 429 that
+OpenAI charged on `prompt + max_tokens`, or that the rounding of Anthropic's
+`remaining` to the thousand hides, can still count as unexplained and halve the
+ceiling once; both are listed under the known limitations.

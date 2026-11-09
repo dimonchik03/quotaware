@@ -2,7 +2,10 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"fmt"
+	"log/slog"
+	"net"
 	"net/http"
 	"strings"
 	"testing"
@@ -139,6 +142,51 @@ func TestObserverFlags(t *testing.T) {
 		}
 	})
 
+	t.Run("bounds the open calls and the upstream wait by default", func(t *testing.T) {
+		options, err := parseObserverFlags("proxy", []string{"-observe-insecure"}, &bytes.Buffer{}, false)
+
+		if err != nil {
+			t.Fatal(err)
+		}
+		if options.proxy.MaxInFlight != 256 || options.proxy.UpstreamHeaderTimeout != 10*time.Minute {
+			t.Fatalf("bounds = %d calls, %v upstream wait, want 256 and 10m", options.proxy.MaxInFlight, options.proxy.UpstreamHeaderTimeout)
+		}
+	})
+
+	t.Run("reads the open call and upstream wait flags", func(t *testing.T) {
+		options, err := parseObserverFlags("proxy", []string{"-observe-insecure", "-max-inflight", "10", "-upstream-header-timeout", "2m"}, &bytes.Buffer{}, false)
+
+		if err != nil {
+			t.Fatal(err)
+		}
+		if options.proxy.MaxInFlight != 10 || options.proxy.UpstreamHeaderTimeout != 2*time.Minute {
+			t.Fatalf("bounds = %d calls, %v upstream wait, want 10 and 2m", options.proxy.MaxInFlight, options.proxy.UpstreamHeaderTimeout)
+		}
+	})
+
+	t.Run("reads the drain timeout flag and defaults it to ten seconds", func(t *testing.T) {
+		defaults, err := parseObserverFlags("proxy", []string{"-observe-insecure"}, &bytes.Buffer{}, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		options, err := parseObserverFlags("proxy", []string{"-observe-insecure", "-drain-timeout", "20s"}, &bytes.Buffer{}, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if defaults.drainTimeout != 10*time.Second || options.drainTimeout != 20*time.Second {
+			t.Fatalf("drain = %v by default and %v from the flag, want 10s and 20s", defaults.drainTimeout, options.drainTimeout)
+		}
+	})
+
+	t.Run("rejects a drain timeout that is not positive", func(t *testing.T) {
+		_, err := parseObserverFlags("proxy", []string{"-observe-insecure", "-drain-timeout", "0s"}, &bytes.Buffer{}, false)
+
+		if err == nil || !strings.Contains(err.Error(), "drain timeout") {
+			t.Fatalf("err = %v, want a refusal naming the drain timeout", err)
+		}
+	})
+
 	t.Run("adds the grpc address for the all command", func(t *testing.T) {
 		options, err := parseObserverFlags("all", []string{"-grpc", ":9999", "-observe-insecure"}, &bytes.Buffer{}, true)
 
@@ -230,5 +278,75 @@ func TestListeningAttributesRedactUpstreamPasswords(t *testing.T) {
 
 	if strings.Contains(attributes, "s3cret") || !strings.Contains(attributes, "gateway.internal") {
 		t.Fatalf("attributes = %s, want the upstream logged without its password", attributes)
+	}
+}
+
+func freeAddress(t *testing.T) string {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	address := listener.Addr().String()
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return address
+}
+
+func waitForReady(t *testing.T, url string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		response, err := http.Get(url)
+		if err == nil {
+			_ = response.Body.Close()
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("%s never answered", url)
+}
+
+func TestServeLogsADrainDeadlineInsteadOfFailing(t *testing.T) {
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	defer close(release)
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /ready", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+	mux.HandleFunc("GET /slow", func(w http.ResponseWriter, _ *http.Request) {
+		close(entered)
+		<-release
+		w.WriteHeader(http.StatusOK)
+	})
+	address := freeAddress(t)
+	logs := &bytes.Buffer{}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- serve(ctx, []endpoint{{address: address, handler: mux}}, nil, "", func() {}, 50*time.Millisecond, slog.New(slog.NewTextHandler(logs, nil)))
+	}()
+	waitForReady(t, "http://"+address+"/ready")
+	go func() {
+		response, err := http.Get("http://" + address + "/slow")
+		if err == nil {
+			_ = response.Body.Close()
+		}
+	}()
+	<-entered
+
+	cancel()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("serve = %v, want a clean return once the drain deadline passed", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("serve did not return after the drain deadline")
+	}
+	if !strings.Contains(logs.String(), "drain deadline") {
+		t.Fatalf("logs = %q, want the drain deadline logged", logs.String())
 	}
 }

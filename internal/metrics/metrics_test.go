@@ -72,6 +72,7 @@ func TestCollector(t *testing.T) {
 			t.Fatal(err)
 		}
 		_, _ = s.UpdateCeiling(state.Consumer{Namespace: "jobs", ScaledObject: "b"}, keep)
+		s.RejectCall()
 		collector := metrics.NewCollector(s, func() time.Time { return now })
 		expected := `
 # HELP quotaware_buckets Buckets currently tracked.
@@ -80,6 +81,9 @@ quotaware_buckets 1
 # HELP quotaware_buckets_rejected_total New bucket admissions refused because the bucket limit was reached.
 # TYPE quotaware_buckets_rejected_total counter
 quotaware_buckets_rejected_total 1
+# HELP quotaware_calls_rejected_total Proxied calls answered 503 because the in-flight limit was reached.
+# TYPE quotaware_calls_rejected_total counter
+quotaware_calls_rejected_total 1
 # HELP quotaware_scaled_objects Ceilings currently tracked, one per scaled object, trigger and credential.
 # TYPE quotaware_scaled_objects gauge
 quotaware_scaled_objects 2
@@ -89,7 +93,7 @@ quotaware_scaled_objects_rejected_total 1
 `
 
 		if err := testutil.CollectAndCompare(collector, strings.NewReader(expected),
-			"quotaware_buckets", "quotaware_buckets_rejected_total", "quotaware_scaled_objects", "quotaware_scaled_objects_rejected_total"); err != nil {
+			"quotaware_buckets", "quotaware_buckets_rejected_total", "quotaware_calls_rejected_total", "quotaware_scaled_objects", "quotaware_scaled_objects_rejected_total"); err != nil {
 			t.Fatal(err)
 		}
 	})

@@ -2,6 +2,7 @@ package proxy_test
 
 import (
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -235,5 +236,26 @@ func TestObserverKeepsProjectTokensWithoutAnOrganizationWindow(t *testing.T) {
 		if b.Quotas.ProjectTokens.Limit != 6000 || b.Quotas.ProjectTokens.Remaining != 0 || !b.ObservedAt.Equal(start) {
 			t.Fatalf("project quota = %+v, observed %v", b.Quotas.ProjectTokens, b.ObservedAt)
 		}
+	}
+}
+
+func TestObserverRefusesAnObservationTheStoreCannotTrack(t *testing.T) {
+	store, err := state.New(0.5, state.Limits{Buckets: 1, Consumers: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	o, err := proxy.NewObserver(store, func() time.Time { return start }, 64*1024, "", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	first := observe(o, tokenBody)
+	second := observe(o, strings.Replace(tokenBody, "gpt-4.1-mini", "gpt-4.1", 1))
+
+	if first.Code != http.StatusAccepted || second.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d then %d, want 202 then 503 once the bucket limit refuses a new bucket", first.Code, second.Code)
+	}
+	if !strings.Contains(second.Body.String(), "bucket limit") || store.Stats().RejectedBuckets != 1 {
+		t.Fatalf("body = %s rejected = %d, want the refusal named and counted", second.Body.String(), store.Stats().RejectedBuckets)
 	}
 }

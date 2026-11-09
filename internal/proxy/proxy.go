@@ -20,18 +20,28 @@ import (
 )
 
 type Config struct {
-	OpenAI          *url.URL
-	Anthropic       *url.URL
-	MaxRequestBytes int64
-	MaxCaptureBytes int64
-	MaxModelBytes   int
-	ReadBodyTimeout time.Duration
-	Transport       http.RoundTripper
-	Logger          *slog.Logger
+	OpenAI                *url.URL
+	Anthropic             *url.URL
+	MaxRequestBytes       int64
+	MaxCaptureBytes       int64
+	MaxModelBytes         int
+	MaxInFlight           int
+	ReadBodyTimeout       time.Duration
+	UpstreamHeaderTimeout time.Duration
+	Transport             http.RoundTripper
+	Logger                *slog.Logger
 }
 
 func DefaultConfig() Config {
-	return Config{MaxRequestBytes: 8 << 20, MaxCaptureBytes: 4 << 20, MaxModelBytes: usage.MaxModelBytes, ReadBodyTimeout: 30 * time.Second, Logger: slog.Default()}
+	return Config{
+		MaxRequestBytes:       8 << 20,
+		MaxCaptureBytes:       4 << 20,
+		MaxModelBytes:         usage.MaxModelBytes,
+		MaxInFlight:           256,
+		ReadBodyTimeout:       30 * time.Second,
+		UpstreamHeaderTimeout: 10 * time.Minute,
+		Logger:                slog.Default(),
+	}
 }
 
 type Proxy struct {
@@ -40,6 +50,7 @@ type Proxy struct {
 	now       func() time.Time
 	transport http.RoundTripper
 	mux       *http.ServeMux
+	slots     chan struct{}
 }
 
 var errTooLarge = errors.New("request body too large")
@@ -50,8 +61,10 @@ func New(cfg Config, store *state.Store, now func() time.Time) (*Proxy, error) {
 		return nil, errors.New("both upstreams are required")
 	case cfg.MaxRequestBytes <= 0 || cfg.MaxCaptureBytes <= 0 || cfg.MaxModelBytes <= 0:
 		return nil, errors.New("request, capture and model limits must be positive")
-	case cfg.ReadBodyTimeout <= 0:
-		return nil, errors.New("read body timeout must be positive")
+	case cfg.ReadBodyTimeout <= 0 || cfg.UpstreamHeaderTimeout <= 0:
+		return nil, errors.New("read body and upstream header timeouts must be positive")
+	case cfg.MaxInFlight <= 0:
+		return nil, errors.New("max in flight must be positive")
 	case cfg.Logger == nil:
 		return nil, errors.New("logger is required")
 	}
@@ -59,9 +72,10 @@ func New(cfg Config, store *state.Store, now func() time.Time) (*Proxy, error) {
 	if transport == nil {
 		pooled := http.DefaultTransport.(*http.Transport).Clone()
 		pooled.MaxIdleConnsPerHost = 100
+		pooled.ResponseHeaderTimeout = cfg.UpstreamHeaderTimeout
 		transport = pooled
 	}
-	p := &Proxy{cfg: cfg, store: store, now: now, transport: transport, mux: http.NewServeMux()}
+	p := &Proxy{cfg: cfg, store: store, now: now, transport: transport, mux: http.NewServeMux(), slots: make(chan struct{}, cfg.MaxInFlight)}
 	p.mux.Handle("POST /v1/chat/completions", p.route(headers.OpenAI, cfg.OpenAI))
 	p.mux.Handle("POST /v1/messages", p.route(headers.Anthropic, cfg.Anthropic))
 	p.mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
@@ -95,6 +109,13 @@ func (p *Proxy) route(provider headers.Provider, upstream *url.URL) http.Handler
 		ErrorHandler:   p.failed,
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		release, admitted := p.admit()
+		if !admitted {
+			p.store.RejectCall()
+			writeError(w, http.StatusServiceUnavailable, "too many calls in flight")
+			return
+		}
+		defer release()
 		body, err := readBodyWithin(w, r, p.cfg.MaxRequestBytes, p.cfg.ReadBodyTimeout)
 		switch {
 		case errors.Is(err, errTooLarge):
@@ -135,6 +156,15 @@ func (p *Proxy) route(provider headers.Provider, upstream *url.URL) http.Handler
 		}
 		reverse.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), callContextKey{}, c)))
 	})
+}
+
+func (p *Proxy) admit() (func(), bool) {
+	select {
+	case p.slots <- struct{}{}:
+		return func() { <-p.slots }, true
+	default:
+		return nil, false
+	}
 }
 
 func (p *Proxy) observe(response *http.Response) error {
@@ -183,9 +213,13 @@ func (p *Proxy) sample(c *call, status int, headersStatus state.HeadersStatus, q
 }
 
 func (p *Proxy) failed(w http.ResponseWriter, r *http.Request, err error) {
+	status, message := http.StatusBadGateway, "upstream unavailable"
+	if timedOut(err) {
+		status, message = http.StatusGatewayTimeout, "upstream did not answer in time"
+	}
 	c, ok := r.Context().Value(callContextKey{}).(*call)
 	if !ok {
-		writeError(w, http.StatusBadGateway, "upstream unavailable")
+		writeError(w, status, message)
 		return
 	}
 	if errors.Is(err, context.Canceled) {
@@ -199,7 +233,12 @@ func (p *Proxy) failed(w http.ResponseWriter, r *http.Request, err error) {
 		p.store.Fail(c.key, p.now(), c.workload)
 	})
 	p.cfg.Logger.Error("upstream request failed", "provider", c.provider, "model", c.key.Model, "error", err.Error())
-	writeError(w, http.StatusBadGateway, "upstream unavailable")
+	writeError(w, status, message)
+}
+
+func timedOut(err error) bool {
+	var timeout interface{ Timeout() bool }
+	return errors.As(err, &timeout) && timeout.Timeout()
 }
 
 var errUnboundedRead = errors.New("request body read cannot be bounded on this connection")
