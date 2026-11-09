@@ -276,7 +276,9 @@ never below the pods the open calls need)
 are in [deploy/examples](deploy/examples/). Single-trigger mode only reads the Redis addresses listed
 in `redisAddresses` (the `-redis-address` flag); any other `redisAddress` in trigger
 metadata is answered with PermissionDenied; the reader connects without password or
-TLS, so keep that Redis inside the cluster network. Each quotaware tracks at most
+TLS, so keep that Redis inside the cluster network. A Redis that accepts the connection
+and does not answer within two seconds fails the poll with Unavailable, so the HPA
+keeps its count rather than waiting on it. Each quotaware tracks at most
 `-max-scaled-objects` (1000) ceilings, one per ScaledObject, trigger and credential;
 a poll that needs a new one beyond that gets ResourceExhausted. Ceiling
 state is kept per ScaledObject and trigger metadata, so a caller on the gRPC port
