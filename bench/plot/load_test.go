@@ -1,8 +1,10 @@
 package plot_test
 
 import (
+	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -32,6 +34,15 @@ func runDir(t *testing.T, files map[string]string) string {
 	return dir
 }
 
+func rowValues(report plot.Report, metric string) []string {
+	for _, row := range report.Rows {
+		if row.Metric == metric {
+			return row.Values
+		}
+	}
+	return nil
+}
+
 func TestLoadRun(t *testing.T) {
 	t.Run("leaves a gap where Prometheus has no value instead of a zero", func(t *testing.T) {
 		dir := runDir(t, map[string]string{
@@ -58,11 +69,23 @@ func TestLoadRun(t *testing.T) {
 	})
 
 	for _, total := range []string{"requeued_total", "latency_mean"} {
-		t.Run("refuses a run without "+total, func(t *testing.T) {
+		t.Run("loads a run exported before "+total+" was measured", func(t *testing.T) {
 			dir := runDir(t, map[string]string{})
 			if err := os.Remove(filepath.Join(dir, total+".json")); err != nil {
 				t.Fatal(err)
 			}
+
+			run, err := plot.LoadRun(dir)
+
+			if err != nil || !math.IsNaN(run.Totals[total]) {
+				t.Fatalf("totals[%s] = %v err = %v, want an unmeasured total and no error", total, run.Totals[total], err)
+			}
+		})
+
+		t.Run("refuses a "+total+" with no observation", func(t *testing.T) {
+			dir := runDir(t, map[string]string{
+				total + ".json": `{"status":"success","data":{"resultType":"vector","result":[]}}`,
+			})
 
 			_, err := plot.LoadRun(dir)
 
@@ -83,6 +106,30 @@ func TestLoadRun(t *testing.T) {
 			t.Fatalf("err = %v, want a refusal naming the file", err)
 		}
 	})
+}
+
+func TestReportMarksTotalsAnOlderExportLacksAsNotAvailable(t *testing.T) {
+	dir := runDir(t, map[string]string{})
+	for _, total := range []string{"requeued_total", "latency_mean"} {
+		if err := os.Remove(filepath.Join(dir, total+".json")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	run, err := plot.LoadRun(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	report := plot.Build(run, []plot.Run{run}, 2)
+
+	for _, metric := range []string{"Jobs handed back on shutdown", "Job latency mean"} {
+		if got := rowValues(report, metric); !slices.Equal(got, []string{"n/a", "n/a"}) {
+			t.Errorf("%s = %v, want n/a in every column", metric, got)
+		}
+	}
+	if got := rowValues(report, "Jobs completed"); !slices.Equal(got, []string{"0", "0"}) {
+		t.Errorf("Jobs completed = %v, want the measured count", got)
+	}
 }
 
 func TestLoadRunRejectsAnAbsentRetryCount(t *testing.T) {
