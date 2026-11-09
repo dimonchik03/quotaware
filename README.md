@@ -370,7 +370,10 @@ it was called, and returns nil, or `ErrUndelivered` naming what stayed queued; n
 is posted after it returns; deliveries quotaware refused count in `failed` (`Failed()`),
 observations dropped on a full queue in `dropped` (`Dropped()`), and calls whose
 request the hook could not read (a body over 8 MiB, not JSON, without a string
-`model`, or failing while the Go collector reads it) in `unobserved` (`Unobserved()`).
+`model`, streamed through the Python hook so its bytes are gone by the time the
+response arrives, or failing while the Go collector reads it) in `unobserved`
+(`Unobserved()`). The Python hook observes every response, error responses included,
+when its body is closed.
 Collector traffic is not counted as in flight, so the drain guard only sees proxied
 calls (ADR 0007).
 
