@@ -929,7 +929,7 @@ func TestAIMD(t *testing.T) {
 		f.clock.Advance(20 * time.Second)
 		f.observe(bucketA, 900, 500000)
 		for range 3 {
-			f.respond(bucketA, http.StatusTooManyRequests, state.HeadersPresent, 30*time.Second)
+			f.rateLimited(bucketA, 900, 30*time.Second)
 		}
 
 		if got := metric(t, f, capMetadata()); got != 2 {
@@ -944,7 +944,7 @@ func TestAIMD(t *testing.T) {
 		f.clock.Advance(20 * time.Second)
 		f.observe(bucketA, 900, 500000)
 		for range 3 {
-			f.respond(bucketA, http.StatusTooManyRequests, state.HeadersPresent, 0)
+			f.rateLimited(bucketA, 900, 0)
 		}
 		for range 40 {
 			f.store.Begin(bucketA, f.clock.Now(), "")
@@ -972,7 +972,7 @@ func TestAIMD(t *testing.T) {
 		f.clock.Advance(20 * time.Second)
 		f.observe(bucketA, 900, 500000)
 		for range 3 {
-			f.respond(bucketA, http.StatusTooManyRequests, state.HeadersPresent, 0)
+			f.rateLimited(bucketA, 900, 0)
 		}
 		if got := metric(t, f, metadata); got != 2 {
 			t.Fatalf("ceiling = %d, want the guard to halve 4 to 2", got)
@@ -1309,7 +1309,8 @@ func TestRetryHoldSurvivesNewHeadersOnAnotherSharedKey(t *testing.T) {
 	for _, tc := range []struct {
 		scope  string
 		during int64
-	}{{"shared", 2}, {"credential", 6}} {
+		after  int64
+	}{{"shared", 2, 4}, {"credential", 6, 8}} {
 		t.Run(tc.scope, func(t *testing.T) {
 			f := newFixture(t)
 			f.observe(bucketA, 900, 500000)
@@ -1330,8 +1331,8 @@ func TestRetryHoldSurvivesNewHeadersOnAnotherSharedKey(t *testing.T) {
 			}
 			f.clock.Advance(71 * time.Second)
 			f.observe(other, 900, 500000)
-			if got := metric(t, f, m); got < 4 {
-				t.Fatalf("after hold = %d, want recovery", got)
+			if got := metric(t, f, m); got != tc.after {
+				t.Fatalf("after hold = %d, want %d once the hold has released the halved key", got, tc.after)
 			}
 		})
 	}
