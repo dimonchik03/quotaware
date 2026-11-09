@@ -107,7 +107,7 @@ func mergeAnthropicEvent(merged *usagePayload, payload []byte) bool {
 
 func Decompress(encoding string, body []byte, limit int64) ([]byte, bool) {
 	switch strings.ToLower(strings.TrimSpace(encoding)) {
-	case "":
+	case "", "identity":
 		return body, true
 	case "gzip":
 		reader, err := gzip.NewReader(bytes.NewReader(body))
