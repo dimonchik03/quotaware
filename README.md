@@ -388,32 +388,29 @@ pod, backing off on `retry-after`) scaled by the two-trigger ScaledObject in
 `bench/kind/manifests/40-scaledobject.yaml` against a fake provider limited to 600
 requests per minute in one window per model that every key shares; 200 queued jobs
 keep demand at 20. After 90 seconds a job with another credential bursts the shared
-quota for a minute. The transcript below was recorded on 2026-11-01, before v0.1.0,
-and keeps only the lines where something changed. Since then the step interval counts
-from the last change of the bound and limits the combined value, and ADR 0013 lets the
-ceiling count the refill of a reset less than `lookAhead` away and stops the guard
-from halving it on 429s that show the spent window, so a run today climbs back
-earlier; it has not been re-recorded:
+quota for a minute. The transcript below was recorded on 2026-11-09 with the v0.4.0
+code and keeps only the lines where something changed:
 
-    time      replicas  desired  ceiling (quotaware log)
-    21:40:33  -         -        0 -> 8 (headroom)
-    21:40:49  8         8
-    21:41:50  8         8
-    21:42:05  burst job started: 30 loops with another credential for 60s
-    21:42:21  8         7        8 -> 7 (drain)
-    21:43:07  7         1        3 -> 1 (clamped)
-    21:43:23  1         1
-    21:43:38  1         5        1 -> 5 (step_up)
-    21:43:53  5         8        5 -> 8 (headroom)
-    21:44:09  8         8
+    time      replicas  desired  429/15s  ceiling (quotaware log)
+    11:11:55  7         8        ?        7 -> 8 (headroom)
+    11:12:10  8         8        0
+    11:13:12  burst job started: 30 loops with another credential for 60s
+    11:13:42  8         8        0        7 -> 8 (drain)
+    11:13:58  8         1        16       8 -> 1 (clamped)
+    11:14:13  1         5        8        1 -> 5 (headroom)
+    11:14:28  5         8        0        5 -> 8 (headroom)
+    11:14:44  8         8        0
 
 Eight replicas is what 600 requests per minute feeds at about one call per second per
 pod with the safety factor applied. Once the burst has spent the shared window, every
 call gets a 429 until the reset, the workers' included: the ceiling follows the
 remaining quota down, so fewer worker pods sit in backoff, and as the reset approaches
-it steps back up by at most `maxStepUp` per interval. The log shows the last ceiling change of
-each 15 s line only. The demo also prints the workers' 429s per line; this recording
-predates a fix to that count, so the column is left out.
+the look-ahead counts the refill it brings, so the ceiling climbs back through five to
+eight within 30 seconds of the clamp (ADR 0013). The 429 column counts the workers'
+429s in the 15 seconds before each line, `?` while their logs were not readable yet.
+The log column shows the last ceiling change of each line only; the drain line hides
+an 8 -> 7 -> 8 pair in which the drain floor kept the pods whose calls were open
+while the bound already fell.
 
 ## Command line
 
