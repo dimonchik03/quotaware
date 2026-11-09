@@ -68,9 +68,9 @@ refused adds nothing.
 ## Consequences
 
 Editing a ScaledObject's trigger metadata, to tune `safety` for instance, starts its
-entry from nothing, as a new quotaware process would: an AIMD ceiling restarts at
-`defaultCeiling`, a header ceiling skips the `maxStepUp` limit on that first
-evaluation, and a guard hold is lost. Seeding the new entry from the old one would
+entry from nothing, as a new quotaware process does once the warm-up of ADR 0015 has
+passed: an AIMD ceiling restarts at `defaultCeiling`, a header ceiling skips the
+`maxStepUp` limit on that first evaluation, and a guard hold is lost. Seeding the new entry from the old one would
 reopen the overwrite, because the old entry is found by name, which is what a caller
 can forge. The old entry is evicted after ten minutes of silence and both are
 visible under their `trigger` label meanwhile.

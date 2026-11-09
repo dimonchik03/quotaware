@@ -276,7 +276,9 @@ never below the pods the open calls need)
 are in [deploy/examples](deploy/examples/). Single-trigger mode only reads the Redis addresses listed
 in `redisAddresses` (the `-redis-address` flag); any other `redisAddress` in trigger
 metadata is answered with PermissionDenied; the reader connects without password or
-TLS, so keep that Redis inside the cluster network. Each quotaware tracks at most
+TLS, so keep that Redis inside the cluster network. A Redis that accepts the connection
+and does not answer within two seconds fails the poll with Unavailable, so the HPA
+keeps its count rather than waiting on it. Each quotaware tracks at most
 `-max-scaled-objects` (1000) ceilings, one per ScaledObject, trigger and credential;
 a poll that needs a new one beyond that gets ResourceExhausted. Ceiling
 state is kept per ScaledObject and trigger metadata, so a caller on the gRPC port
@@ -316,7 +318,10 @@ answered with InvalidArgument, so a misspelt knob cannot run on its default unno
 Workers that cannot or should not route through the proxy can report what they
 see themselves. Both collectors post the same observation to `POST /v1/observe` on
 the admin port and never block or fail the call they observe: a full queue drops, a
-failed delivery is counted, an error inside the hook is counted. An observation for a
+failed delivery is counted, an error inside the hook is counted. The one call that
+still fails is one whose own request body breaks while the Go collector reads it: the
+collector hands the body on as far as it got, so the call ends with the body's error,
+as it would without the collector, and counts as unobserved. An observation for a
 bucket the `-max-buckets` limit refuses is answered 503 and counts as a failed delivery. quotaware refuses
 to start without `-observe-token` (or `QUOTAWARE_OBSERVE_TOKEN`) unless
 `-observe-insecure` is passed, because anyone who can post an observation can move
@@ -359,11 +364,16 @@ start failing and when they recover, restarts its delivery thread in a forked ch
 (Celery prefork, gunicorn `--preload`) unless it was closed, and works where the
 platform has no fork hook. Both measure header age at delivery, including time spent
 in the collector queue. Call latency still ends when the response body finishes. `close()` returns how many
-observations were still queued when it gave up, and the Go collector's `Close` returns
-`ErrUndelivered` then; deliveries quotaware refused count in `failed` (`Failed()`),
+observations were still queued when it gave up; the Go collector's `Close` waits for
+the delivery under way, drains the queue until `CloseTimeout` (10 s) has passed since
+it was called, and returns nil, or `ErrUndelivered` naming what stayed queued; nothing
+is posted after it returns; deliveries quotaware refused count in `failed` (`Failed()`),
 observations dropped on a full queue in `dropped` (`Dropped()`), and calls whose
-request the hook could not read (a body over 8 MiB, not JSON, or without a string
-`model`) in `unobserved` (`Unobserved()`).
+request the hook could not read (a body over 8 MiB, not JSON, without a string
+`model`, streamed through the Python hook so its bytes are gone by the time the
+response arrives, or failing while the Go collector reads it) in `unobserved`
+(`Unobserved()`). The Python hook observes every response, error responses included,
+when its body is closed.
 Collector traffic is not counted as in flight, so the drain guard only sees proxied
 calls (ADR 0007).
 
@@ -471,12 +481,15 @@ prints the build version.
   256Mi memory limit fits typical call sizes, not that worst case. Lower the three
   flags together to bound it.
 - The proxy and the scaler run in one pod with in-memory state: a restart starts
-  every bucket afresh, so the polls after it report `defaultCeiling` until the first
-  proxied call lands and the ceiling then climbs back by `maxStepUp` per
-  `stepInterval`, while the HPA's scale-down stabilization (300 s by default) keeps
-  the pods; the proxy is in the path of every call it carries, and the
-  chart replaces the pod on every upgrade (`strategy: Recreate`), so an upgrade
-  interrupts proxied calls until the new pod is ready. On a shutdown signal the proxy
+  every bucket afresh, so for its first `stepInterval` the new process answers polls
+  for buckets no answered call has reached with Unavailable and KEDA keeps the count
+  it had (a configured KEDA `fallback` counts those polls as failures, ADR 0015);
+  after that they report `defaultCeiling` until the first proxied call lands and the
+  ceiling climbs back by `maxStepUp` per `stepInterval`, while the HPA's scale-down
+  stabilization (300 s by default) keeps the pods; the proxy is in the path of every
+  call it carries, and the chart replaces the pod on every upgrade
+  (`strategy: Recreate`), so an upgrade interrupts proxied calls until the new pod
+  is ready. On a shutdown signal the proxy
   stops accepting calls, gives the open ones `-drain-timeout` (10 s) to finish, then
   closes them, logs that it did and exits cleanly; keep the pod's termination grace
   period (30 s by default) above the drain. Run collectors instead of the proxy where

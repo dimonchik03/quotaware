@@ -514,6 +514,56 @@ def test_leaves_a_request_whose_model_is_not_a_string_unobserved(sink):
     assert Sink.received == []
 
 
+class UnreadingTransport(httpx.BaseTransport):
+    def handle_request(self, request):
+        return httpx.Response(200, headers={**RATE_LIMIT_HEADERS, "content-type": "application/json"}, json={"usage": {"prompt_tokens": 1, "completion_tokens": 1}})
+
+
+def test_leaves_a_streamed_request_body_unobserved_without_an_error(sink):
+    hook = QuotawareHook(sink, "openai")
+    client = httpx.Client(base_url="https://provider.test", transport=UnreadingTransport(), event_hooks=hook.hooks())
+    response = client.post("/v1/chat/completions", content=iter([b'{"model":"gpt-4.1-mini"}']))
+    hook.close()
+
+    assert response.status_code == 200
+    assert hook.unobserved == 1
+    assert hook.errors == 0
+    assert Sink.received == []
+
+
+def rate_limited_stream(request):
+    return httpx.Response(429, headers={**RATE_LIMIT_HEADERS, "retry-after": "7", "content-type": "application/json"}, stream=httpx.ByteStream(b'{"error":{"type":"rate_limit"}}'))
+
+
+def test_observes_an_error_response_when_its_body_is_closed_and_measures_to_the_end(sink):
+    hook = QuotawareHook(sink, "openai")
+    client = client_with(hook, rate_limited_stream)
+    with client.stream("POST", "/v1/chat/completions", json={"model": "gpt-4.1-mini", "messages": []}) as response:
+        time.sleep(0.05)
+        assert Sink.received == []
+        response.read()
+    hook.close()
+
+    _, observation = Sink.received[0]
+    assert observation["status"] == 429
+    assert observation["headers"]["retry-after"] == "7"
+    assert observation["complete"] is True
+    assert observation["usage"] is None
+    assert observation["latency_ms"] >= 50
+
+
+def test_marks_an_error_response_the_caller_abandoned_as_incomplete(sink):
+    hook = QuotawareHook(sink, "openai")
+    client = client_with(hook, rate_limited_stream)
+    with client.stream("POST", "/v1/chat/completions", json={"model": "gpt-4.1-mini", "messages": []}):
+        pass
+    hook.close()
+
+    _, observation = Sink.received[0]
+    assert observation["status"] == 429
+    assert observation["complete"] is False
+
+
 def test_reports_the_first_value_of_a_repeated_header(sink):
     hook = QuotawareHook(sink, "openai")
 

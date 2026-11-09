@@ -58,6 +58,7 @@ func TestSingleTriggerModeAgainstRedis(t *testing.T) {
 		}
 	}
 	allowed := ref("redis:6379")
+	waitForTheDefaultCeiling(t, ctx, client, allowed)
 
 	t.Run("reports the queue demand below the ceiling and activates while the list has items", func(t *testing.T) {
 		if err := jobs.Push(ctx, "e2e-jobs", make([]string, 25)...); err != nil {
@@ -224,5 +225,20 @@ func TestAJobHandedBackIsPoppedNext(t *testing.T) {
 	popped, err := jobs.Pop(ctx, "e2e-requeue", time.Second)
 	if err != nil || popped != "handed back" {
 		t.Fatalf("popped %q, err = %v, want the handed-back job before the waiting ones", popped, err)
+	}
+}
+
+func waitForTheDefaultCeiling(t *testing.T, ctx context.Context, client externalscaler.ExternalScalerClient, ref *externalscaler.ScaledObjectRef) {
+	t.Helper()
+	for {
+		_, err := client.GetMetrics(ctx, &externalscaler.GetMetricsRequest{ScaledObjectRef: ref})
+		if status.Code(err) != codes.Unavailable {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatal(ctx.Err())
+		case <-time.After(time.Second):
+		}
 	}
 }

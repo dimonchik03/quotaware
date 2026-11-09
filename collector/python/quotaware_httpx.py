@@ -276,9 +276,6 @@ class QuotawareHook:
             return
         is_stream = _is_stream(response)
         succeeded = _succeeded(response)
-        if not succeeded and not is_stream:
-            report(True)
-            return
         encoding = response.headers.get("content-encoding", "")
 
         def on_close(complete, body, encoding=encoding):
@@ -304,7 +301,12 @@ class QuotawareHook:
         request = response.request
         if request.method != "POST" or not request.url.path.endswith(PATHS[self.provider]):
             return None
-        model = self._model(request.content)
+        try:
+            content = request.content
+        except httpx.RequestNotRead:
+            self._count("unobserved")
+            return None
+        model = self._model(content)
         if model is None:
             self._count("unobserved")
             return None

@@ -661,16 +661,48 @@ func TestProxy(t *testing.T) {
 			cfg.UpstreamHeaderTimeout = 100 * time.Millisecond
 		})
 
+		started := time.Now()
 		response, _ := h.post(t, "/v1/chat/completions", "sk-test", chat)
+		elapsed := time.Since(started)
 
 		if response.StatusCode != http.StatusGatewayTimeout {
 			t.Fatalf("status = %d, want 504", response.StatusCode)
+		}
+		if elapsed > 2*time.Second {
+			t.Fatalf("answered after %v, want the 504 soon after the 100 ms header timeout", elapsed)
 		}
 		if b := h.bucket(t, "openai", "gpt-4.1-mini"); b.InFlight != 0 || b.UpstreamErrors != 1 {
 			t.Fatalf("bucket = %+v, want the slot released and one upstream error", b)
 		}
 		if !strings.Contains(h.logs.String(), "upstream request failed") {
 			t.Fatalf("logs = %q, want the failure logged", h.logs.String())
+		}
+	})
+
+	t.Run("answers 400 to a malformed workload label before opening a call", func(t *testing.T) {
+		h := newHarness(t)
+		request, err := http.NewRequest(http.MethodPost, h.front.URL+"/v1/chat/completions", strings.NewReader(chat))
+		if err != nil {
+			t.Fatal(err)
+		}
+		request.Header.Set("Authorization", "Bearer sk-test")
+		request.Header.Set("X-Quotaware-Workload", "Not a DNS label")
+
+		response, err := http.DefaultClient.Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = response.Body.Close() }()
+		raw, err := io.ReadAll(response.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if response.StatusCode != http.StatusBadRequest || !strings.Contains(string(raw), "invalid workload label") {
+			t.Fatalf("status = %d body = %s, want 400 naming the workload label", response.StatusCode, raw)
+		}
+		if buckets := h.store.Buckets(h.clock.Now()); len(buckets) != 0 {
+			t.Fatalf("buckets = %+v, want no call opened for a request the proxy refused", buckets)
 		}
 	})
 

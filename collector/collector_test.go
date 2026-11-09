@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -22,16 +23,19 @@ type sink struct {
 	observations []collector.Observation
 	tokens       []string
 	release      chan struct{}
+	entered      chan struct{}
+	enteredOnce  sync.Once
 	server       *httptest.Server
 }
 
 func newSink(t *testing.T, block bool) *sink {
 	t.Helper()
-	s := &sink{release: make(chan struct{})}
+	s := &sink{release: make(chan struct{}), entered: make(chan struct{})}
 	if !block {
 		close(s.release)
 	}
 	s.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		s.enteredOnce.Do(func() { close(s.entered) })
 		<-s.release
 		if r.URL.Path != usage.ObservePath {
 			w.WriteHeader(http.StatusNotFound)
@@ -329,7 +333,7 @@ func TestCollector(t *testing.T) {
 		}
 	})
 
-	t.Run("close returns within its deadline when quotaware hangs and says it lost observations", func(t *testing.T) {
+	t.Run("close gives up within its deadline when quotaware hangs and names what stayed queued", func(t *testing.T) {
 		s := newSink(t, true)
 		upstream := provider(t, openAI)
 		c := newCollector(t, s.server.URL, func(cfg *collector.Config) {
@@ -344,12 +348,69 @@ func TestCollector(t *testing.T) {
 		err := c.Close()
 		close(s.release)
 
-		if !errors.Is(err, collector.ErrUndelivered) {
-			t.Fatalf("err = %v, want ErrUndelivered", err)
+		if !errors.Is(err, collector.ErrUndelivered) || !strings.Contains(err.Error(), "1 still queued") || c.Failed() != 1 {
+			t.Fatalf("err = %v failed = %d, want ErrUndelivered for the one observation left behind the delivery that timed out", err, c.Failed())
 		}
-
 		if elapsed := time.Since(started); elapsed > 2*time.Second {
 			t.Fatalf("close took %v, want it bounded by the timeouts", elapsed)
+		}
+	})
+
+	t.Run("close waits for the delivery under way and returns nil once nothing is queued", func(t *testing.T) {
+		s := newSink(t, true)
+		upstream := provider(t, openAI)
+		c := newCollector(t, s.server.URL, func(cfg *collector.Config) { cfg.CloseTimeout = 50 * time.Millisecond })
+		client := &http.Client{Transport: c.Wrap(nil)}
+		mustCall(t, client, upstream.URL, chat)
+		<-s.entered
+		go func() {
+			time.Sleep(200 * time.Millisecond)
+			close(s.release)
+		}()
+
+		err := c.Close()
+
+		if err != nil || len(s.all()) != 1 {
+			t.Fatalf("err = %v delivered = %d, want the delivery under way finished before Close returned", err, len(s.all()))
+		}
+	})
+
+	t.Run("close cuts a delivery it started itself at its own deadline", func(t *testing.T) {
+		firstMayAnswer := make(chan struct{})
+		neverAnswers := make(chan struct{})
+		var arrivals atomic.Int32
+		slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			if arrivals.Add(1) == 1 {
+				<-firstMayAnswer
+			} else {
+				<-neverAnswers
+			}
+			w.WriteHeader(http.StatusAccepted)
+		}))
+		t.Cleanup(slow.Close)
+		t.Cleanup(func() { close(neverAnswers) })
+		upstream := provider(t, openAI)
+		c := newCollector(t, slow.URL, func(cfg *collector.Config) {
+			cfg.PostTimeout = 4 * time.Second
+			cfg.CloseTimeout = time.Second
+		})
+		client := &http.Client{Transport: c.Wrap(nil)}
+		mustCall(t, client, upstream.URL, chat)
+		mustCall(t, client, upstream.URL, chat)
+		go func() {
+			time.Sleep(100 * time.Millisecond)
+			close(firstMayAnswer)
+		}()
+
+		started := time.Now()
+		err := c.Close()
+		elapsed := time.Since(started)
+
+		if err != nil || c.Failed() != 1 || arrivals.Load() != 2 {
+			t.Fatalf("err = %v failed = %d arrivals = %d, want the first delivered, the second started by the drain and cut, nothing left queued", err, c.Failed(), arrivals.Load())
+		}
+		if elapsed > 3*time.Second {
+			t.Fatalf("close took %v, want the second delivery cut at the close deadline rather than its own post timeout", elapsed)
 		}
 	})
 
@@ -369,18 +430,28 @@ func TestCollector(t *testing.T) {
 		}
 	})
 
-	t.Run("closes the request body when reading it fails", func(t *testing.T) {
+	t.Run("hands a request body it cannot read on unobserved, so the call ends with the body's own error", func(t *testing.T) {
 		c := newCollector(t, "http://127.0.0.1:1", nil)
-		body := &failingBody{}
+		body := &failingBody{prefix: []byte(`{"model":`)}
+		var forwarded []byte
+		next := roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			var err error
+			forwarded, err = io.ReadAll(r.Body)
+			_ = r.Body.Close()
+			return nil, err
+		})
 		request, err := http.NewRequest(http.MethodPost, "http://provider.test/v1/chat/completions", body)
 		if err != nil {
 			t.Fatal(err)
 		}
 
-		_, err = c.Wrap(nil).RoundTrip(request)
+		_, err = c.Wrap(next).RoundTrip(request)
 
-		if err == nil || !body.closed {
-			t.Fatalf("err = %v closed = %v, want the read error and the body closed", err, body.closed)
+		if !errors.Is(err, errClientGone) || string(forwarded) != `{"model":` {
+			t.Fatalf("err = %v forwarded = %q, want the body's own error after what was read reached the upstream", err, forwarded)
+		}
+		if !body.closed || c.Unobserved() != 1 {
+			t.Fatalf("closed = %v unobserved = %d, want the body closed and the call counted as unobserved", body.closed, c.Unobserved())
 		}
 	})
 
@@ -402,12 +473,24 @@ func ExampleNew() {
 	// Output: true
 }
 
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+var errClientGone = errors.New("client went away")
+
 type failingBody struct {
+	prefix []byte
 	closed bool
 }
 
-func (b *failingBody) Read([]byte) (int, error) {
-	return 0, errors.New("client went away")
+func (b *failingBody) Read(p []byte) (int, error) {
+	if len(b.prefix) == 0 {
+		return 0, errClientGone
+	}
+	n := copy(p, b.prefix)
+	b.prefix = b.prefix[n:]
+	return n, nil
 }
 
 func (b *failingBody) Close() error {

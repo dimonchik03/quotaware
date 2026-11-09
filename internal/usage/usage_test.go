@@ -118,10 +118,12 @@ func TestDecompress(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	t.Run("passes an unencoded body through", func(t *testing.T) {
-		body, ok := usage.Decompress("", payload, 1024)
-		if !ok || !bytes.Equal(body, payload) {
-			t.Fatalf("body = %q ok = %v", body, ok)
+	t.Run("passes a body through under every encoding that means none", func(t *testing.T) {
+		for _, encoding := range []string{"", "identity", " Identity "} {
+			body, ok := usage.Decompress(encoding, payload, 1024)
+			if !ok || !bytes.Equal(body, payload) {
+				t.Fatalf("%q: body = %q ok = %v, want the body unchanged", encoding, body, ok)
+			}
 		}
 	})
 

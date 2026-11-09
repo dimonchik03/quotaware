@@ -8,12 +8,24 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
+const (
+	dialTimeout = 2 * time.Second
+	readTimeout = 2 * time.Second
+	maxRetries  = 1
+)
+
 type Redis struct {
 	client *redis.Client
 }
 
 func NewRedis(address string) *Redis {
-	return &Redis{client: redis.NewClient(&redis.Options{Addr: address})}
+	return &Redis{client: redis.NewClient(&redis.Options{
+		Addr:                  address,
+		DialTimeout:           dialTimeout,
+		ReadTimeout:           readTimeout,
+		MaxRetries:            maxRetries,
+		ContextTimeoutEnabled: true,
+	})}
 }
 
 func (r *Redis) Len(ctx context.Context, name string) (int64, error) {
