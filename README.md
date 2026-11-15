@@ -362,7 +362,12 @@ false if the caller abandoned it; a body that breaks reaches the caller with its
 error. The Python hook logs through the `quotaware_httpx` logger when deliveries
 start failing and when they recover, restarts its delivery thread in a forked child
 (Celery prefork, gunicorn `--preload`) unless it was closed, and works where the
-platform has no fork hook. Both measure header age at delivery, including time spent
+platform has no fork hook. A fork waits until each hook's delivery thread is idle, for
+at most that hook's `timeout` plus one second, so that the child does not inherit a
+lock the thread held inside a library such as OpenSSL; past that the fork goes ahead
+with a warning
+([ADR 0016](docs/adr/0016-hold-a-fork-until-the-python-hook-is-idle.md)). Both
+measure header age at delivery, including time spent
 in the collector queue. Call latency still ends when the response body finishes. `close()` returns how many
 observations were still queued when it gave up; the Go collector's `Close` waits for
 the delivery under way, drains the queue until `CloseTimeout` (10 s) has passed since
