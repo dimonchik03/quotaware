@@ -406,7 +406,10 @@ def test_close_is_idempotent_and_counts_later_observations_as_dropped(sink):
     assert Sink.received == []
 
 
-@pytest.mark.skipif(not hasattr(os, "fork") or sys.platform == "darwin", reason="needs os.fork; macOS aborts a forked child of a threaded process that touches the Objective-C runtime")
+needs_fork = pytest.mark.skipif(not hasattr(os, "fork") or sys.platform == "darwin", reason="needs os.fork; macOS aborts a forked child of a threaded process that touches the Objective-C runtime")
+
+
+@needs_fork
 def test_keeps_reporting_from_a_process_forked_after_the_hook_was_created(sink):
     hook = QuotawareHook(sink, "openai")
     pid = os.fork()
@@ -422,6 +425,101 @@ def test_keeps_reporting_from_a_process_forked_after_the_hook_was_created(sink):
 
     assert os.waitstatus_to_exitcode(status) == 0
     wait_for(lambda: len(Sink.received) == 1)
+
+
+@needs_fork
+def test_keeps_reporting_from_a_process_forked_while_the_hook_builds_its_client(sink, monkeypatch):
+    library_lock = threading.Lock()
+    entered = threading.Event()
+    build = httpx.Client.__init__
+
+    def build_under_a_library_lock(client, *args, **kwargs):
+        if threading.current_thread().name != "quotaware-collector":
+            return build(client, *args, **kwargs)
+        with library_lock:
+            entered.set()
+            time.sleep(0.2)
+            return build(client, *args, **kwargs)
+
+    monkeypatch.setattr(httpx.Client, "__init__", build_under_a_library_lock)
+    hook = QuotawareHook(sink, "openai")
+    assert entered.wait(2)
+    pid = os.fork()
+    if pid == 0:
+        code = 1
+        try:
+            chat(client_with(hook, fake_openai))
+            code = 0 if hook.close() == 0 else 1
+        finally:
+            os._exit(code)
+    _, status = os.waitpid(pid, 0)
+    hook.close()
+
+    assert os.waitstatus_to_exitcode(status) == 0
+    wait_for(lambda: len(Sink.received) == 1)
+
+
+@needs_fork
+def test_keeps_reporting_from_a_process_forked_during_a_delivery(sink, monkeypatch):
+    library_lock = threading.Lock()
+    entered = threading.Event()
+    hook = QuotawareHook(sink, "openai")
+    post = httpx.Client.post
+
+    def post_under_a_library_lock(client, url, *args, **kwargs):
+        if url != hook.endpoint:
+            return post(client, url, *args, **kwargs)
+        with library_lock:
+            entered.set()
+            time.sleep(0.2)
+            return post(client, url, *args, **kwargs)
+
+    monkeypatch.setattr(httpx.Client, "post", post_under_a_library_lock)
+    client = client_with(hook, fake_openai)
+    chat(client)
+    assert entered.wait(2)
+    pid = os.fork()
+    if pid == 0:
+        code = 1
+        try:
+            chat(client)
+            code = 0 if hook.close() == 0 else 1
+        finally:
+            os._exit(code)
+    _, status = os.waitpid(pid, 0)
+    hook.close()
+
+    assert os.waitstatus_to_exitcode(status) == 0
+    wait_for(lambda: len(Sink.received) == 2)
+
+
+@needs_fork
+def test_a_fork_goes_ahead_with_a_warning_when_a_delivery_outlasts_the_wait(sink, monkeypatch, caplog):
+    entered, release, finished = threading.Event(), threading.Event(), threading.Event()
+    hook = QuotawareHook(sink, "openai", timeout=0.05)
+    post = httpx.Client.post
+
+    def hanging_sink(client, url, *args, **kwargs):
+        if url != hook.endpoint:
+            return post(client, url, *args, **kwargs)
+        entered.set()
+        release.wait(5)
+        finished.set()
+        return httpx.Response(202)
+
+    monkeypatch.setattr(httpx.Client, "post", hanging_sink)
+    chat(client_with(hook, fake_openai))
+    assert entered.wait(2)
+    pid = os.fork()
+    if pid == 0:
+        os._exit(0)
+    still_in_flight = not finished.is_set()
+    release.set()
+    os.waitpid(pid, 0)
+    hook.close()
+
+    assert still_in_flight
+    assert sum("forking during a delivery" in record.getMessage() for record in caplog.records) == 1
 
 
 def rate_limited(request):
@@ -596,6 +694,34 @@ def test_a_hook_closed_before_a_fork_stays_closed_in_the_child(sink):
 
     assert hook.dropped == 1
     assert Sink.received == []
+
+
+def test_keeps_delivering_after_a_fork_that_began_before_the_hook_existed(sink):
+    hook = QuotawareHook(sink, "openai")
+
+    quotaware_httpx._resume_after_fork(weakref.ref(hook))
+    chat(client_with(hook, fake_openai))
+    hook.close()
+
+    assert len(Sink.received) == 1
+
+
+def test_a_hook_closed_before_a_fork_drops_the_locks_its_delivery_thread_held(sink):
+    hook = QuotawareHook(sink, "openai")
+    hook.close()
+
+    def hold_both():
+        hook._lock.acquire()
+        hook._fork_gate.acquire()
+
+    holder = threading.Thread(target=hold_both)
+    holder.start()
+    holder.join()
+
+    quotaware_httpx._restart_in_child(weakref.ref(hook))
+
+    assert hook._lock.acquire(blocking=False)
+    assert hook._fork_gate.acquire(blocking=False)
 
 
 def test_close_returns_what_is_still_queued_even_without_a_delivery_thread(sink):

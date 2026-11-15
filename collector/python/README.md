@@ -16,4 +16,7 @@ deployments without proxying the calls.
 The hook reads bodies as the caller consumes them. It captures up to 4 MiB and sends
 headers even when usage is unavailable. Header age includes time spent waiting for
 delivery. Call `hook.close()` when shutting down to drain queued observations.
+A forked child (Celery prefork, gunicorn `--preload`) gets its own delivery thread
+unless the hook was closed. The fork waits until the parent's thread is idle, for at
+most `timeout` plus one second, and then goes ahead with a warning.
 [Collector setup and metrics](https://github.com/dimonchik03/quotaware#without-the-proxy-hop).

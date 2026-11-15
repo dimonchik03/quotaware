@@ -196,9 +196,24 @@ def _succeeded(response):
     return 200 <= response.status_code < 300
 
 
+def _hold_for_fork(reference):
+    hook = reference()
+    if hook is not None:
+        hook._hold_for_fork()
+
+
+def _resume_after_fork(reference):
+    hook = reference()
+    if hook is not None:
+        hook._resume_after_fork()
+
+
 def _restart_in_child(reference):
     hook = reference()
-    if hook is None or hook._closed:
+    if hook is None:
+        return
+    if hook._closed:
+        hook._renew_locks()
         return
     hook._counts = dict.fromkeys(hook._counts, 0)
     hook._start()
@@ -221,15 +236,55 @@ class QuotawareHook:
         self._start()
         if hasattr(os, "register_at_fork"):
             reference = weakref.ref(self)
-            os.register_at_fork(after_in_child=lambda: _restart_in_child(reference))
+            os.register_at_fork(
+                before=lambda: _hold_for_fork(reference),
+                after_in_parent=lambda: _resume_after_fork(reference),
+                after_in_child=lambda: _restart_in_child(reference),
+            )
+
+    def _renew_locks(self):
+        self._lock = threading.Lock()
+        self._fork_gate = threading.Condition()
+        self._working = False
+        self._forking = set()
 
     def _start(self):
-        self._lock = threading.Lock()
+        self._renew_locks()
         self._closed = False
         self._failing = False
         self._queue = queue.Queue(maxsize=self._queue_size)
         self._thread = threading.Thread(target=self._deliver, name="quotaware-collector", daemon=True)
         self._thread.start()
+
+    def _hold_for_fork(self):
+        wait = self.timeout + 1
+        with self._fork_gate:
+            self._forking.add(threading.get_ident())
+            idle = self._fork_gate.wait_for(lambda: not self._working, timeout=wait)
+        if not idle:
+            LOGGER.warning("forking during a delivery to quotaware that did not finish in %.1f s; the child may not report", wait)
+
+    def _resume_after_fork(self):
+        with self._fork_gate:
+            self._forking.discard(threading.get_ident())
+            self._fork_gate.notify_all()
+
+    def _begin_work(self):
+        with self._fork_gate:
+            self._fork_gate.wait_for(lambda: not self._forking)
+            self._working = True
+
+    def _end_work(self):
+        with self._fork_gate:
+            self._working = False
+            self._fork_gate.notify_all()
+
+    def _next_item(self):
+        self._end_work()
+        try:
+            return self._queue.get()
+        finally:
+            self._begin_work()
 
     @property
     def dropped(self):
@@ -362,17 +417,21 @@ class QuotawareHook:
 
     def _deliver(self):
         headers = {"Authorization": f"Bearer {self.token}"} if self.token else {}
-        with httpx.Client(timeout=self.timeout, headers=headers) as client:
-            while True:
-                item = self._queue.get()
-                if item is None:
-                    return
-                observation, headers_at = item
-                observation["headers_age_ms"] = (time.monotonic() - headers_at) * 1000
-                self._post(client, observation)
-                with self._lock:
-                    if self._closed and self._queue.empty():
+        self._begin_work()
+        try:
+            with httpx.Client(timeout=self.timeout, headers=headers) as client:
+                while True:
+                    item = self._next_item()
+                    if item is None:
                         return
+                    observation, headers_at = item
+                    observation["headers_age_ms"] = (time.monotonic() - headers_at) * 1000
+                    self._post(client, observation)
+                    with self._lock:
+                        if self._closed and self._queue.empty():
+                            return
+        finally:
+            self._end_work()
 
     def _post(self, client, item):
         try:
